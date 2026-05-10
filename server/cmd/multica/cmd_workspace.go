@@ -56,10 +56,12 @@ func init() {
 	workspaceMembersCmd.Flags().String("output", "table", "Output format: table or json")
 
 	workspaceUpdateCmd.Flags().String("name", "", "New workspace name")
-	workspaceUpdateCmd.Flags().String("description", "", "New description (decodes \\n, \\r, \\t, \\\\; pipe via --description-stdin to preserve literal backslashes)")
+	workspaceUpdateCmd.Flags().String("description", "", "New description (decodes \\n, \\r, \\t, \\\\; use --description-stdin/--description-file to preserve literal backslashes)")
 	workspaceUpdateCmd.Flags().Bool("description-stdin", false, "Read description from stdin (preserves multi-line content verbatim)")
-	workspaceUpdateCmd.Flags().String("context", "", "New workspace context (decodes \\n, \\r, \\t, \\\\; pipe via --context-stdin to preserve literal backslashes)")
+	workspaceUpdateCmd.Flags().String("description-file", "", "Read description from a UTF-8 file (preserves multi-line content verbatim)")
+	workspaceUpdateCmd.Flags().String("context", "", "New workspace context (decodes \\n, \\r, \\t, \\\\; use --context-stdin/--context-file to preserve literal backslashes)")
 	workspaceUpdateCmd.Flags().Bool("context-stdin", false, "Read context from stdin (preserves multi-line content verbatim)")
+	workspaceUpdateCmd.Flags().String("context-file", "", "Read context from a UTF-8 file (preserves multi-line content verbatim)")
 	workspaceUpdateCmd.Flags().String("issue-prefix", "", "New issue prefix (uppercased server-side)")
 	workspaceUpdateCmd.Flags().String("output", "json", "Output format: table or json")
 }
@@ -159,14 +161,14 @@ func buildWorkspaceUpdateBody(cmd *cobra.Command) (map[string]any, error) {
 		v, _ := cmd.Flags().GetString("name")
 		body["name"] = v
 	}
-	if cmd.Flags().Changed("description") || cmd.Flags().Changed("description-stdin") {
+	if cmd.Flags().Changed("description") || cmd.Flags().Changed("description-stdin") || cmd.Flags().Changed("description-file") {
 		desc, _, err := resolveTextFlag(cmd, "description")
 		if err != nil {
 			return nil, err
 		}
 		body["description"] = desc
 	}
-	if cmd.Flags().Changed("context") || cmd.Flags().Changed("context-stdin") {
+	if cmd.Flags().Changed("context") || cmd.Flags().Changed("context-stdin") || cmd.Flags().Changed("context-file") {
 		ctxText, _, err := resolveTextFlag(cmd, "context")
 		if err != nil {
 			return nil, err

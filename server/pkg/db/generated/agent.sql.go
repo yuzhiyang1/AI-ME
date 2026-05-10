@@ -14,7 +14,7 @@ import (
 const archiveAgent = `-- name: ArchiveAgent :one
 UPDATE agent SET archived_at = now(), archived_by = $2, updated_at = now()
 WHERE id = $1
-RETURNING id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model
+RETURNING id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model, default_code_context
 `
 
 type ArchiveAgentParams struct {
@@ -47,6 +47,7 @@ func (q *Queries) ArchiveAgent(ctx context.Context, arg ArchiveAgentParams) (Age
 		&i.CustomArgs,
 		&i.McpConfig,
 		&i.Model,
+		&i.DefaultCodeContext,
 	)
 	return i, err
 }
@@ -156,7 +157,7 @@ RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, c
 
 // Cancels active tasks belonging to a chat session. Called from
 // DeleteChatSession so the daemon doesn't keep running work whose result
-// has nowhere to land. Must run BEFORE the chat_session row is deleted —
+// has nowhere to land. Must run BEFORE the chat_session row is deleted 鈥?
 // the FK ON DELETE SET NULL would otherwise nullify chat_session_id and we
 // could no longer reach those tasks.
 func (q *Queries) CancelAgentTasksByChatSession(ctx context.Context, chatSessionID pgtype.UUID) ([]AgentTaskQueue, error) {
@@ -415,7 +416,7 @@ RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, c
 // issue in parallel while preventing a single agent from running duplicate tasks.
 // Chat tasks (issue_id IS NULL) use chat_session_id for serialization instead.
 // Quick-create tasks have no issue / chat / autopilot link, so they serialize on
-// "any other quick-create-shaped task" (all four FKs NULL) for the same agent —
+// "any other quick-create-shaped task" (all four FKs NULL) for the same agent 鈥?
 // otherwise a user mashing the create button could fire concurrent quick-creates
 // whose completion lookup would race over "most recent issue by this agent".
 func (q *Queries) ClaimAgentTask(ctx context.Context, agentID pgtype.UUID) (AgentTaskQueue, error) {
@@ -453,7 +454,7 @@ func (q *Queries) ClaimAgentTask(ctx context.Context, agentID pgtype.UUID) (Agen
 const clearAgentMcpConfig = `-- name: ClearAgentMcpConfig :one
 UPDATE agent SET mcp_config = NULL, updated_at = now()
 WHERE id = $1
-RETURNING id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model
+RETURNING id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model, default_code_context
 `
 
 func (q *Queries) ClearAgentMcpConfig(ctx context.Context, id pgtype.UUID) (Agent, error) {
@@ -481,6 +482,43 @@ func (q *Queries) ClearAgentMcpConfig(ctx context.Context, id pgtype.UUID) (Agen
 		&i.CustomArgs,
 		&i.McpConfig,
 		&i.Model,
+		&i.DefaultCodeContext,
+	)
+	return i, err
+}
+
+const clearAgentDefaultCodeContext = `-- name: ClearAgentDefaultCodeContext :one
+UPDATE agent SET default_code_context = NULL, updated_at = now()
+WHERE id = $1
+RETURNING id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model, default_code_context
+`
+
+func (q *Queries) ClearAgentDefaultCodeContext(ctx context.Context, id pgtype.UUID) (Agent, error) {
+	row := q.db.QueryRow(ctx, clearAgentDefaultCodeContext, id)
+	var i Agent
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Name,
+		&i.AvatarUrl,
+		&i.RuntimeMode,
+		&i.RuntimeConfig,
+		&i.Visibility,
+		&i.Status,
+		&i.MaxConcurrentTasks,
+		&i.OwnerID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.Description,
+		&i.RuntimeID,
+		&i.Instructions,
+		&i.ArchivedAt,
+		&i.ArchivedBy,
+		&i.CustomEnv,
+		&i.CustomArgs,
+		&i.McpConfig,
+		&i.Model,
+		&i.DefaultCodeContext,
 	)
 	return i, err
 }
@@ -552,9 +590,9 @@ const createAgent = `-- name: CreateAgent :one
 INSERT INTO agent (
     workspace_id, name, description, avatar_url, runtime_mode,
     runtime_config, runtime_id, visibility, max_concurrent_tasks, owner_id,
-    instructions, custom_env, custom_args, mcp_config, model
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-RETURNING id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model
+    instructions, custom_env, custom_args, mcp_config, model, default_code_context
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+RETURNING id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model, default_code_context
 `
 
 type CreateAgentParams struct {
@@ -573,6 +611,7 @@ type CreateAgentParams struct {
 	CustomArgs         []byte      `json:"custom_args"`
 	McpConfig          []byte      `json:"mcp_config"`
 	Model              pgtype.Text `json:"model"`
+	DefaultCodeContext []byte      `json:"default_code_context"`
 }
 
 func (q *Queries) CreateAgent(ctx context.Context, arg CreateAgentParams) (Agent, error) {
@@ -592,6 +631,7 @@ func (q *Queries) CreateAgent(ctx context.Context, arg CreateAgentParams) (Agent
 		arg.CustomArgs,
 		arg.McpConfig,
 		arg.Model,
+		arg.DefaultCodeContext,
 	)
 	var i Agent
 	err := row.Scan(
@@ -616,6 +656,7 @@ func (q *Queries) CreateAgent(ctx context.Context, arg CreateAgentParams) (Agent
 		&i.CustomArgs,
 		&i.McpConfig,
 		&i.Model,
+		&i.DefaultCodeContext,
 	)
 	return i, err
 }
@@ -827,7 +868,7 @@ type ExpireStaleQueuedTasksParams struct {
 // transition the same row out of 'queued'. We protect against that two
 // ways:
 //  1. The CTE selects victims with FOR UPDATE SKIP LOCKED so a row that is
-//     currently being claimed (or otherwise locked) is skipped — no lock
+//     currently being claimed (or otherwise locked) is skipped 鈥?no lock
 //     contention with the dispatch path, and we won't queue up behind it.
 //  2. The outer UPDATE re-checks status='queued' AND the TTL predicate at
 //     apply time. If a daemon claimed the row between selection and update
@@ -836,7 +877,7 @@ type ExpireStaleQueuedTasksParams struct {
 //     so we cannot clobber an in-flight task.
 //
 // Capped via LIMIT inside the CTE so a single sweep tick cannot monopolise
-// the DB when the backlog is large — the sweeper drains the rest on
+// the DB when the backlog is large 鈥?the sweeper drains the rest on
 // subsequent ticks.
 func (q *Queries) ExpireStaleQueuedTasks(ctx context.Context, arg ExpireStaleQueuedTasksParams) ([]AgentTaskQueue, error) {
 	rows, err := q.db.Query(ctx, expireStaleQueuedTasks, arg.TtlSecs, arg.MaxPerTick)
@@ -1013,7 +1054,7 @@ func (q *Queries) FailStaleTasks(ctx context.Context, arg FailStaleTasksParams) 
 }
 
 const getAgent = `-- name: GetAgent :one
-SELECT id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model FROM agent
+SELECT id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model, default_code_context FROM agent
 WHERE id = $1
 `
 
@@ -1042,12 +1083,13 @@ func (q *Queries) GetAgent(ctx context.Context, id pgtype.UUID) (Agent, error) {
 		&i.CustomArgs,
 		&i.McpConfig,
 		&i.Model,
+		&i.DefaultCodeContext,
 	)
 	return i, err
 }
 
 const getAgentInWorkspace = `-- name: GetAgentInWorkspace :one
-SELECT id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model FROM agent
+SELECT id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model, default_code_context FROM agent
 WHERE id = $1 AND workspace_id = $2
 `
 
@@ -1081,6 +1123,7 @@ func (q *Queries) GetAgentInWorkspace(ctx context.Context, arg GetAgentInWorkspa
 		&i.CustomArgs,
 		&i.McpConfig,
 		&i.Model,
+		&i.DefaultCodeContext,
 	)
 	return i, err
 }
@@ -1156,7 +1199,7 @@ type GetLastTaskSessionRow struct {
 // daemon restart, runtime offline, or sweeper timeout), and the daemon pins
 // the resume pointer mid-flight via UpdateAgentTaskSession. Without this,
 // an auto-retry of a mid-run failure would silently start a fresh
-// conversation and lose the in-flight context — exactly what MUL-1128's B
+// conversation and lose the in-flight context 鈥?exactly what MUL-1128's B
 // branch is meant to fix.
 //
 // Manual rerun (TaskService.RerunIssue) does NOT take this path: it sets
@@ -1210,8 +1253,8 @@ type GetWorkspaceAgentActivity30dRow struct {
 
 // Returns per-agent daily activity buckets for the last 30 days. Single
 // workspace-wide read backs both surfaces:
-//   - Agents list ACTIVITY column — uses only the trailing 7 buckets
-//   - Agent detail "Last 30 days" panel — uses the full 30
+//   - Agents list ACTIVITY column 鈥?uses only the trailing 7 buckets
+//   - Agent detail "Last 30 days" panel 鈥?uses the full 30
 //
 // 30 days contains 7 days, so one fetch + a client-side .slice(-7) wins
 // over fetching twice. Days with no completion produce no row; the
@@ -1219,7 +1262,7 @@ type GetWorkspaceAgentActivity30dRow struct {
 //
 // Anchored on completed_at (not created_at) because the sparkline answers
 // "what did this agent produce?" not "what was queued at it?". A task that's
-// still in flight has no completed_at and contributes nothing here — that's
+// still in flight has no completed_at and contributes nothing here 鈥?that's
 // correct: in-flight tasks are surfaced via the live presence indicator,
 // not the historical trend.
 func (q *Queries) GetWorkspaceAgentActivity30d(ctx context.Context, workspaceID pgtype.UUID) ([]GetWorkspaceAgentActivity30dRow, error) {
@@ -1363,7 +1406,7 @@ ORDER BY created_at DESC
 `
 
 // Backs the issue-detail "agent live" banner. Includes 'queued' so the
-// banner shows up the moment a task is enqueued — not only after a runtime
+// banner shows up the moment a task is enqueued 鈥?not only after a runtime
 // claims it. The queued window can be long when the runtime is offline or
 // busy on a prior task, and a silent UI during that window looks like the
 // platform never received the trigger.
@@ -1464,7 +1507,7 @@ func (q *Queries) ListAgentTasks(ctx context.Context, agentID pgtype.UUID) ([]Ag
 }
 
 const listAgents = `-- name: ListAgents :many
-SELECT id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model FROM agent
+SELECT id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model, default_code_context FROM agent
 WHERE workspace_id = $1 AND archived_at IS NULL
 ORDER BY created_at ASC
 `
@@ -1500,6 +1543,7 @@ func (q *Queries) ListAgents(ctx context.Context, workspaceID pgtype.UUID) ([]Ag
 			&i.CustomArgs,
 			&i.McpConfig,
 			&i.Model,
+			&i.DefaultCodeContext,
 		); err != nil {
 			return nil, err
 		}
@@ -1512,7 +1556,7 @@ func (q *Queries) ListAgents(ctx context.Context, workspaceID pgtype.UUID) ([]Ag
 }
 
 const listAllAgents = `-- name: ListAllAgents :many
-SELECT id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model FROM agent
+SELECT id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model, default_code_context FROM agent
 WHERE workspace_id = $1
 ORDER BY created_at ASC
 `
@@ -1548,6 +1592,7 @@ func (q *Queries) ListAllAgents(ctx context.Context, workspaceID pgtype.UUID) ([
 			&i.CustomArgs,
 			&i.McpConfig,
 			&i.Model,
+			&i.DefaultCodeContext,
 		); err != nil {
 			return nil, err
 		}
@@ -1619,7 +1664,7 @@ ORDER BY priority DESC, created_at ASC
 // Returns rows the runtime can attempt to claim. Status is restricted to
 // 'queued' (in contrast to ListPendingTasksByRuntime which also includes
 // 'dispatched') because dispatched rows are by definition already owned
-// and cannot be re-claimed — including them in the candidate list pads
+// and cannot be re-claimed 鈥?including them in the candidate list pads
 // the result with rows that always lose the per-(issue, agent) race in
 // ClaimAgentTask, wasting CPU and a SELECT every poll cycle when the
 // runtime is busy on a long-running task. Backed by the partial index
@@ -1739,11 +1784,11 @@ SELECT t.id, t.agent_id, t.issue_id, t.status, t.priority, t.dispatched_at, t.st
 `
 
 // Returns the tasks needed to derive each agent's current presence:
-//   - All active tasks (queued / dispatched / running) — for working signal + counts
-//   - Each agent's most recent OUTCOME task (completed / failed) — for sticky
+//   - All active tasks (queued / dispatched / running) 鈥?for working signal + counts
+//   - Each agent's most recent OUTCOME task (completed / failed) 鈥?for sticky
 //     failed signal
 //
-// The front-end picks "active wins, else latest outcome" — see derive-presence.ts.
+// The front-end picks "active wins, else latest outcome" 鈥?see derive-presence.ts.
 //
 // Cancelled tasks are excluded from the outcome half on purpose: cancel is a
 // procedural signal ("attempt aborted"), not an outcome. It tells us nothing
@@ -1868,7 +1913,7 @@ SET status = CASE WHEN EXISTS (
 ) THEN 'working' ELSE 'idle' END,
     updated_at = now()
 WHERE a.id = $1
-RETURNING id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model
+RETURNING id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model, default_code_context
 `
 
 func (q *Queries) RefreshAgentStatusFromTasks(ctx context.Context, id pgtype.UUID) (Agent, error) {
@@ -1896,6 +1941,7 @@ func (q *Queries) RefreshAgentStatusFromTasks(ctx context.Context, id pgtype.UUI
 		&i.CustomArgs,
 		&i.McpConfig,
 		&i.Model,
+		&i.DefaultCodeContext,
 	)
 	return i, err
 }
@@ -1903,7 +1949,7 @@ func (q *Queries) RefreshAgentStatusFromTasks(ctx context.Context, id pgtype.UUI
 const restoreAgent = `-- name: RestoreAgent :one
 UPDATE agent SET archived_at = NULL, archived_by = NULL, updated_at = now()
 WHERE id = $1
-RETURNING id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model
+RETURNING id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model, default_code_context
 `
 
 func (q *Queries) RestoreAgent(ctx context.Context, id pgtype.UUID) (Agent, error) {
@@ -1931,6 +1977,7 @@ func (q *Queries) RestoreAgent(ctx context.Context, id pgtype.UUID) (Agent, erro
 		&i.CustomArgs,
 		&i.McpConfig,
 		&i.Model,
+		&i.DefaultCodeContext,
 	)
 	return i, err
 }
@@ -1990,9 +2037,10 @@ UPDATE agent SET
     custom_args = COALESCE($13, custom_args),
     mcp_config = COALESCE($14, mcp_config),
     model = COALESCE($15, model),
+    default_code_context = COALESCE($16, default_code_context),
     updated_at = now()
 WHERE id = $1
-RETURNING id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model
+RETURNING id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model, default_code_context
 `
 
 type UpdateAgentParams struct {
@@ -2011,6 +2059,7 @@ type UpdateAgentParams struct {
 	CustomArgs         []byte      `json:"custom_args"`
 	McpConfig          []byte      `json:"mcp_config"`
 	Model              pgtype.Text `json:"model"`
+	DefaultCodeContext []byte      `json:"default_code_context"`
 }
 
 func (q *Queries) UpdateAgent(ctx context.Context, arg UpdateAgentParams) (Agent, error) {
@@ -2030,6 +2079,7 @@ func (q *Queries) UpdateAgent(ctx context.Context, arg UpdateAgentParams) (Agent
 		arg.CustomArgs,
 		arg.McpConfig,
 		arg.Model,
+		arg.DefaultCodeContext,
 	)
 	var i Agent
 	err := row.Scan(
@@ -2054,6 +2104,7 @@ func (q *Queries) UpdateAgent(ctx context.Context, arg UpdateAgentParams) (Agent
 		&i.CustomArgs,
 		&i.McpConfig,
 		&i.Model,
+		&i.DefaultCodeContext,
 	)
 	return i, err
 }
@@ -2061,7 +2112,7 @@ func (q *Queries) UpdateAgent(ctx context.Context, arg UpdateAgentParams) (Agent
 const updateAgentStatus = `-- name: UpdateAgentStatus :one
 UPDATE agent SET status = $2, updated_at = now()
 WHERE id = $1
-RETURNING id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model
+RETURNING id, workspace_id, name, avatar_url, runtime_mode, runtime_config, visibility, status, max_concurrent_tasks, owner_id, created_at, updated_at, description, runtime_id, instructions, archived_at, archived_by, custom_env, custom_args, mcp_config, model, default_code_context
 `
 
 type UpdateAgentStatusParams struct {
@@ -2094,6 +2145,7 @@ func (q *Queries) UpdateAgentStatus(ctx context.Context, arg UpdateAgentStatusPa
 		&i.CustomArgs,
 		&i.McpConfig,
 		&i.Model,
+		&i.DefaultCodeContext,
 	)
 	return i, err
 }

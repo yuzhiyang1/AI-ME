@@ -29,8 +29,14 @@ import {
 } from "@multica/core/runtimes";
 import { useFileUpload } from "@multica/core/hooks/use-file-upload";
 import { formatShortcut, modKey, enterKey } from "@multica/core/platform";
-import type { Agent } from "@multica/core/types";
+import {
+  defaultCodeContext,
+  isLocalPathCodeContext,
+  type Agent,
+  type CodeContext,
+} from "@multica/core/types";
 import { ActorAvatar } from "../common/actor-avatar";
+import { CodeContextPicker, getCodeContextError } from "../common/code-context-picker";
 import { PillButton } from "../common/pill-button";
 import { ProjectPicker } from "../projects/components/project-picker";
 import { canAssignAgent } from "../issues/components/pickers/assignee-picker";
@@ -45,14 +51,14 @@ import {
 import { FileUploadButton } from "@multica/ui/components/common/file-upload-button";
 import { useT } from "../i18n";
 
-// AgentCreatePanel — agent-mode body of the create-issue dialog. Renders
+// AgentCreatePanel —agent-mode body of the create-issue dialog. Renders
 // only the inner content; the surrounding `<Dialog>` AND `<DialogContent>`
 // (Portal + Overlay + Popup) are owned by CreateIssueDialog so mode-switching
 // swaps only this body. Lifting the Portal is what eliminates the close→open
-// animation flash — Base UI replays Popup enter/exit when DialogContent is
+// animation flash —Base UI replays Popup enter/exit when DialogContent is
 // remounted, even inside a still-open Dialog Root.
 //
-// `onSwitchMode` is wired by the shell — the panel calls it with an optional
+// `onSwitchMode` is wired by the shell —the panel calls it with an optional
 // carry payload (currently `project_id`). The shared draft store carries the
 // description + agent across the agent→manual flip; project_id rides through
 // the same carry channel manual→agent uses, so the manual panel reads it
@@ -134,7 +140,7 @@ export function AgentCreatePanel({
     [visibleAgents, agentId],
   );
 
-  // Project selection — defaults to the last project the user picked in this
+  // Project selection —defaults to the last project the user picked in this
   // workspace. `data?.project_id` lets the modal opener seed a one-shot
   // override (e.g. a future "+ Issue" button on a project page); it does NOT
   // replace the persisted default.
@@ -144,7 +150,7 @@ export function AgentCreatePanel({
   });
 
   // Stale-id sweep. Once the project list query has actually resolved
-  // (`isSuccess` — distinct from "data is the empty default during loading"),
+  // (`isSuccess` —distinct from "data is the empty default during loading"),
   // a `projectId` that isn't in the list means the project was deleted in
   // another session. Clear BOTH local state and the persisted preference;
   // dropping only local state would leave the deleted UUID in `lastProjectId`,
@@ -157,13 +163,13 @@ export function AgentCreatePanel({
   }, [projectsLoaded, projects, projectId, lastProjectId, setLastProjectId]);
 
   // Daemon CLI version gate. The agent-create flow needs the runtime's
-  // bundled multica CLI to be ≥ MIN_QUICK_CREATE_CLI_VERSION; older
+  // bundled multica CLI to be ≥MIN_QUICK_CREATE_CLI_VERSION; older
   // daemons handle attachments and partial-failure retries incorrectly
   // (see PR #1851 / MUL-1496). Pre-check on the picker so the user gets
   // immediate feedback instead of waiting for the inbox failure; the
   // server re-validates as the trust boundary. Dev-built daemons
   // (git-describe shape) are exempted inside checkQuickCreateCliVersion
-  // — frontend and server share the same signal there, so they agree by
+  // —frontend and server share the same signal there, so they agree by
   // construction across web/desktop/staging without comparing env flags.
   const { data: runtimes = [] } = useQuery(runtimeListOptions(wsId));
   const selectedRuntime = useMemo(
@@ -180,7 +186,7 @@ export function AgentCreatePanel({
   const versionBlocked = versionCheck.state !== "ok";
 
   const initialPrompt = (data?.prompt as string) || promptDraft;
-  // The editor is uncontrolled — we read the latest markdown via the ref at
+  // The editor is uncontrolled —we read the latest markdown via the ref at
   // submit/switch time. `hasContent` mirrors emptiness so the Create button
   // can disable correctly without a controlled-input rerender on every keystroke.
   const editorRef = useRef<ContentEditorRef>(null);
@@ -189,6 +195,9 @@ export function AgentCreatePanel({
   const [justSent, setJustSent] = useState(false);
   const [sentCount, setSentCount] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [codeContext, setCodeContext] = useState<CodeContext>(() =>
+    defaultCodeContext(),
+  );
 
   // Image paste/drop support: route uploads through the same helper Advanced
   // uses, so users can paste screenshots straight into the prompt and the
@@ -201,6 +210,7 @@ export function AgentCreatePanel({
   const { isDragOver, dropZoneProps } = useFileDropZone({
     onDrop: (files) => files.forEach((f) => editorRef.current?.uploadFile(f)),
   });
+  const codeContextErrorType = getCodeContextError(codeContext, selectedAgent);
 
   useEffect(() => {
     // Defer focus so it lands after the dialog's focus trap has settled —
@@ -212,7 +222,16 @@ export function AgentCreatePanel({
 
   const submit = async () => {
     const md = editorRef.current?.getMarkdown()?.trim() ?? "";
-    if (!md || !agentId || submitting || versionBlocked || uploading) return;
+    if (
+      !md ||
+      !agentId ||
+      submitting ||
+      versionBlocked ||
+      uploading ||
+      codeContextErrorType
+    ) {
+      return;
+    }
     setSubmitting(true);
     setError(null);
     try {
@@ -220,6 +239,7 @@ export function AgentCreatePanel({
         agent_id: agentId,
         prompt: md,
         project_id: projectId ?? undefined,
+        code_context: isLocalPathCodeContext(codeContext) ? codeContext : undefined,
       });
       setLastAgentId(agentId);
       setLastProjectId(projectId);
@@ -229,10 +249,11 @@ export function AgentCreatePanel({
         duration: 4000,
       });
       if (keepOpen) {
-        // Stay open for continuous creation — clear the editor so the
+        // Stay open for continuous creation —clear the editor so the
         // user can immediately type the next prompt.
         editorRef.current?.clearContent();
         setHasContent(false);
+        setCodeContext(defaultCodeContext());
         setSentCount((c) => c + 1);
         setJustSent(true);
         setTimeout(() => setJustSent(false), 1500);
@@ -312,7 +333,7 @@ export function AgentCreatePanel({
             <ChevronRight className="size-3 text-muted-foreground/50" />
             <span className="font-medium">{t(($) => $.create_issue.agent_breadcrumb)}</span>
           </div>
-          {/* Native `title` instead of Base UI Tooltip — Tooltip opens on
+          {/* Native `title` instead of Base UI Tooltip —Tooltip opens on
               keyboard focus, and the dialog's focus trap briefly lands focus
               on the first focusable element on mount, causing the tooltip to
               auto-pop every open. Same workaround applies to expand. */}
@@ -405,8 +426,26 @@ export function AgentCreatePanel({
                 })}
           </div>
         )}
+        <CodeContextPicker
+          value={codeContext}
+          onChange={setCodeContext}
+          agent={selectedAgent}
+          disabled={submitting}
+          copy={{
+            label: t(($) => $.create_issue.code_context.label),
+            defaultRepo: t(($) => $.create_issue.code_context.default_repo),
+            localPath: t(($) => $.create_issue.code_context.local_path),
+            desktopChoose: t(($) => $.create_issue.code_context.desktop_choose),
+            webPlaceholder: t(($) => $.create_issue.code_context.web_placeholder),
+            desktopHint: t(($) => $.create_issue.code_context.desktop_hint),
+            webHint: t(($) => $.create_issue.code_context.web_hint),
+            runtimeBlocked: t(($) => $.create_issue.code_context.runtime_blocked),
+            invalidPath: t(($) => $.create_issue.code_context.invalid_path),
+          }}
+        />
 
-        {/* Prompt — same rich editor Advanced uses, so paste/drop images,
+
+        {/* Prompt —same rich editor Advanced uses, so paste/drop images,
             mentions, and formatting all work. The dropZone wrapper enables
             drag-and-drop file uploads alongside paste. */}
         {/* `flex-1 min-h-0 overflow-y-auto` so the editor area absorbs the
@@ -436,7 +475,7 @@ export function AgentCreatePanel({
           <div className="px-5 pb-2 text-xs text-destructive">{error}</div>
         )}
 
-        {/* Property toolbar — mirrors the manual panel's pill row so the
+        {/* Property toolbar —mirrors the manual panel's pill row so the
             project pill sits in the same place across both modes. Agent mode
             owns only the project (status / priority / assignee / due-date are
             inferred from the prompt), so it's a single pill. The pick is
@@ -486,7 +525,7 @@ export function AgentCreatePanel({
             <Button
               size="sm"
               onClick={submit}
-              disabled={!hasContent || !agentId || submitting || versionBlocked || uploading}
+              disabled={!hasContent || !agentId || submitting || versionBlocked || uploading || !!codeContextErrorType}
               title={
                 versionBlocked
                   ? t(($) => $.create_issue.agent.version_blocked_tooltip, { min: versionCheck.min })
@@ -503,3 +542,4 @@ export function AgentCreatePanel({
     </>
   );
 }
+

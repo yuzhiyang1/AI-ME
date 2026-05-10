@@ -51,9 +51,14 @@ func buildQuickCreatePrompt(task Task) string {
 
 	// description — the core optimization
 	b.WriteString("- **description**: The description is the executing agent's primary context. Aim for high fidelity — they should grasp the user's intent as if they had read the raw input themselves. Use a two-section structure:\n\n")
+	b.WriteString("  Delivery rule: because this description is multi-line and may contain non-ASCII text, write the description to a UTF-8 temp file and pass it with `--description-file <path>`; do not put it inline in `--description`. If you pipe with `--description-stdin` on Windows PowerShell, set `$OutputEncoding = [System.Text.UTF8Encoding]::new($false)` first, otherwise Chinese/Japanese/etc. can be converted to `?`.\n\n")
 	b.WriteString("  1. **User request** — Faithfully restate what the user wants in their own words. Preserve specific names, identifiers, file paths, code snippets, and technical terms verbatim. Strip non-spec material before writing it (this is removal, not paraphrasing): verbal routing wrappers about creating the issue (e.g. \"create an issue\", \"分配给 X\") and pure conversational fillers (e.g. \"对吧？\"). When in doubt, keep it.\n\n")
 	b.WriteString("     CC exception: `multica issue create` has no `--subscriber` flag, and the platform auto-subscribes members whose `[@Name](mention://member/<uuid>)` link appears in the description. When the user wrote \"cc @Y\", strip the verbal \"cc\" wrapper from the User request body and append a final `CC: <mention link(s)>` line to the description so the cc routing still fires.\n\n")
-	b.WriteString("  2. **Context** — include ONLY when the input cited external resources AND you successfully fetched them AND they produced verifiable facts worth recording. Summarize facts only (e.g. \"PR #45 changes auth to JWT\"), not interpretation or unsolicited reference implementations. If you have nothing factual to add, omit the section entirely — never use it as an apology log for resources you could not fetch.\n\n")
+	if task.CodeContext.Type == "local_path" && task.CodeContext.Path != "" {
+		fmt.Fprintf(&b, "  2. **Context** — include this section. State that the issue is pinned to local project directory `%s` and that the executing agent should inspect the mounted `repo/` directory. Do NOT write that the workspace has no code repository or that project code is unavailable; this local directory is the project code context. You may also add fetched external-resource facts when the input cited external resources and they produced verifiable facts worth recording.\n\n", task.CodeContext.Path)
+	} else {
+		b.WriteString("  2. **Context** — include ONLY when the input cited external resources AND you successfully fetched them AND they produced verifiable facts worth recording. Summarize facts only (e.g. \"PR #45 changes auth to JWT\"), not interpretation or unsolicited reference implementations. If you have nothing factual to add, omit the section entirely — never use it as an apology log for resources you could not fetch.\n\n")
+	}
 	b.WriteString("  Hard rules: never invent requirements, implementation details, or acceptance criteria the user did not express; never reduce multi-sentence input to a single vague sentence; never echo the title.\n\n")
 
 	// priority
@@ -89,12 +94,15 @@ func buildQuickCreatePrompt(task Task) string {
 	} else {
 		b.WriteString("- **project**: omit. The platform will route the issue to the workspace default.\n")
 	}
+	if task.CodeContext.Type == "local_path" && task.CodeContext.Path != "" {
+		fmt.Fprintf(&b, "- **local code directory**: required for this run. Pass `--local-path %q` so the created issue preserves the local code directory the user selected.\n", task.CodeContext.Path)
+	}
 	b.WriteString("- **status**: omit (defaults to `todo`).\n")
 	b.WriteString("- **attachments**: do NOT pass `--attachment`. The flag only accepts LOCAL file paths. Any image URL in the user input is already markdown — keep it inline in `--description` instead.\n\n")
 
 	// output format
 	b.WriteString("Output format:\n")
-	b.WriteString("- Run exactly one `multica issue create` invocation. Do not retry for any reason — even on non-zero exit. The issue may already exist; another attempt would create a duplicate.\n")
+	b.WriteString("- Run exactly one `multica issue create` invocation, using `--description-file <path>` for the body. Do not retry for any reason — even on non-zero exit. The issue may already exist; another attempt would create a duplicate.\n")
 	b.WriteString("- After success, print exactly one line: `Created MUL-<n>: <title>` and exit. No commentary, no follow-up tool calls.\n")
 	b.WriteString("- Do NOT call `multica issue get` or `multica issue comment add` — there is no issue to query or comment on.\n")
 	b.WriteString("- On CLI error, exit with the error as the only output. The platform writes a failure notification automatically.\n")

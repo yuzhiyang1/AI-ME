@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useMemo } from "react";
-import { Cloud, ChevronDown, Globe, Lock, Loader2 } from "lucide-react";
+import { Cloud, ChevronDown, FolderOpen, Globe, Lock, Loader2 } from "lucide-react";
 import { ProviderLogo } from "../../runtimes/components/provider-logo";
 import { ActorAvatar } from "../../common/actor-avatar";
 import { ModelDropdown } from "./model-dropdown";
@@ -11,6 +11,7 @@ import type {
   RuntimeDevice,
   MemberWithUser,
   CreateAgentRequest,
+  CodeContext,
 } from "@multica/core/types";
 import { isImeComposing } from "@multica/core/utils";
 import {
@@ -39,6 +40,22 @@ import { CharCounter } from "./char-counter";
 import { useT } from "../../i18n";
 
 type RuntimeFilter = "mine" | "all";
+
+function isDesktopApp(): boolean {
+  if (typeof window === "undefined") return false;
+  return Boolean((window as typeof window & { desktopAPI?: unknown }).desktopAPI);
+}
+
+async function pickDesktopDirectory(): Promise<string | null> {
+  if (typeof window === "undefined") return null;
+  const desktopAPI = (
+    window as typeof window & {
+      desktopAPI?: { selectDirectory?: () => Promise<string | null> };
+    }
+  ).desktopAPI;
+  if (!desktopAPI?.selectDirectory) return null;
+  return desktopAPI.selectDirectory();
+}
 
 export function CreateAgentDialog({
   runtimes,
@@ -74,6 +91,9 @@ export function CreateAgentDialog({
     template?.visibility ?? "private",
   );
   const [model, setModel] = useState(template?.model ?? "");
+  const [defaultCodeContext, setDefaultCodeContext] = useState<CodeContext>(
+    template?.default_code_context ?? { type: "default_repo" },
+  );
   const [creating, setCreating] = useState(false);
   const [runtimeOpen, setRuntimeOpen] = useState(false);
   const [runtimeFilter, setRuntimeFilter] = useState<RuntimeFilter>("mine");
@@ -110,6 +130,12 @@ export function CreateAgentDialog({
 
   const selectedRuntime = runtimes.find((d) => d.id === selectedRuntimeId) ?? null;
 
+  useEffect(() => {
+    if (selectedRuntime?.runtime_mode === "cloud" && defaultCodeContext.type === "local_path") {
+      setDefaultCodeContext({ type: "default_repo" });
+    }
+  }, [defaultCodeContext.type, selectedRuntime?.runtime_mode]);
+
   const handleSubmit = async () => {
     if (!name.trim() || !selectedRuntime) return;
     setCreating(true);
@@ -125,6 +151,7 @@ export function CreateAgentDialog({
         runtime_id: selectedRuntime.id,
         visibility,
         model: model.trim() || undefined,
+        default_code_context: defaultCodeContext,
       };
       if (template) {
         if (template.instructions) data.instructions = template.instructions;
@@ -355,6 +382,12 @@ export function CreateAgentDialog({
           />
         </div>
 
+          <DefaultWorkspaceField
+            value={defaultCodeContext}
+            runtimeMode={selectedRuntime?.runtime_mode}
+            onChange={setDefaultCodeContext}
+          />
+
         <DialogFooter>
           <Button variant="ghost" onClick={onClose}>
             {t(($) => $.create_dialog.cancel)}
@@ -368,5 +401,93 @@ export function CreateAgentDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function DefaultWorkspaceField({
+  value,
+  runtimeMode,
+  onChange,
+}: {
+  value: CodeContext;
+  runtimeMode?: "local" | "cloud";
+  onChange: (value: CodeContext) => void;
+}) {
+  const isDesktop = isDesktopApp();
+  const localMode = value.type === "local_path";
+  const localDisabled = runtimeMode !== "local";
+
+  const chooseDirectory = async () => {
+    const selected = await pickDesktopDirectory();
+    if (!selected) return;
+    onChange({ type: "local_path", path: selected });
+  };
+
+  return (
+    <div>
+      <Label className="text-xs text-muted-foreground">Default workspace</Label>
+      <div className="mt-1.5 rounded-lg border bg-card/40 p-3">
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <div className="text-sm font-medium">
+              {localMode ? "Local directory" : "Default repo"}
+            </div>
+            <div className="text-xs text-muted-foreground">
+              Used when issues assigned to this agent do not choose a workspace.
+            </div>
+          </div>
+          <div className="flex shrink-0 items-center gap-1 rounded-md bg-muted p-0.5 text-xs">
+            <button
+              type="button"
+              onClick={() => onChange({ type: "default_repo" })}
+              className={`rounded px-2 py-1 transition-colors ${
+                !localMode ? "bg-background text-foreground shadow-sm" : "text-muted-foreground"
+              }`}
+            >
+              Repo
+            </button>
+            <button
+              type="button"
+              disabled={localDisabled}
+              onClick={() => onChange({ type: "local_path", path: localMode ? value.path : "" })}
+              className={`rounded px-2 py-1 transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                localMode ? "bg-background text-foreground shadow-sm" : "text-muted-foreground"
+              }`}
+            >
+              Local
+            </button>
+          </div>
+        </div>
+        {localMode && (
+          <div className="mt-3 flex items-center gap-2">
+            <Input
+              value={value.path}
+              readOnly={isDesktop}
+              disabled={localDisabled}
+              onChange={(event) => onChange({ type: "local_path", path: event.target.value })}
+              placeholder="D:\\program\\code\\workSpace\\Lottery-master"
+              className="font-mono text-xs"
+            />
+            {isDesktop && (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={localDisabled}
+                onClick={() => void chooseDirectory()}
+              >
+                <FolderOpen className="size-3.5" />
+                Choose
+              </Button>
+            )}
+          </div>
+        )}
+        <p className="mt-2 text-xs text-muted-foreground">
+          {localDisabled
+            ? "Local directory defaults require a local runtime."
+            : "You can change this later on the agent detail page."}
+        </p>
+      </div>
+    </div>
   );
 }

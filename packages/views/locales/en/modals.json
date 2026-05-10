@@ -113,6 +113,18 @@
       "title": "Add sub-issue",
       "description": "Search for an issue to add as a sub-issue of the new issue"
     },
+    "code_context": {
+      "label": "Code source",
+      "default_repo": "Project / repo",
+      "local_path": "Local directory",
+      "desktop_choose": "Choose",
+      "web_placeholder": "/absolute/path/to/code",
+      "desktop_hint": "Use a folder on this machine. The agent still runs in an isolated task env with `repo/` mapped to that directory.",
+      "web_hint": "Enter an absolute path on the machine where the selected runtime is running.",
+      "runtime_blocked": "Local directory is only available for agents using a local runtime.",
+      "invalid_path": "Enter an absolute path.",
+      "session_locked": "This chat session keeps using the code source selected when it was created. Start a new session to change it."
+    },
     "agent": {
       "created_by": "Created by",
       "select_agent_aria": "Select agent",

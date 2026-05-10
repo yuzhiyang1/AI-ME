@@ -251,6 +251,10 @@ func renderQuickCreateContext(ctx TaskContextForEnv) string {
 	b.WriteString("> ")
 	b.WriteString(ctx.QuickCreatePrompt)
 	b.WriteString("\n\n")
+	if ctx.CodeContext.Type == "local_path" && ctx.CodeContext.Path != "" {
+		b.WriteString("## Code Context\n\n")
+		fmt.Fprintf(&b, "Use the local project directory mounted at `repo/` from `%s`.\n\n", ctx.CodeContext.Path)
+	}
 	if len(ctx.AgentSkills) > 0 {
 		b.WriteString("## Agent Skills\n\n")
 		for _, skill := range ctx.AgentSkills {

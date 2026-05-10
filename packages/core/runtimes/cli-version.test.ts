@@ -22,4 +22,9 @@ describe("checkQuickCreateCliVersion", () => {
     expect(checkQuickCreateCliVersion("v0.2.15-235-gdaf0e935-dirty").state).toBe("ok");
     expect(checkQuickCreateCliVersion("0.1.0-1-gabc1234").state).toBe("ok");
   });
+
+  it("treats bare commit-hash dev builds as ok", () => {
+    expect(checkQuickCreateCliVersion("88eae53").state).toBe("ok");
+    expect(checkQuickCreateCliVersion("88eae53-dirty").state).toBe("ok");
+  });
 });

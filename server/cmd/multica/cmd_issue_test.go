@@ -46,6 +46,7 @@ func newFlagTestCmd(name string) *cobra.Command {
 	c := &cobra.Command{Use: "test"}
 	c.Flags().String(name, "", "")
 	c.Flags().Bool(name+"-stdin", false, "")
+	c.Flags().String(name+"-file", "", "")
 	return c
 }
 
@@ -79,10 +80,37 @@ func TestResolveTextFlag(t *testing.T) {
 		})
 	})
 
+	t.Run("utf8 file body is preserved verbatim", func(t *testing.T) {
+		c := newFlagTestCmd("description")
+		path := t.TempDir() + string(os.PathSeparator) + "description.md"
+		body := "## User request\n\n统计工作空间中的健身笔记数量\n"
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatalf("write file: %v", err)
+		}
+		_ = c.Flags().Set("description-file", path)
+		got, ok, err := resolveTextFlag(c, "description")
+		if err != nil || !ok {
+			t.Fatalf("unexpected: ok=%v err=%v", ok, err)
+		}
+		want := "## User request\n\n统计工作空间中的健身笔记数量"
+		if got != want {
+			t.Errorf("got %q, want %q", got, want)
+		}
+	})
+
 	t.Run("inline + stdin is rejected", func(t *testing.T) {
 		c := newFlagTestCmd("description")
 		_ = c.Flags().Set("description", "inline")
 		_ = c.Flags().Set("description-stdin", "true")
+		if _, _, err := resolveTextFlag(c, "description"); err == nil {
+			t.Fatalf("expected mutually-exclusive error")
+		}
+	})
+
+	t.Run("stdin + file is rejected", func(t *testing.T) {
+		c := newFlagTestCmd("description")
+		_ = c.Flags().Set("description-stdin", "true")
+		_ = c.Flags().Set("description-file", "description.md")
 		if _, _, err := resolveTextFlag(c, "description"); err == nil {
 			t.Fatalf("expected mutually-exclusive error")
 		}

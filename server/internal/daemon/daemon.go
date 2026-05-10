@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/multica-ai/multica/server/internal/cli"
+	"github.com/multica-ai/multica/server/internal/codecontext"
 	"github.com/multica-ai/multica/server/internal/daemon/execenv"
 	"github.com/multica-ai/multica/server/internal/daemon/repocache"
 	"github.com/multica-ai/multica/server/pkg/agent"
@@ -1615,6 +1616,14 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	if task.WorkspaceID == "" {
 		return TaskResult{}, fmt.Errorf("refusing to spawn agent: task has no workspace_id (task_id=%s)", task.ID)
 	}
+	localRepoPath, err := validateLocalRepoPath(task.CodeContext)
+	if err != nil {
+		return TaskResult{
+			Status:        "blocked",
+			Comment:       err.Error(),
+			FailureReason: "agent_error",
+		}, nil
+	}
 
 	// task.Repos is the authoritative repo list for this task — when the
 	// claimed task belongs to a project with github_repo resources the server
@@ -1662,6 +1671,10 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		AutopilotSource:         task.AutopilotSource,
 		AutopilotTriggerPayload: strings.TrimSpace(string(task.AutopilotTriggerPayload)),
 		QuickCreatePrompt:       task.QuickCreatePrompt,
+		CodeContext: execenv.CodeContextForEnv{
+			Type: task.CodeContext.Type,
+			Path: localRepoPath,
+		},
 	}
 
 	// Mark candidate env roots as active before any env work so the GC loop
@@ -1695,6 +1708,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			Provider:       provider,
 			CodexVersion:   codexVersion,
 			Task:           taskCtx,
+			LocalRepoPath:  localRepoPath,
 		}, d.logger)
 		if err != nil {
 			return TaskResult{}, fmt.Errorf("prepare execution environment: %w", err)
@@ -1731,6 +1745,10 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		"MULTICA_AGENT_ID":     task.AgentID,
 		"MULTICA_TASK_ID":      task.ID,
 		"MULTICA_TASK_SLOT":    strconv.Itoa(slot),
+		// Allows the per-task multica.ps1 UTF-8 wrapper to run without requiring
+		// users to change their machine/user execution policy. This is process-
+		// scoped for the spawned agent tree only.
+		"PSExecutionPolicyPreference": "Bypass",
 	}
 	if task.AutopilotRunID != "" {
 		agentEnv["MULTICA_AUTOPILOT_RUN_ID"] = task.AutopilotRunID
@@ -1747,11 +1765,17 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	}
 	// Ensure the multica CLI is on PATH inside the agent's environment.
 	// Some runtimes (e.g. Codex) run in an isolated sandbox that may not
-	// inherit the daemon's PATH. Prepend the directory of the running
-	// multica binary so that `multica` commands in the agent always resolve.
+	// inherit the daemon's PATH. Prepend execenv's helper directory first:
+	// on Windows it contains a `multica.ps1` wrapper that forces PowerShell
+	// pipes to UTF-8 before delegating to the real binary, preventing Chinese
+	// and other non-ASCII text from becoming `?` when agents pipe heredocs.
 	if selfBin, err := os.Executable(); err == nil {
 		binDir := filepath.Dir(selfBin)
-		agentEnv["PATH"] = binDir + string(os.PathListSeparator) + os.Getenv("PATH")
+		pathParts := []string{binDir, os.Getenv("PATH")}
+		if env.PathPrefix != "" {
+			pathParts = append([]string{env.PathPrefix}, pathParts...)
+		}
+		agentEnv["PATH"] = strings.Join(pathParts, string(os.PathListSeparator))
 	}
 	// Point Codex to the per-task CODEX_HOME so it discovers skills natively
 	// without polluting the system ~/.codex/skills/.
@@ -1995,6 +2019,31 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			FailureReason: failureReason,
 		}, nil
 	}
+}
+
+func validateLocalRepoPath(ctx CodeContext) (string, error) {
+	if ctx.Type == "" || ctx.Type == codecontext.TypeDefaultRepo {
+		return "", nil
+	}
+	if ctx.Type != codecontext.TypeLocalPath {
+		return "", fmt.Errorf("unsupported code context type: %s", ctx.Type)
+	}
+
+	localPath := strings.TrimSpace(ctx.Path)
+	if localPath == "" {
+		return "", fmt.Errorf("local path code context requires a path")
+	}
+	if !filepath.IsAbs(localPath) {
+		return "", fmt.Errorf("local path must be absolute on the runtime machine: %s", localPath)
+	}
+	info, err := os.Stat(localPath)
+	if err != nil {
+		return "", fmt.Errorf("local path is not accessible on the runtime machine: %s", localPath)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("local path is not a directory on the runtime machine: %s", localPath)
+	}
+	return localPath, nil
 }
 
 // executeAndDrain runs a backend, drains its message stream (forwarding to the
@@ -2330,7 +2379,7 @@ func isBlockedEnvKey(key string) bool {
 		return true
 	}
 	switch upper {
-	case "HOME", "PATH", "USER", "SHELL", "TERM", "CODEX_HOME":
+	case "HOME", "PATH", "USER", "SHELL", "TERM", "CODEX_HOME", "PSEXECUTIONPOLICYPREFERENCE":
 		return true
 	}
 	return false

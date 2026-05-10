@@ -266,6 +266,22 @@ func TestProjectReposReplaceWorkspaceReposInMetaSkill(t *testing.T) {
 	}
 }
 
+func TestMetaSkillDocumentsPowerShellUTF8ForStdin(t *testing.T) {
+	t.Parallel()
+
+	content := buildMetaSkillContent("codex", TaskContextForEnv{})
+	for _, want := range []string{
+		"--description-file <path>",
+		"--description-stdin",
+		"$OutputEncoding = [System.Text.UTF8Encoding]::new($false)",
+		"non-ASCII text",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("meta skill missing %q\n--- content ---\n%s", want, content)
+		}
+	}
+}
+
 func TestWriteProjectResourcesSkippedWhenNone(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
@@ -332,6 +348,134 @@ func TestPrepareWithRepoContext(t *testing.T) {
 		if !strings.Contains(s, want) {
 			t.Errorf("CLAUDE.md missing %q", want)
 		}
+	}
+}
+
+func TestPrepareMountsLocalRepoLink(t *testing.T) {
+	t.Parallel()
+	workspacesRoot := t.TempDir()
+	localRepo := t.TempDir()
+	localFile := filepath.Join(localRepo, "README.md")
+	if err := os.WriteFile(localFile, []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write local repo file: %v", err)
+	}
+
+	env, err := Prepare(PrepareParams{
+		WorkspacesRoot: workspacesRoot,
+		WorkspaceID:    "ws-local-path",
+		TaskID:         "11111111-2222-3333-4444-aaaaaaaaaaaa",
+		AgentName:      "Local Repo Agent",
+		Task: TaskContextForEnv{
+			IssueID: "11111111-2222-3333-4444-aaaaaaaaaaaa",
+			CodeContext: CodeContextForEnv{
+				Type: "local_path",
+				Path: localRepo,
+			},
+		},
+		LocalRepoPath: localRepo,
+	}, testLogger())
+	if err != nil {
+		t.Fatalf("Prepare failed: %v", err)
+	}
+	defer env.Cleanup(true)
+
+	got, err := os.ReadFile(filepath.Join(env.WorkDir, "repo", "README.md"))
+	if err != nil {
+		t.Fatalf("read mounted repo file: %v", err)
+	}
+	if string(got) != "hello" {
+		t.Fatalf("mounted repo content = %q, want %q", got, "hello")
+	}
+}
+
+func TestReuseRemountsLocalRepoLink(t *testing.T) {
+	t.Parallel()
+	workspacesRoot := t.TempDir()
+	localRepoA := t.TempDir()
+	localRepoB := t.TempDir()
+	if err := os.WriteFile(filepath.Join(localRepoA, "repo.txt"), []byte("A"), 0o644); err != nil {
+		t.Fatalf("write local repo A: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(localRepoB, "repo.txt"), []byte("B"), 0o644); err != nil {
+		t.Fatalf("write local repo B: %v", err)
+	}
+
+	env, err := Prepare(PrepareParams{
+		WorkspacesRoot: workspacesRoot,
+		WorkspaceID:    "ws-reuse-local-path",
+		TaskID:         "22222222-3333-4444-5555-bbbbbbbbbbbb",
+		AgentName:      "Reuse Agent",
+		Task: TaskContextForEnv{
+			IssueID: "22222222-3333-4444-5555-bbbbbbbbbbbb",
+			CodeContext: CodeContextForEnv{
+				Type: "local_path",
+				Path: localRepoA,
+			},
+		},
+		LocalRepoPath: localRepoA,
+	}, testLogger())
+	if err != nil {
+		t.Fatalf("Prepare failed: %v", err)
+	}
+	defer env.Cleanup(true)
+
+	reused := Reuse(env.WorkDir, "", "", TaskContextForEnv{
+		IssueID: "22222222-3333-4444-5555-bbbbbbbbbbbb",
+		CodeContext: CodeContextForEnv{
+			Type: "local_path",
+			Path: localRepoB,
+		},
+	}, testLogger())
+	if reused == nil {
+		t.Fatal("Reuse returned nil")
+	}
+
+	got, err := os.ReadFile(filepath.Join(reused.WorkDir, "repo", "repo.txt"))
+	if err != nil {
+		t.Fatalf("read remounted repo file: %v", err)
+	}
+	if string(got) != "B" {
+		t.Fatalf("remounted repo content = %q, want %q", got, "B")
+	}
+}
+
+func TestCleanupDoesNotDeleteLocalRepo(t *testing.T) {
+	t.Parallel()
+	workspacesRoot := t.TempDir()
+	localRepo := t.TempDir()
+	localFile := filepath.Join(localRepo, "keep.txt")
+	if err := os.WriteFile(localFile, []byte("keep"), 0o644); err != nil {
+		t.Fatalf("write local repo file: %v", err)
+	}
+
+	env, err := Prepare(PrepareParams{
+		WorkspacesRoot: workspacesRoot,
+		WorkspaceID:    "ws-cleanup-local-path",
+		TaskID:         "33333333-4444-5555-6666-cccccccccccc",
+		AgentName:      "Cleanup Agent",
+		Task: TaskContextForEnv{
+			IssueID: "33333333-4444-5555-6666-cccccccccccc",
+			CodeContext: CodeContextForEnv{
+				Type: "local_path",
+				Path: localRepo,
+			},
+		},
+		LocalRepoPath: localRepo,
+	}, testLogger())
+	if err != nil {
+		t.Fatalf("Prepare failed: %v", err)
+	}
+
+	if err := env.Cleanup(true); err != nil {
+		t.Fatalf("Cleanup failed: %v", err)
+	}
+
+	got, err := os.ReadFile(localFile)
+	if err != nil {
+		t.Fatalf("local repo file missing after cleanup: %v", err)
+	}
+	if string(got) != "keep" {
+		t.Fatalf("local repo file content = %q, want %q", got, "keep")
 	}
 }
 

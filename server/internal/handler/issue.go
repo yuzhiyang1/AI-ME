@@ -17,6 +17,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/analytics"
+	"github.com/multica-ai/multica/server/internal/codecontext"
 	"github.com/multica-ai/multica/server/internal/logger"
 	"github.com/multica-ai/multica/server/internal/util"
 	"github.com/multica-ai/multica/server/pkg/agent"
@@ -26,33 +27,52 @@ import (
 
 // IssueResponse is the JSON response for an issue.
 type IssueResponse struct {
-	ID                 string                  `json:"id"`
-	WorkspaceID        string                  `json:"workspace_id"`
-	Number             int32                   `json:"number"`
-	Identifier         string                  `json:"identifier"`
-	Title              string                  `json:"title"`
-	Description        *string                 `json:"description"`
-	Status             string                  `json:"status"`
-	Priority           string                  `json:"priority"`
-	AssigneeType       *string                 `json:"assignee_type"`
-	AssigneeID         *string                 `json:"assignee_id"`
-	CreatorType        string                  `json:"creator_type"`
-	CreatorID          string                  `json:"creator_id"`
-	ParentIssueID      *string                 `json:"parent_issue_id"`
-	ProjectID          *string                 `json:"project_id"`
-	Position           float64                 `json:"position"`
-	DueDate            *string                 `json:"due_date"`
-	CreatedAt          string                  `json:"created_at"`
-	UpdatedAt          string                  `json:"updated_at"`
-	Reactions          []IssueReactionResponse `json:"reactions,omitempty"`
-	Attachments        []AttachmentResponse    `json:"attachments,omitempty"`
+	ID            string                  `json:"id"`
+	WorkspaceID   string                  `json:"workspace_id"`
+	Number        int32                   `json:"number"`
+	Identifier    string                  `json:"identifier"`
+	Title         string                  `json:"title"`
+	Description   *string                 `json:"description"`
+	Status        string                  `json:"status"`
+	Priority      string                  `json:"priority"`
+	AssigneeType  *string                 `json:"assignee_type"`
+	AssigneeID    *string                 `json:"assignee_id"`
+	CreatorType   string                  `json:"creator_type"`
+	CreatorID     string                  `json:"creator_id"`
+	ParentIssueID *string                 `json:"parent_issue_id"`
+	ProjectID     *string                 `json:"project_id"`
+	CodeContext   codecontext.Context     `json:"code_context"`
+	Position      float64                 `json:"position"`
+	DueDate       *string                 `json:"due_date"`
+	CreatedAt     string                  `json:"created_at"`
+	UpdatedAt     string                  `json:"updated_at"`
+	Reactions     []IssueReactionResponse `json:"reactions,omitempty"`
+	Attachments   []AttachmentResponse    `json:"attachments,omitempty"`
 	// Labels are bulk-attached by list/detail endpoints so the client can render
 	// chips without an N+1 round-trip per row. Pointer + omitempty so paths that
 	// don't load labels (e.g. UpdateIssue, batch UpdateIssues, the issue:updated
 	// WS broadcast) emit no `labels` field at all — the client merge then
 	// preserves whatever labels are already in cache. nil pointer = "field
 	// absent, do not touch"; non-nil (incl. empty slice) = authoritative list.
-	Labels             *[]LabelResponse        `json:"labels,omitempty"`
+	Labels *[]LabelResponse `json:"labels,omitempty"`
+}
+
+func decodeCodeContext(raw []byte) codecontext.Context {
+	ctx := codecontext.Default()
+	if len(raw) == 0 {
+		return ctx
+	}
+	var decoded codecontext.Context
+	if err := json.Unmarshal(raw, &decoded); err == nil {
+		if normalized, err := codecontext.Normalize(&decoded); err == nil {
+			ctx = normalized
+		}
+	}
+	return ctx
+}
+
+func issueCodeContext(raw []byte) codecontext.Context {
+	return decodeCodeContext(raw)
 }
 
 func issueToResponse(i db.Issue, issuePrefix string) IssueResponse {
@@ -72,6 +92,7 @@ func issueToResponse(i db.Issue, issuePrefix string) IssueResponse {
 		CreatorID:     uuidToString(i.CreatorID),
 		ParentIssueID: uuidToPtr(i.ParentIssueID),
 		ProjectID:     uuidToPtr(i.ProjectID),
+		CodeContext:   issueCodeContext(i.CodeContext),
 		Position:      i.Position,
 		DueDate:       timestampToPtr(i.DueDate),
 		CreatedAt:     timestampToString(i.CreatedAt),
@@ -97,6 +118,7 @@ func issueListRowToResponse(i db.ListIssuesRow, issuePrefix string) IssueRespons
 		CreatorID:     uuidToString(i.CreatorID),
 		ParentIssueID: uuidToPtr(i.ParentIssueID),
 		ProjectID:     uuidToPtr(i.ProjectID),
+		CodeContext:   issueCodeContext(i.CodeContext),
 		Position:      i.Position,
 		DueDate:       timestampToPtr(i.DueDate),
 		CreatedAt:     timestampToString(i.CreatedAt),
@@ -152,6 +174,7 @@ func openIssueRowToResponse(i db.ListOpenIssuesRow, issuePrefix string) IssueRes
 		CreatorID:     uuidToString(i.CreatorID),
 		ParentIssueID: uuidToPtr(i.ParentIssueID),
 		ProjectID:     uuidToPtr(i.ProjectID),
+		CodeContext:   issueCodeContext(i.CodeContext),
 		Position:      i.Position,
 		DueDate:       timestampToPtr(i.DueDate),
 		CreatedAt:     timestampToString(i.CreatedAt),
@@ -286,7 +309,7 @@ func buildSearchQuery(phrase string, terms []string, queryNum int, hasNum bool, 
 	}
 
 	escapedPhrase := escapeLike(phrase)
-	phraseParam := nextArg(escapedPhrase)               // $1
+	phraseParam := nextArg(escapedPhrase) // $1
 	phraseContains := "'%' || " + phraseParam + " || '%'"
 	phraseStartsWith := phraseParam + " || '%'"
 
@@ -863,9 +886,10 @@ func (h *Handler) ChildIssueProgress(w http.ResponseWriter, r *http.Request) {
 // instead of letting it default. The frontend remembers the user's last
 // pick per workspace, so frequent users skip retyping "in project X".
 type QuickCreateIssueRequest struct {
-	AgentID   string `json:"agent_id"`
-	Prompt    string `json:"prompt"`
-	ProjectID string `json:"project_id,omitempty"`
+	AgentID     string               `json:"agent_id"`
+	Prompt      string               `json:"prompt"`
+	ProjectID   string               `json:"project_id,omitempty"`
+	CodeContext *codecontext.Context `json:"code_context,omitempty"`
 }
 
 // QuickCreateIssueResponse echoes the queued task id so the frontend can
@@ -876,7 +900,8 @@ type QuickCreateIssueResponse struct {
 
 func (h *Handler) QuickCreateIssue(w http.ResponseWriter, r *http.Request) {
 	var req QuickCreateIssueRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	rawFields, err := decodeJSONBodyWithRawFields(r.Body, &req)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -937,6 +962,23 @@ func (h *Handler) QuickCreateIssue(w http.ResponseWriter, r *http.Request) {
 		writeAgentUnavailable(w, "agent's runtime is offline")
 		return
 	}
+	normalizedCodeContext := decodeCodeContext(agent.DefaultCodeContext)
+	if _, hasExplicitCodeContext := rawFields["code_context"]; hasExplicitCodeContext {
+		explicitCodeContext, normalizeErr := codecontext.Normalize(req.CodeContext)
+		if normalizeErr != nil {
+			err = normalizeErr
+		} else if explicitCodeContext.IsLocalPath() || !normalizedCodeContext.IsLocalPath() {
+			normalizedCodeContext = explicitCodeContext
+		}
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if normalizedCodeContext.IsLocalPath() && agent.RuntimeMode != "local" {
+		writeError(w, http.StatusBadRequest, "local path code context requires a local runtime")
+		return
+	}
 
 	// Daemon CLI version gate. The agent-side prompt + create-flow rely on
 	// behaviors introduced in MinQuickCreateCLIVersion (URL attachment
@@ -971,7 +1013,7 @@ func (h *Handler) QuickCreateIssue(w http.ResponseWriter, r *http.Request) {
 		projectUUID = pid
 	}
 
-	task, err := h.TaskService.EnqueueQuickCreateTask(r.Context(), wsUUID, requesterUUID, agentUUID, prompt, projectUUID)
+	task, err := h.TaskService.EnqueueQuickCreateTask(r.Context(), wsUUID, requesterUUID, agentUUID, prompt, projectUUID, normalizedCodeContext)
 	if err != nil {
 		slog.Warn("quick-create enqueue failed", append(logger.RequestAttrs(r), "error", err)...)
 		writeError(w, http.StatusInternalServerError, "failed to enqueue quick-create task")
@@ -1070,16 +1112,17 @@ func readRuntimeCLIVersion(metadata []byte) string {
 }
 
 type CreateIssueRequest struct {
-	Title              string   `json:"title"`
-	Description        *string  `json:"description"`
-	Status             string   `json:"status"`
-	Priority           string   `json:"priority"`
-	AssigneeType       *string  `json:"assignee_type"`
-	AssigneeID         *string  `json:"assignee_id"`
-	ParentIssueID      *string  `json:"parent_issue_id"`
-	ProjectID          *string  `json:"project_id"`
-	DueDate            *string  `json:"due_date"`
-	AttachmentIDs      []string `json:"attachment_ids,omitempty"`
+	Title         string               `json:"title"`
+	Description   *string              `json:"description"`
+	Status        string               `json:"status"`
+	Priority      string               `json:"priority"`
+	AssigneeType  *string              `json:"assignee_type"`
+	AssigneeID    *string              `json:"assignee_id"`
+	ParentIssueID *string              `json:"parent_issue_id"`
+	ProjectID     *string              `json:"project_id"`
+	DueDate       *string              `json:"due_date"`
+	CodeContext   *codecontext.Context `json:"code_context,omitempty"`
+	AttachmentIDs []string             `json:"attachment_ids,omitempty"`
 	// OriginType / OriginID stamp the new issue with its provenance so
 	// platform-internal flows can deterministically locate it later. Only
 	// trusted callers should set these — currently the daemon CLI passes
@@ -1091,7 +1134,8 @@ type CreateIssueRequest struct {
 
 func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 	var req CreateIssueRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	rawFields, err := decodeJSONBodyWithRawFields(r.Body, &req)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -1137,6 +1181,51 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 
 	if status, msg := h.validateAssigneePair(r.Context(), r, workspaceID, assigneeType, assigneeID); status != 0 {
 		writeError(w, status, msg)
+		return
+	}
+
+	var assignedAgent *db.Agent
+	if assigneeType.Valid && assigneeType.String == "agent" && assigneeID.Valid {
+		agent, err := h.Queries.GetAgentInWorkspace(r.Context(), db.GetAgentInWorkspaceParams{
+			ID:          assigneeID,
+			WorkspaceID: wsUUID,
+		})
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "agent not found")
+			return
+		}
+		assignedAgent = &agent
+	}
+
+	normalizedCodeContext := codecontext.Default()
+	if assignedAgent != nil {
+		normalizedCodeContext = decodeCodeContext(assignedAgent.DefaultCodeContext)
+	}
+	if _, hasExplicitCodeContext := rawFields["code_context"]; hasExplicitCodeContext {
+		explicitCodeContext, normalizeErr := codecontext.Normalize(req.CodeContext)
+		if normalizeErr != nil {
+			err = normalizeErr
+		} else if explicitCodeContext.IsLocalPath() || !normalizedCodeContext.IsLocalPath() {
+			normalizedCodeContext = explicitCodeContext
+		}
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if normalizedCodeContext.IsLocalPath() {
+		if !assigneeType.Valid || assigneeType.String != "agent" || !assigneeID.Valid {
+			writeError(w, http.StatusBadRequest, "local path code context requires an agent assignee")
+			return
+		}
+		if assignedAgent == nil || assignedAgent.RuntimeMode != "local" {
+			writeError(w, http.StatusBadRequest, "local path code context requires a local runtime")
+			return
+		}
+	}
+	codeContextJSON, err := json.Marshal(normalizedCodeContext)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to encode code context")
 		return
 	}
 
@@ -1249,6 +1338,7 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 			ProjectID:     projectID,
 			OriginType:    originType,
 			OriginID:      originID,
+			CodeContext:   codeContextJSON,
 		})
 	} else {
 		issue, err = qtx.CreateIssue(r.Context(), db.CreateIssueParams{
@@ -1266,6 +1356,7 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 			DueDate:       dueDate,
 			Number:        issueNumber,
 			ProjectID:     projectID,
+			CodeContext:   codeContextJSON,
 		})
 	}
 	if err != nil {
@@ -1353,16 +1444,16 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 }
 
 type UpdateIssueRequest struct {
-	Title              *string  `json:"title"`
-	Description        *string  `json:"description"`
-	Status             *string  `json:"status"`
-	Priority           *string  `json:"priority"`
-	AssigneeType       *string  `json:"assignee_type"`
-	AssigneeID         *string  `json:"assignee_id"`
-	Position           *float64 `json:"position"`
-	DueDate            *string  `json:"due_date"`
-	ParentIssueID      *string  `json:"parent_issue_id"`
-	ProjectID          *string  `json:"project_id"`
+	Title         *string  `json:"title"`
+	Description   *string  `json:"description"`
+	Status        *string  `json:"status"`
+	Priority      *string  `json:"priority"`
+	AssigneeType  *string  `json:"assignee_type"`
+	AssigneeID    *string  `json:"assignee_id"`
+	Position      *float64 `json:"position"`
+	DueDate       *string  `json:"due_date"`
+	ParentIssueID *string  `json:"parent_issue_id"`
+	ProjectID     *string  `json:"project_id"`
 }
 
 func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {

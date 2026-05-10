@@ -1,6 +1,7 @@
 import type { Issue, IssueStatus, IssuePriority, IssueAssigneeType } from "./issue";
 import type { MemberRole } from "./workspace";
 import type { Project } from "./project";
+import type { CodeContext } from "./code-context";
 
 // Issue API
 export interface CreateIssueRequest {
@@ -13,6 +14,7 @@ export interface CreateIssueRequest {
   parent_issue_id?: string;
   project_id?: string;
   due_date?: string;
+  code_context?: CodeContext;
   attachment_ids?: string[];
 }
 

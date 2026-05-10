@@ -89,6 +89,16 @@ export const CommentSchema = z.object({
 
 export const CommentsListSchema = z.array(CommentSchema);
 
+const CodeContextSchema = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("default_repo"),
+  }).loose(),
+  z.object({
+    type: z.literal("local_path"),
+    path: z.string(),
+  }).loose(),
+]);
+
 const IssueSchema = z.object({
   id: z.string(),
   workspace_id: z.string(),
@@ -104,6 +114,7 @@ const IssueSchema = z.object({
   creator_id: z.string(),
   parent_issue_id: z.string().nullable(),
   project_id: z.string().nullable(),
+  code_context: CodeContextSchema.default({ type: "default_repo" }),
   position: z.number(),
   due_date: z.string().nullable(),
   reactions: z.array(z.unknown()).optional(),
@@ -134,4 +145,48 @@ export const SubscribersListSchema = z.array(SubscriberSchema);
 
 export const ChildIssuesResponseSchema = z.object({
   issues: z.array(IssueSchema).default([]),
+}).loose();
+
+export const ChatSessionSchema = z.object({
+  id: z.string(),
+  workspace_id: z.string(),
+  agent_id: z.string(),
+  creator_id: z.string(),
+  title: z.string(),
+  status: z.string(),
+  code_context: CodeContextSchema.default({ type: "default_repo" }),
+  has_unread: z.boolean().default(false),
+  created_at: z.string(),
+  updated_at: z.string(),
+}).loose();
+
+export const ChatMessageSchema = z.object({
+  id: z.string(),
+  chat_session_id: z.string(),
+  role: z.string(),
+  content: z.string(),
+  task_id: z.string().nullable(),
+  created_at: z.string(),
+  failure_reason: z.string().nullable().optional(),
+  elapsed_ms: z.number().nullable().optional(),
+}).loose();
+
+export const ChatSessionsSchema = z.array(ChatSessionSchema);
+export const ChatMessagesSchema = z.array(ChatMessageSchema);
+export const ChatPendingTaskSchema = z.object({
+  task_id: z.string().optional(),
+  status: z.string().optional(),
+  created_at: z.string().optional(),
+}).loose();
+export const PendingChatTasksResponseSchema = z.object({
+  tasks: z.array(z.object({
+    task_id: z.string(),
+    status: z.string(),
+    chat_session_id: z.string(),
+  }).loose()).default([]),
+}).loose();
+export const SendChatMessageResponseSchema = z.object({
+  message_id: z.string(),
+  task_id: z.string(),
+  created_at: z.string(),
 }).loose();

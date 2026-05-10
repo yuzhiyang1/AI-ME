@@ -35,10 +35,14 @@ var (
 // devDescribeRe matches the `git describe --tags --always --dirty` output for
 // a build past the latest tag, e.g. `v0.2.15-235-gdaf0e935` (optionally with a
 // trailing `-dirty`). Daemons built from source (Makefile `make build` / `make
-// daemon`) report this shape; tagged releases are bare semver. Treating dev-
-// described daemons as OK keeps `make daemon` unblocked without weakening the
-// gate for staging or production users running stale stable releases.
+// daemon`) report this shape when tags are reachable from HEAD.
 var devDescribeRe = regexp.MustCompile(`^v?\d+\.\d+\.\d+-\d+-g[0-9a-fA-F]+`)
+
+// When the local checkout has no reachable tags, `git describe --tags --always
+// --dirty` falls back to a bare short commit hash like `88eae53` or
+// `88eae53-dirty`. That's still a source build of the current repo, so accept
+// it as a dev build rather than failing Quick Create closed on semver parsing.
+var devHashRe = regexp.MustCompile(`^[0-9a-fA-F]{7,}(?:-dirty)?$`)
 
 // CheckMinCLIVersion returns nil when `detected` parses as ≥ minimum. Returns
 // ErrCLIVersionMissing for empty or unparsable input, and ErrCLIVersionTooOld
@@ -53,7 +57,7 @@ func CheckMinCLIVersion(detected string) error {
 	if d == "" {
 		return ErrCLIVersionMissing
 	}
-	if devDescribeRe.MatchString(d) {
+	if devDescribeRe.MatchString(d) || devHashRe.MatchString(d) {
 		return nil
 	}
 	parsed, err := parseSemver(d)

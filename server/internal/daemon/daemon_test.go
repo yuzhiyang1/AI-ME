@@ -1167,6 +1167,14 @@ func TestDefaultArgsForProvider(t *testing.T) {
 	}
 }
 
+func TestIsBlockedEnvKeyProtectsPowerShellExecutionPolicy(t *testing.T) {
+	t.Parallel()
+
+	if !isBlockedEnvKey("PSExecutionPolicyPreference") {
+		t.Fatal("PSExecutionPolicyPreference must remain daemon-controlled so the Windows UTF-8 wrapper can run")
+	}
+}
+
 // reportTaskResultRecorder captures which terminal endpoint
 // (.../complete or .../fail) reportTaskResult hits and the body it
 // posts, so the tests can assert the disposition (success vs fail)

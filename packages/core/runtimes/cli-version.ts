@@ -27,10 +27,15 @@ const SEMVER_RE = /v?(\d+)\.(\d+)\.(\d+)/;
 // Matches the `git describe --tags --always --dirty` output for a build past
 // the latest tag, e.g. `v0.2.15-235-gdaf0e935` or `v0.2.15-235-gdaf0e935-dirty`.
 // Daemons built from source (Makefile `make build` / `make daemon`) report this
-// shape; tagged releases are bare semver. Treating dev-described daemons as OK
-// is what keeps `pnpm dev:desktop` + `make daemon` unblocked without weakening
-// the gate for staging or production users running stale stable releases.
+// shape when tags are reachable from HEAD.
 const DEV_DESCRIBE_RE = /^v?\d+\.\d+\.\d+-\d+-g[0-9a-fA-F]+/;
+
+// `git describe --tags --always --dirty` falls back to a bare short commit hash
+// when the local checkout has no reachable tags (common in shallow clones or
+// detached dev snapshots), e.g. `88eae53` or `88eae53-dirty`. These are still
+// source builds of the current repo, so treat them the same as other dev
+// versions instead of blocking Quick Create behind a semver parse failure.
+const DEV_HASH_RE = /^[0-9a-fA-F]{7,}(?:-dirty)?$/;
 
 function parseSemver(raw: string): [number, number, number] | null {
   const m = SEMVER_RE.exec(raw.trim());
@@ -53,7 +58,7 @@ function lessThan(a: [number, number, number], b: [number, number, number]) {
  */
 export function checkQuickCreateCliVersion(detected: string | undefined | null): CliVersionCheck {
   const current = (detected ?? "").trim();
-  if (DEV_DESCRIBE_RE.test(current)) {
+  if (DEV_DESCRIBE_RE.test(current) || DEV_HASH_RE.test(current)) {
     return { state: "ok", current, min: MIN_QUICK_CREATE_CLI_VERSION };
   }
   const parsed = current ? parseSemver(current) : null;

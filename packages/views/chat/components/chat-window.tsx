@@ -31,7 +31,16 @@ import { agentListOptions, memberListOptions } from "@multica/core/workspace/que
 import { canAssignAgent } from "@multica/views/issues/components";
 import { api } from "@multica/core/api";
 import { useAgentPresenceDetail, useWorkspaceAgentAvailability } from "@multica/core/agents";
+import {
+  defaultCodeContext,
+  type Agent,
+  type ChatMessage,
+  type ChatPendingTask,
+  type ChatSession,
+  type CodeContext,
+} from "@multica/core/types";
 import { ActorAvatar } from "../../common/actor-avatar";
+import { CodeContextPicker, getCodeContextError } from "../../common/code-context-picker";
 import { OfflineBanner } from "./offline-banner";
 import { NoAgentBanner } from "./no-agent-banner";
 import {
@@ -58,7 +67,6 @@ import {
 import { ChatResizeHandles } from "./chat-resize-handles";
 import { useChatResize } from "./use-chat-resize";
 import { createLogger } from "@multica/core/logger";
-import type { Agent, ChatMessage, ChatPendingTask, ChatSession } from "@multica/core/types";
 import { useT } from "../../i18n";
 
 const uiLogger = createLogger("chat.ui");
@@ -73,20 +81,23 @@ export function ChatWindow() {
   const setOpen = useChatStore((s) => s.setOpen);
   const setActiveSession = useChatStore((s) => s.setActiveSession);
   const setSelectedAgentId = useChatStore((s) => s.setSelectedAgentId);
+  const [newSessionCodeContext, setNewSessionCodeContext] = useState<CodeContext>(() =>
+    defaultCodeContext(),
+  );
   const user = useAuthStore((s) => s.user);
   const { data: agents = [] } = useQuery(agentListOptions(wsId));
   const { data: members = [] } = useQuery(memberListOptions(wsId));
   // Single sessions cache. The dropdown groups locally into "active" /
-  // "archived" — eliminating the separate active/all queries that used
+  // "archived" —eliminating the separate active/all queries that used
   // to drift during the WS-invalidate window.
   const { data: sessions = [] } = useQuery(chatSessionsOptions(wsId));
   const { data: rawMessages, isLoading: messagesLoading } = useQuery(
     chatMessagesOptions(activeSessionId ?? ""),
   );
-  // When no active session, always show empty — don't use stale cache
+  // When no active session, always show empty —don't use stale cache
   const messages = activeSessionId ? rawMessages ?? [] : [];
   // Skeleton only shows for an un-cached session fetch. Cached switches
-  // return data synchronously — no flash. `enabled: false` (new chat)
+  // return data synchronously —no flash. `enabled: false` (new chat)
   // keeps isLoading false so the starter prompts aren't hidden.
   const showSkeleton = !!activeSessionId && messagesLoading;
 
@@ -94,7 +105,7 @@ export function ChatWindow() {
   // switch because it's keyed on sessionId in the Query cache; WS events
   // (chat:message / chat:done / task:*) keep it invalidated in real time.
   //
-  // This is the SOLE source for pendingTaskId — no mirror in the store.
+  // This is the SOLE source for pendingTaskId —no mirror in the store.
   const { data: pendingTask } = useQuery(
     pendingChatTaskOptions(activeSessionId ?? ""),
   );
@@ -119,13 +130,14 @@ export function ChatWindow() {
     (a) => !a.archived_at && canAssignAgent(a, user?.id, memberRole),
   );
 
-  // Resolve selected agent: stored preference → first available
+  // Resolve selected agent: stored preference →first available
   const activeAgent =
     availableAgents.find((a) => a.id === selectedAgentId) ??
     availableAgents[0] ??
     null;
+  const codeContextErrorType = getCodeContextError(newSessionCodeContext, activeAgent);
 
-  // Three-state availability — "loading" stays neutral (no banner, no
+  // Three-state availability —"loading" stays neutral (no banner, no
   // disable) so the input doesn't flash a fake "no agent" state in the
   // few hundred ms before the agent list query resolves. Only `"none"`
   // (server confirmed: zero usable agents) drives the disabled UI.
@@ -134,7 +146,7 @@ export function ChatWindow() {
 
   // Presence drives both the avatar status dot (via ActorAvatar) and the
   // OfflineBanner / TaskStatusPill availability copy. `useAgentPresenceDetail`
-  // returns "loading" while queries are still resolving — pass `undefined`
+  // returns "loading" while queries are still resolving —pass `undefined`
   // downstream so banners and pill copy stay silent during loading rather
   // than flash speculative offline text.
   const presenceDetail = useAgentPresenceDetail(wsId, activeAgent?.id);
@@ -160,17 +172,17 @@ export function ChatWindow() {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- once per mount
   }, []);
 
-  // Open intent is fully driven by `activeSessionId` in storage — no mount
+  // Open intent is fully driven by `activeSessionId` in storage —no mount
   // restore, no self-heal. Adding either reintroduces a "two signals
   // describing one fact" race (the previous self-heal mis-cleared the
   // freshly-created session because allSessions was still stale during the
   // post-create invalidate-refetch window).
 
-  // WS events are handled globally in useRealtimeSync — the query cache
+  // WS events are handled globally in useRealtimeSync —the query cache
   // stays current even when this window is closed. See packages/core/realtime/.
 
   // Auto mark-as-read whenever the user is looking at a session with unread
-  // state: window open + a session active + has_unread → PATCH.
+  // state: window open + a session active + has_unread →PATCH.
   // has_unread comes from the list query; WS handlers invalidate it on
   // chat:done so a reply arriving while the user watches triggers this
   // effect again and is instantly cleared.
@@ -216,16 +228,17 @@ export function ChatWindow() {
         const session = await createSession.mutateAsync({
           agent_id: activeAgent.id,
           title: finalContent.slice(0, 50),
+          code_context: newSessionCodeContext,
         });
         sessionId = session.id;
         setActiveSession(sessionId);
       }
 
-      // Optimistic burst — everything that gives the user "I sent a message
+      // Optimistic burst —everything that gives the user "I sent a message
       // and the agent is now working" feedback fires BEFORE the HTTP roundtrip.
       // Pre-#status-pill the pending-task seed lived after `await
       // sendChatMessage` and the pill blinked in a few hundred ms after the
-      // user's message — small but visible "did it actually send?" gap.
+      // user's message —small but visible "did it actually send?" gap.
       const sentAt = new Date().toISOString();
       const optimistic: ChatMessage = {
         id: `optimistic-${Date.now()}`,
@@ -259,7 +272,7 @@ export function ChatWindow() {
       });
       // Replace the temporary task_id with the server's real one (so the WS
       // task: handlers can match against it) and snap the anchor to the
-      // server's created_at — keeping the elapsed-seconds reading stable.
+      // server's created_at —keeping the elapsed-seconds reading stable.
       qc.setQueryData<ChatPendingTask>(chatKeys.pendingTask(sessionId), {
         task_id: result.task_id,
         status: "queued",
@@ -282,16 +295,16 @@ export function ChatWindow() {
       apiLogger.debug("cancelTask skipped: no pending task");
       return;
     }
-    // Optimistic clear — pill disappears + input unlocks the moment the
+    // Optimistic clear —pill disappears + input unlocks the moment the
     // user clicks Stop, instead of after the HTTP roundtrip. WS
     // task:cancelled will confirm later (no-op if cache is already empty);
     // if the cancel POST fails because the task already finished, the
-    // assistant message arrives via task:completed → chat:done and renders
+    // assistant message arrives via task:completed →chat:done and renders
     // normally. Either way the UI is in sync with reality without latency.
     apiLogger.info("cancelTask.start", { taskId: pendingTaskId, sessionId: activeSessionId });
     qc.setQueryData(chatKeys.pendingTask(activeSessionId), {});
     qc.invalidateQueries({ queryKey: chatKeys.messages(activeSessionId) });
-    // Fire-and-forget — UI is already in its post-cancel state. We log the
+    // Fire-and-forget —UI is already in its post-cancel state. We log the
     // outcome but never block on it.
     api.cancelTaskById(pendingTaskId).then(
       () => apiLogger.info("cancelTask.success", { taskId: pendingTaskId }),
@@ -305,7 +318,7 @@ export function ChatWindow() {
 
   const handleSelectAgent = useCallback(
     (agent: Agent) => {
-      // No-op when clicking the already-active agent — don't clobber the
+      // No-op when clicking the already-active agent —don't clobber the
       // current session just because the user closed the menu this way.
       // Compare against activeAgent (what the UI shows), not selectedAgentId
       // (which may be null / point to an archived agent on first load).
@@ -328,11 +341,12 @@ export function ChatWindow() {
       previousPendingTask: pendingTaskId,
     });
     setActiveSession(null);
+    setNewSessionCodeContext(defaultCodeContext());
   }, [activeSessionId, pendingTaskId, setActiveSession]);
 
   const handleSelectSession = useCallback(
     (session: ChatSession) => {
-      // Sessions are bound 1:1 to an agent — picking a session from a
+      // Sessions are bound 1:1 to an agent —picking a session from a
       // different agent implicitly switches the agent too.
       if (activeAgent && session.agent_id !== activeAgent.id) {
         uiLogger.info("selectSession (cross-agent)", {
@@ -395,7 +409,7 @@ export function ChatWindow() {
       }}
     >
       {!isExpanded && <ChatResizeHandles onDragStart={startDrag} />}
-      {/* Header — ⊕ new + session dropdown | window tools */}
+      {/* Header —⊕new + session dropdown | window tools */}
       <div className="flex items-center justify-between border-b px-4 py-2.5 gap-2">
         <div className="flex items-center gap-1 min-w-0">
           <Tooltip>
@@ -475,7 +489,7 @@ export function ChatWindow() {
         />
       )}
 
-      {/* Status banner above the input — single mutually-exclusive slot.
+      {/* Status banner above the input —single mutually-exclusive slot.
        *  Priority: no-agent > offline / unstable. Agent presence is the
        *  hard prerequisite (you can't send anything without one), so it
        *  always wins over a presence hint. ContextAnchorCard stays in
@@ -490,13 +504,53 @@ export function ChatWindow() {
         <OfflineBanner agentName={activeAgent?.name} availability={availability} />
       )}
 
-      {/* Input — disabled for legacy archived sessions; locked out entirely
+
+      {!activeSessionId ? (
+        <CodeContextPicker
+          value={newSessionCodeContext}
+          onChange={setNewSessionCodeContext}
+          agent={activeAgent}
+          copy={{
+            label: t(($) => $.code_context.label),
+            defaultRepo: t(($) => $.code_context.default_repo),
+            localPath: t(($) => $.code_context.local_path),
+            desktopChoose: t(($) => $.code_context.desktop_choose),
+            webPlaceholder: t(($) => $.code_context.web_placeholder),
+            desktopHint: t(($) => $.code_context.desktop_hint),
+            webHint: t(($) => $.code_context.web_hint),
+            runtimeBlocked: t(($) => $.code_context.runtime_blocked),
+            invalidPath: t(($) => $.code_context.invalid_path),
+          }}
+        />
+      ) : currentSession ? (
+        <CodeContextPicker
+          value={currentSession.code_context}
+          onChange={() => {}}
+          agent={activeAgent}
+          disabled
+          locked
+          copy={{
+            label: t(($) => $.code_context.label),
+            defaultRepo: t(($) => $.code_context.default_repo),
+            localPath: t(($) => $.code_context.local_path),
+            desktopChoose: t(($) => $.code_context.desktop_choose),
+            webPlaceholder: t(($) => $.code_context.web_placeholder),
+            desktopHint: t(($) => $.code_context.desktop_hint),
+            webHint: t(($) => $.code_context.web_hint),
+            runtimeBlocked: t(($) => $.code_context.runtime_blocked),
+            invalidPath: t(($) => $.code_context.invalid_path),
+            sessionLocked: t(($) => $.code_context.session_locked),
+          }}
+        />
+      ) : null}
+
+      {/* Input —disabled for legacy archived sessions; locked out entirely
        *  when there's no agent (the EmptyState above carries the CTA). */}
       <ChatInput
         onSend={handleSend}
         onStop={handleStop}
         isRunning={!!pendingTaskId}
-        disabled={isSessionArchived}
+        disabled={isSessionArchived || !!codeContextErrorType}
         noAgent={noAgent}
         agentName={activeAgent?.name}
         topSlot={<ContextAnchorCard />}
@@ -532,7 +586,7 @@ function AgentDropdown({
 }) {
   const { t } = useT("chat");
   // Split into the user's own agents and everyone else so the menu groups
-  // them — matches the old AgentSelector layout.
+  // them —matches the old AgentSelector layout.
   const { mine, others } = useMemo(() => {
     const mine: Agent[] = [];
     const others: Agent[] = [];
@@ -626,7 +680,7 @@ function AgentMenuItem({
  * keep the menu compact when the user has many old chats. Selecting a
  * session from a different agent implicitly switches the agent too
  * (sessions are bound 1:1 to an agent). "New chat" lives in the header's
- * ⊕ button, not inside this dropdown.
+ * ⊕button, not inside this dropdown.
  */
 function SessionDropdown({
   sessions,
@@ -664,7 +718,7 @@ function SessionDropdown({
 
   // Aggregate "which sessions have an in-flight task right now". Reuses
   // the same workspace-scoped query the FAB consumes, so toggling the chat
-  // window doesn't fire a second request — TanStack dedupes by key.
+  // window doesn't fire a second request —TanStack dedupes by key.
   const { data: pending } = useQuery(pendingChatTasksOptions(wsId));
   const inFlightSessionIds = useMemo(
     () => new Set((pending?.tasks ?? []).map((t) => t.chat_session_id)),
@@ -673,7 +727,7 @@ function SessionDropdown({
 
   // Cross-session aggregate signal for the closed-dropdown trigger.
   // "Active" here means there's something interesting happening in a
-  // session OTHER than the one the user is currently looking at — the
+  // session OTHER than the one the user is currently looking at —the
   // user already sees their own session's state via the StatusPill /
   // unread auto-mark, so highlighting it on the trigger would be noise.
   // Same priority rule as the row pips: running > unread.
@@ -688,7 +742,7 @@ function SessionDropdown({
     if (!pendingDelete) return;
     const sessionId = pendingDelete.id;
     // Eager local clear when the user is deleting the session they're
-    // currently looking at — otherwise messages / pendingTask queries
+    // currently looking at —otherwise messages / pendingTask queries
     // keep rendering the now-deleted session until chat:session_deleted
     // arrives over WS (~50–200ms gap).
     if (activeSessionId === sessionId) setActiveSession(null);
@@ -727,7 +781,7 @@ function SessionDropdown({
           </div>
         </div>
         {/* Right-edge status pip: in-flight wins over unread because
-         *  "still working" is more actionable than "has reply" — and
+         *  "still working" is more actionable than "has reply" —and
          *  the two rarely coexist in practice (the unread flag fires
          *  on chat_message write, by which point the task has just
          *  finished). Same pip shape as unread for visual rhythm,
@@ -917,7 +971,7 @@ function EmptyState({
 }) {
   const { t } = useT("chat");
   // First-time experience: the user has never started a chat in this
-  // workspace. Educate before suggesting actions — starter prompts
+  // workspace. Educate before suggesting actions —starter prompts
   // presume the user already knows what chat is for.
   if (!hasSessions) {
     return (
@@ -973,3 +1027,4 @@ function EmptyState({
     </div>
   );
 }
+

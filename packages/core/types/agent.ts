@@ -1,3 +1,5 @@
+import type { CodeContext } from "./code-context";
+
 export type AgentStatus = "idle" | "working" | "blocked" | "error" | "offline";
 
 export type AgentRuntimeMode = "local" | "cloud";
@@ -119,6 +121,7 @@ export interface Agent {
   status: AgentStatus;
   max_concurrent_tasks: number;
   model: string;
+  default_code_context?: CodeContext;
   owner_id: string | null;
   skills: AgentSkillSummary[];
   created_at: string;
@@ -152,6 +155,7 @@ export interface CreateAgentRequest {
   visibility?: AgentVisibility;
   max_concurrent_tasks?: number;
   model?: string;
+  default_code_context?: CodeContext;
   /** Optional template slug used by the onboarding agent picker. Surfaced
    *  as the `template` property on the `agent_created` PostHog event. */
   template?: string;
@@ -170,6 +174,7 @@ export interface UpdateAgentRequest {
   status?: AgentStatus;
   max_concurrent_tasks?: number;
   model?: string;
+  default_code_context?: CodeContext | null;
 }
 
 // Skills

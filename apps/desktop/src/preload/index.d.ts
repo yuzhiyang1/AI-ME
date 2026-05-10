@@ -17,6 +17,8 @@ interface DesktopAPI {
   onAuthToken: (callback: (token: string) => void) => () => void;
   /** Listen for invitation IDs delivered via deep link. Returns an unsubscribe function. */
   onInviteOpen: (callback: (invitationId: string) => void) => () => void;
+  /** Open a native directory picker and return an absolute path. */
+  selectDirectory: () => Promise<string | null>;
   /** Open a URL in the default browser. */
   openExternal: (url: string) => Promise<void>;
   /** Hide macOS traffic lights for full-screen modals; restore when false. */

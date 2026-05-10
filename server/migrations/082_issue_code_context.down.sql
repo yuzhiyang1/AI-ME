@@ -1,0 +1,2 @@
+ALTER TABLE issue
+DROP COLUMN IF EXISTS code_context;

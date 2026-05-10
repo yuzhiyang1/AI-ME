@@ -38,6 +38,7 @@ type PrepareParams struct {
 	Provider       string            // agent provider (determines runtime config and skill injection paths)
 	CodexVersion   string            // detected Codex CLI version (only used when Provider == "codex")
 	Task           TaskContextForEnv // context data for writing files
+	LocalRepoPath  string            // optional absolute local directory mounted as workdir/repo
 }
 
 // TaskContextForEnv is the subset of task context used for writing context files.
@@ -60,6 +61,12 @@ type TaskContextForEnv struct {
 	AutopilotSource         string
 	AutopilotTriggerPayload string
 	QuickCreatePrompt       string // non-empty for quick-create tasks
+	CodeContext             CodeContextForEnv
+}
+
+type CodeContextForEnv struct {
+	Type string
+	Path string
 }
 
 // SkillContextForEnv represents a skill to be written into the execution environment.
@@ -81,6 +88,8 @@ type Environment struct {
 	RootDir string
 	// WorkDir is the directory to pass as Cwd to the agent ({RootDir}/workdir/).
 	WorkDir string
+	// PathPrefix is prepended to PATH for helper wrappers written by execenv.
+	PathPrefix string
 	// CodexHome is the path to the per-task CODEX_HOME directory (set only for codex provider).
 	CodexHome string
 
@@ -127,16 +136,27 @@ func Prepare(params PrepareParams, logger *slog.Logger) (*Environment, error) {
 			return nil, fmt.Errorf("execenv: create directory %s: %w", dir, err)
 		}
 	}
+	binDir := filepath.Join(envRoot, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		return nil, fmt.Errorf("execenv: create directory %s: %w", binDir, err)
+	}
 
 	env := &Environment{
-		RootDir: envRoot,
-		WorkDir: workDir,
-		logger:  logger,
+		RootDir:    envRoot,
+		WorkDir:    workDir,
+		PathPrefix: binDir,
+		logger:     logger,
 	}
 
 	// Write context files into workdir (skills go to provider-native paths).
 	if err := writeContextFiles(workDir, params.Provider, params.Task); err != nil {
 		return nil, fmt.Errorf("execenv: write context files: %w", err)
+	}
+	if err := mountLocalRepo(workDir, params.LocalRepoPath); err != nil {
+		return nil, fmt.Errorf("execenv: mount local repo: %w", err)
+	}
+	if err := writeMulticaWrapper(binDir); err != nil {
+		return nil, fmt.Errorf("execenv: write multica wrapper: %w", err)
 	}
 
 	// For Codex, set up a per-task CODEX_HOME seeded from ~/.codex/ with skills.
@@ -167,14 +187,21 @@ func Reuse(workDir, provider, codexVersion string, task TaskContextForEnv, logge
 	}
 
 	env := &Environment{
-		RootDir: filepath.Dir(workDir),
-		WorkDir: workDir,
-		logger:  logger,
+		RootDir:    filepath.Dir(workDir),
+		WorkDir:    workDir,
+		PathPrefix: filepath.Join(filepath.Dir(workDir), "bin"),
+		logger:     logger,
 	}
 
 	// Refresh context files (issue_context.md, skills).
 	if err := writeContextFiles(workDir, provider, task); err != nil {
 		logger.Warn("execenv: refresh context files failed", "error", err)
+	}
+	if err := mountLocalRepo(workDir, task.CodeContext.Path); err != nil {
+		logger.Warn("execenv: refresh local repo mount failed", "error", err)
+	}
+	if err := writeMulticaWrapper(env.PathPrefix); err != nil {
+		logger.Warn("execenv: refresh multica wrapper failed", "error", err)
 	}
 
 	// Restore CodexHome for Codex provider — the per-task codex-home directory
@@ -194,6 +221,21 @@ func Reuse(workDir, provider, codexVersion string, task TaskContextForEnv, logge
 
 	logger.Info("execenv: reusing env", "workdir", workDir)
 	return env
+}
+
+func mountLocalRepo(workDir, localRepoPath string) error {
+	if localRepoPath == "" {
+		return nil
+	}
+	repoLink := filepath.Join(workDir, "repo")
+	if _, err := os.Lstat(repoLink); err == nil {
+		if err := os.Remove(repoLink); err != nil {
+			return err
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return createDirLink(localRepoPath, repoLink)
 }
 
 func writeCodexWorkspaceSkills(codexHome string, skills []SkillContextForEnv) error {

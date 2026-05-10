@@ -1,4 +1,4 @@
-import { forwardRef, useImperativeHandle, useRef, useState, type ReactNode } from "react";
+import { forwardRef, useImperativeHandle, useRef, useState, type ChangeEvent, type ReactNode } from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -32,6 +32,10 @@ const mockProjectsQuery = vi.hoisted(() => ({
   isSuccess: true,
 }));
 
+const mockAgentRuntimeMode = vi.hoisted(() => ({
+  value: "local" as "local" | "cloud",
+}));
+
 vi.mock("@tanstack/react-query", () => ({
   useQuery: ({ queryKey }: { queryKey: string[] }) => {
     switch (queryKey[0]) {
@@ -39,7 +43,7 @@ vi.mock("@tanstack/react-query", () => ({
         return { data: [{ user_id: "user-1", role: "admin" }] };
       case "agents":
         return {
-          data: [{ id: "agent-1", name: "Bohan", archived_at: null, runtime_id: "runtime-1" }],
+          data: [{ id: "agent-1", name: "Bohan", archived_at: null, runtime_id: "runtime-1", runtime_mode: mockAgentRuntimeMode.value }],
         };
       case "runtimes":
         return { data: [{ id: "runtime-1", metadata: { cli_version: "1.2.3" } }] };
@@ -91,6 +95,8 @@ vi.mock("@multica/core/auth", () => ({
   useAuthStore: (selector?: (state: { user: { id: string } }) => unknown) =>
     (selector ? selector({ user: { id: "user-1" } }) : { user: { id: "user-1" } }),
 }));
+
+const mockDesktopAPI = vi.hoisted(() => ({ selectDirectory: vi.fn() }));
 
 vi.mock("@multica/core/runtimes", () => ({
   runtimeListOptions: () => ({ queryKey: ["runtimes"] }),
@@ -188,12 +194,48 @@ vi.mock("@multica/ui/components/ui/button", () => ({
   ),
 }));
 
+vi.mock("@multica/ui/components/ui/input", () => ({
+  Input: ({
+    value,
+    disabled,
+    readOnly,
+    placeholder,
+    className,
+    onChange,
+  }: {
+    value?: string;
+    disabled?: boolean;
+    readOnly?: boolean;
+    placeholder?: string;
+    className?: string;
+    onChange?: (event: ChangeEvent<HTMLInputElement>) => void;
+  }) => (
+    <input
+      value={value}
+      disabled={disabled}
+      readOnly={readOnly}
+      placeholder={placeholder}
+      className={className}
+      onChange={onChange}
+    />
+  ),
+}));
+
 vi.mock("@multica/ui/components/ui/switch", () => ({
-  Switch: ({ checked, onCheckedChange }: { checked: boolean; onCheckedChange: (v: boolean) => void }) => (
+  Switch: ({
+    checked,
+    disabled,
+    onCheckedChange,
+  }: {
+    checked: boolean;
+    disabled?: boolean;
+    onCheckedChange: (v: boolean) => void;
+  }) => (
     <input
       aria-label="Create another"
       type="checkbox"
       checked={checked}
+      disabled={disabled}
       onChange={(e) => onCheckedChange(e.target.checked)}
     />
   ),
@@ -227,13 +269,19 @@ function renderPanel(props: React.ComponentProps<typeof AgentCreatePanel>) {
 describe("AgentCreatePanel", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    Object.defineProperty(window, "desktopAPI", {
+      configurable: true,
+      value: mockDesktopAPI,
+    });
     mockQuickCreateStore.lastAgentId = null;
     mockQuickCreateStore.lastProjectId = null;
     mockQuickCreateStore.prompt = "Persisted draft prompt";
     mockQuickCreateStore.keepOpen = false;
+    mockAgentRuntimeMode.value = "local";
     mockProjectsQuery.data = [];
     mockProjectsQuery.isSuccess = true;
     mockQuickCreateIssue.mockResolvedValue(undefined);
+    mockDesktopAPI.selectDirectory.mockResolvedValue("C:\\repo");
     mockSetKeepOpen.mockImplementation((value: boolean) => {
       mockQuickCreateStore.keepOpen = value;
     });
@@ -270,6 +318,7 @@ describe("AgentCreatePanel", () => {
         agent_id: "agent-1",
         prompt: "New agent prompt",
         project_id: undefined,
+        code_context: { type: "default_repo" },
       });
     });
 
@@ -311,5 +360,56 @@ describe("AgentCreatePanel", () => {
     renderPanel({ onClose: vi.fn(), isExpanded: false, setIsExpanded: vi.fn() });
 
     expect(mockSetLastProjectId).not.toHaveBeenCalled();
+  });
+
+  it("submits a selected local directory as code_context", async () => {
+    const user = userEvent.setup();
+
+    renderPanel({ onClose: vi.fn(), isExpanded: false, setIsExpanded: vi.fn() });
+
+    const switches = screen.getAllByRole("checkbox");
+    const codeContextSwitch = switches.find((element) =>
+      element.closest("label")?.textContent?.includes("Local directory"),
+    );
+    expect(codeContextSwitch).toBeDefined();
+
+    await user.click(codeContextSwitch!);
+    await user.click(screen.getByRole("button", { name: "Choose" }));
+
+    const editor = screen.getByPlaceholderText(
+      'Tell the agent what to do, e.g. "let Bohan fix the inbox loading slowness in the Web project"',
+    );
+    await user.clear(editor);
+    await user.type(editor, "Debug the local repo");
+    await user.click(screen.getByRole("button", { name: /^Create \(/i }));
+
+    await waitFor(() => {
+      expect(mockQuickCreateIssue).toHaveBeenCalledWith({
+        agent_id: "agent-1",
+        prompt: "Debug the local repo",
+        project_id: undefined,
+        code_context: { type: "local_path", path: "C:\\repo" },
+      });
+    });
+  });
+
+  it("blocks local directory when the selected agent is not using a local runtime", async () => {
+    const user = userEvent.setup();
+    mockAgentRuntimeMode.value = "cloud";
+
+    renderPanel({ onClose: vi.fn(), isExpanded: false, setIsExpanded: vi.fn() });
+
+    const switches = screen.getAllByRole("checkbox");
+    const codeContextSwitch = switches.find((element) =>
+      element.closest("label")?.textContent?.includes("Local directory"),
+    );
+    expect(codeContextSwitch).toBeDefined();
+
+    await user.click(codeContextSwitch!);
+
+    expect(
+      screen.getByText("Local directory is only available for agents using a local runtime."),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Choose" })).toBeDisabled();
   });
 });

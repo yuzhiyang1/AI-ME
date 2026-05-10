@@ -1,3 +1,5 @@
+import type { CodeContext } from "./code-context";
+
 export interface ChatSession {
   id: string;
   workspace_id: string;
@@ -5,6 +7,7 @@ export interface ChatSession {
   creator_id: string;
   title: string;
   status: "active" | "archived";
+  code_context: CodeContext;
   /** True when the session has any unread assistant replies. List-only. */
   has_unread: boolean;
   created_at: string;

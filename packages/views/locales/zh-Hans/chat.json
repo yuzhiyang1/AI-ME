@@ -58,6 +58,18 @@
     "active_group": "进行中",
     "archived_group_other": "{{count}} 条已归档"
   },
+  "code_context": {
+    "label": "代码来源",
+    "default_repo": "项目 / repo",
+    "local_path": "本地目录",
+    "desktop_choose": "选择目录",
+    "web_placeholder": "/absolute/path/to/code",
+    "desktop_hint": "使用当前机器上的目录。智能体仍会在隔离的任务环境中运行，并将该目录映射到 `repo/`。",
+    "web_hint": "这里填写的是所选 runtime 所在机器上的绝对路径。",
+    "runtime_blocked": "只有使用本地 runtime 的智能体才支持本地目录。",
+    "invalid_path": "请输入绝对路径。",
+    "session_locked": "当前 chat session 会继续使用创建时选择的代码来源。想切换目录，请新建会话。"
+  },
   "empty_state": {
     "first_time_title": "和你的智能体对话",
     "first_time_intro": "✨ 它们了解你的工作区——",

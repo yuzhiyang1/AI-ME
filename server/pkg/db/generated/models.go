@@ -41,6 +41,7 @@ type Agent struct {
 	CustomArgs         []byte             `json:"custom_args"`
 	McpConfig          []byte             `json:"mcp_config"`
 	Model              pgtype.Text        `json:"model"`
+	DefaultCodeContext []byte             `json:"default_code_context"`
 }
 
 type AgentRuntime struct {
@@ -178,6 +179,7 @@ type ChatSession struct {
 	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
 	UnreadSince pgtype.Timestamptz `json:"unread_since"`
 	RuntimeID   pgtype.UUID        `json:"runtime_id"`
+	CodeContext []byte             `json:"code_context"`
 }
 
 type Comment struct {
@@ -276,6 +278,7 @@ type Issue struct {
 	OriginType         pgtype.Text        `json:"origin_type"`
 	OriginID           pgtype.UUID        `json:"origin_id"`
 	FirstExecutedAt    pgtype.Timestamptz `json:"first_executed_at"`
+	CodeContext        []byte             `json:"code_context"`
 }
 
 type IssueDependency struct {

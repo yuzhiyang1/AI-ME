@@ -9,6 +9,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
 	"github.com/multica-ai/multica/server/internal/analytics"
+	"github.com/multica-ai/multica/server/internal/codecontext"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
@@ -18,8 +19,9 @@ import (
 // ---------------------------------------------------------------------------
 
 type CreateChatSessionRequest struct {
-	AgentID string `json:"agent_id"`
-	Title   string `json:"title"`
+	AgentID     string               `json:"agent_id"`
+	Title       string               `json:"title"`
+	CodeContext *codecontext.Context `json:"code_context,omitempty"`
 }
 
 func (h *Handler) CreateChatSession(w http.ResponseWriter, r *http.Request) {
@@ -60,12 +62,27 @@ func (h *Handler) CreateChatSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "agent is archived")
 		return
 	}
+	normalizedCodeContext, err := codecontext.Normalize(req.CodeContext)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if normalizedCodeContext.IsLocalPath() && agent.RuntimeMode != "local" {
+		writeError(w, http.StatusBadRequest, "local path code context requires a local runtime")
+		return
+	}
+	codeContextJSON, err := json.Marshal(normalizedCodeContext)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to encode code context")
+		return
+	}
 
 	session, err := h.Queries.CreateChatSession(r.Context(), db.CreateChatSessionParams{
 		WorkspaceID: workspaceUUID,
 		AgentID:     agentID,
 		CreatorID:   parseUUID(userID),
 		Title:       req.Title,
+		CodeContext: codeContextJSON,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create chat session")
@@ -98,17 +115,22 @@ func (h *Handler) ListChatSessions(w http.ResponseWriter, r *http.Request) {
 		}
 		resp = make([]ChatSessionResponse, len(rows))
 		for i, s := range rows {
-			resp[i] = ChatSessionResponse{
-				ID:          uuidToString(s.ID),
-				WorkspaceID: uuidToString(s.WorkspaceID),
-				AgentID:     uuidToString(s.AgentID),
-				CreatorID:   uuidToString(s.CreatorID),
+			resp[i] = chatSessionToResponse(db.ChatSession{
+				ID:          s.ID,
+				WorkspaceID: s.WorkspaceID,
+				AgentID:     s.AgentID,
+				CreatorID:   s.CreatorID,
 				Title:       s.Title,
+				SessionID:   s.SessionID,
+				WorkDir:     s.WorkDir,
 				Status:      s.Status,
-				HasUnread:   s.HasUnread,
-				CreatedAt:   timestampToString(s.CreatedAt),
-				UpdatedAt:   timestampToString(s.UpdatedAt),
-			}
+				CreatedAt:   s.CreatedAt,
+				UpdatedAt:   s.UpdatedAt,
+				UnreadSince: s.UnreadSince,
+				RuntimeID:   s.RuntimeID,
+				CodeContext: s.CodeContext,
+			})
+			resp[i].HasUnread = s.HasUnread
 		}
 	} else {
 		rows, err := h.Queries.ListChatSessionsByCreator(r.Context(), db.ListChatSessionsByCreatorParams{
@@ -121,17 +143,22 @@ func (h *Handler) ListChatSessions(w http.ResponseWriter, r *http.Request) {
 		}
 		resp = make([]ChatSessionResponse, len(rows))
 		for i, s := range rows {
-			resp[i] = ChatSessionResponse{
-				ID:          uuidToString(s.ID),
-				WorkspaceID: uuidToString(s.WorkspaceID),
-				AgentID:     uuidToString(s.AgentID),
-				CreatorID:   uuidToString(s.CreatorID),
+			resp[i] = chatSessionToResponse(db.ChatSession{
+				ID:          s.ID,
+				WorkspaceID: s.WorkspaceID,
+				AgentID:     s.AgentID,
+				CreatorID:   s.CreatorID,
 				Title:       s.Title,
+				SessionID:   s.SessionID,
+				WorkDir:     s.WorkDir,
 				Status:      s.Status,
-				HasUnread:   s.HasUnread,
-				CreatedAt:   timestampToString(s.CreatedAt),
-				UpdatedAt:   timestampToString(s.UpdatedAt),
-			}
+				CreatedAt:   s.CreatedAt,
+				UpdatedAt:   s.UpdatedAt,
+				UnreadSince: s.UnreadSince,
+				RuntimeID:   s.RuntimeID,
+				CodeContext: s.CodeContext,
+			})
+			resp[i].HasUnread = s.HasUnread
 		}
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -550,12 +577,13 @@ func (h *Handler) CancelTaskByUser(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 
 type ChatSessionResponse struct {
-	ID          string `json:"id"`
-	WorkspaceID string `json:"workspace_id"`
-	AgentID     string `json:"agent_id"`
-	CreatorID   string `json:"creator_id"`
-	Title       string `json:"title"`
-	Status      string `json:"status"`
+	ID          string              `json:"id"`
+	WorkspaceID string              `json:"workspace_id"`
+	AgentID     string              `json:"agent_id"`
+	CreatorID   string              `json:"creator_id"`
+	Title       string              `json:"title"`
+	Status      string              `json:"status"`
+	CodeContext codecontext.Context `json:"code_context"`
 	// Only populated by list endpoints — single-session fetches return false.
 	HasUnread bool   `json:"has_unread"`
 	CreatedAt string `json:"created_at"`
@@ -578,6 +606,15 @@ type ChatMessageResponse struct {
 }
 
 func chatSessionToResponse(s db.ChatSession) ChatSessionResponse {
+	ctx := codecontext.Default()
+	if len(s.CodeContext) > 0 {
+		var raw codecontext.Context
+		if err := json.Unmarshal(s.CodeContext, &raw); err == nil {
+			if normalized, err := codecontext.Normalize(&raw); err == nil {
+				ctx = normalized
+			}
+		}
+	}
 	return ChatSessionResponse{
 		ID:          uuidToString(s.ID),
 		WorkspaceID: uuidToString(s.WorkspaceID),
@@ -585,6 +622,7 @@ func chatSessionToResponse(s db.ChatSession) ChatSessionResponse {
 		CreatorID:   uuidToString(s.CreatorID),
 		Title:       s.Title,
 		Status:      s.Status,
+		CodeContext: ctx,
 		CreatedAt:   timestampToString(s.CreatedAt),
 		UpdatedAt:   timestampToString(s.UpdatedAt),
 	}

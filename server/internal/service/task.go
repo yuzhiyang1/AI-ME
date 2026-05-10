@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/analytics"
+	"github.com/multica-ai/multica/server/internal/codecontext"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/mention"
 	"github.com/multica-ai/multica/server/internal/realtime"
@@ -465,11 +466,12 @@ func (s *TaskService) EnqueueTaskForMention(ctx context.Context, issue db.Issue,
 // resources, and the prompt template instructs the agent to pass
 // `--project <uuid>` so the new issue lands in that project.
 type QuickCreateContext struct {
-	Type        string `json:"type"`
-	Prompt      string `json:"prompt"`
-	RequesterID string `json:"requester_id"`
-	WorkspaceID string `json:"workspace_id"`
-	ProjectID   string `json:"project_id,omitempty"`
+	Type        string              `json:"type"`
+	Prompt      string              `json:"prompt"`
+	RequesterID string              `json:"requester_id"`
+	WorkspaceID string              `json:"workspace_id"`
+	ProjectID   string              `json:"project_id,omitempty"`
+	CodeContext codecontext.Context `json:"code_context,omitempty"`
 }
 
 // QuickCreateContextType marks a task as a quick-create job.
@@ -485,7 +487,7 @@ const QuickCreateContextType = "quick_create"
 // projectID is optional (zero-valued pgtype.UUID when the user didn't pick
 // one). The handler is responsible for validating it belongs to the same
 // workspace before passing it in.
-func (s *TaskService) EnqueueQuickCreateTask(ctx context.Context, workspaceID, requesterID pgtype.UUID, agentID pgtype.UUID, prompt string, projectID pgtype.UUID) (db.AgentTaskQueue, error) {
+func (s *TaskService) EnqueueQuickCreateTask(ctx context.Context, workspaceID, requesterID pgtype.UUID, agentID pgtype.UUID, prompt string, projectID pgtype.UUID, ctxCode codecontext.Context) (db.AgentTaskQueue, error) {
 	agent, err := s.Queries.GetAgent(ctx, agentID)
 	if err != nil {
 		return db.AgentTaskQueue{}, fmt.Errorf("load agent: %w", err)
@@ -502,6 +504,7 @@ func (s *TaskService) EnqueueQuickCreateTask(ctx context.Context, workspaceID, r
 		Prompt:      prompt,
 		RequesterID: util.UUIDToString(requesterID),
 		WorkspaceID: util.UUIDToString(workspaceID),
+		CodeContext: ctxCode,
 	}
 	if projectID.Valid {
 		payload.ProjectID = util.UUIDToString(projectID)

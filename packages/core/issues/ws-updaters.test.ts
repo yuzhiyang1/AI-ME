@@ -46,6 +46,7 @@ const baseIssue: Issue = {
   creator_id: "user-1",
   parent_issue_id: null,
   project_id: null,
+  code_context: { type: "default_repo" },
   position: 0,
   due_date: null,
   labels: [labelA],

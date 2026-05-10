@@ -44,6 +44,7 @@ import { ModelPicker } from "./inspector/model-picker";
 import { RuntimePicker } from "./inspector/runtime-picker";
 import { SkillAttach } from "./inspector/skill-attach";
 import { VisibilityPicker } from "./inspector/visibility-picker";
+import { DefaultCodeContextPicker } from "./inspector/default-code-context-picker";
 
 interface InspectorProps {
   agent: Agent;
@@ -142,6 +143,13 @@ export function AgentDetailInspector({
             value={agent.max_concurrent_tasks}
             canEdit={canEdit}
             onChange={(n) => update({ max_concurrent_tasks: n })}
+          />
+        </PropRow>
+        <PropRow label="Workspace" interactive={false}>
+          <DefaultCodeContextPicker
+            agent={agent}
+            canEdit={canEdit}
+            onChange={(value) => update({ default_code_context: value })}
           />
         </PropRow>
       </Section>

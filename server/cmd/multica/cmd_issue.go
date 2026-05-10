@@ -16,28 +16,54 @@ import (
 	"github.com/multica-ai/multica/server/internal/util"
 )
 
-// resolveTextFlag picks between a `--<name>` flag value and a paired
-// `--<name>-stdin` flag, mirroring the existing `--content` / `--content-stdin`
-// pattern. It returns the resolved string and an error when both are set or
-// stdin is requested but produces no body. Inline flag values are passed
-// through util.UnescapeBackslashEscapes so bash-double-quoted `\n` becomes a
-// real newline; stdin bodies are returned verbatim so literal backslashes
+// resolveTextFlag picks between a `--<name>` flag value, paired
+// `--<name>-stdin`, and optional `--<name>-file` flag. It returns the resolved
+// string and an error when more than one source is set or when stdin/file input
+// produces no body. Inline flag values are passed through
+// util.UnescapeBackslashEscapes so bash-double-quoted `\n` becomes a real
+// newline; stdin/file bodies are returned verbatim so literal backslashes
 // survive intact.
 func resolveTextFlag(cmd *cobra.Command, flagName string) (string, bool, error) {
 	stdinFlag := flagName + "-stdin"
+	fileFlag := flagName + "-file"
 	useStdin, _ := cmd.Flags().GetBool(stdinFlag)
 	inline, _ := cmd.Flags().GetString(flagName)
-	if useStdin && inline != "" {
-		return "", false, fmt.Errorf("--%s and --%s are mutually exclusive", flagName, stdinFlag)
+	filePath := ""
+	if cmd.Flags().Lookup(fileFlag) != nil {
+		filePath, _ = cmd.Flags().GetString(fileFlag)
+	}
+	setCount := 0
+	if inline != "" {
+		setCount++
+	}
+	if useStdin {
+		setCount++
+	}
+	if filePath != "" {
+		setCount++
+	}
+	if setCount > 1 {
+		return "", false, fmt.Errorf("--%s, --%s, and --%s are mutually exclusive", flagName, stdinFlag, fileFlag)
 	}
 	if useStdin {
 		data, err := io.ReadAll(os.Stdin)
 		if err != nil {
 			return "", false, fmt.Errorf("read stdin for --%s: %w", stdinFlag, err)
 		}
-		body := strings.TrimSuffix(string(data), "\n")
+		body := normalizeTextFlagBytes(data)
 		if body == "" {
 			return "", false, fmt.Errorf("stdin content for --%s is empty", stdinFlag)
+		}
+		return body, true, nil
+	}
+	if filePath != "" {
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			return "", false, fmt.Errorf("read file for --%s: %w", fileFlag, err)
+		}
+		body := normalizeTextFlagBytes(data)
+		if body == "" {
+			return "", false, fmt.Errorf("file content for --%s is empty", fileFlag)
 		}
 		return body, true, nil
 	}
@@ -45,6 +71,11 @@ func resolveTextFlag(cmd *cobra.Command, flagName string) (string, bool, error) 
 		return "", false, nil
 	}
 	return util.UnescapeBackslashEscapes(inline), true, nil
+}
+
+func normalizeTextFlagBytes(data []byte) string {
+	const utf8BOM = "\ufeff"
+	return strings.TrimPrefix(strings.TrimSuffix(string(data), "\n"), utf8BOM)
 }
 
 var issueCmd = &cobra.Command{
@@ -220,22 +251,25 @@ func init() {
 
 	// issue create
 	issueCreateCmd.Flags().String("title", "", "Issue title (required)")
-	issueCreateCmd.Flags().String("description", "", "Issue description (decodes \\n, \\r, \\t, \\\\; pipe via --description-stdin to preserve literal backslashes)")
+	issueCreateCmd.Flags().String("description", "", "Issue description (decodes \\n, \\r, \\t, \\\\; use --description-stdin/--description-file to preserve literal backslashes)")
 	issueCreateCmd.Flags().Bool("description-stdin", false, "Read issue description from stdin (preserves multi-line content verbatim)")
+	issueCreateCmd.Flags().String("description-file", "", "Read issue description from a UTF-8 file (preserves multi-line content verbatim)")
 	issueCreateCmd.Flags().String("status", "", "Issue status")
 	issueCreateCmd.Flags().String("priority", "", "Issue priority")
 	issueCreateCmd.Flags().String("assignee", "", "Assignee name (member or agent; fuzzy match)")
 	issueCreateCmd.Flags().String("assignee-id", "", "Assignee UUID (mutually exclusive with --assignee)")
 	issueCreateCmd.Flags().String("parent", "", "Parent issue ID")
 	issueCreateCmd.Flags().String("project", "", "Project ID")
+	issueCreateCmd.Flags().String("local-path", "", "Absolute local code directory for the assigned local agent")
 	issueCreateCmd.Flags().String("due-date", "", "Due date (RFC3339 format)")
 	issueCreateCmd.Flags().String("output", "json", "Output format: table or json")
 	issueCreateCmd.Flags().StringSlice("attachment", nil, "File path(s) to attach (can be specified multiple times)")
 
 	// issue update
 	issueUpdateCmd.Flags().String("title", "", "New title")
-	issueUpdateCmd.Flags().String("description", "", "New description (decodes \\n, \\r, \\t, \\\\; pipe via --description-stdin to preserve literal backslashes)")
+	issueUpdateCmd.Flags().String("description", "", "New description (decodes \\n, \\r, \\t, \\\\; use --description-stdin/--description-file to preserve literal backslashes)")
 	issueUpdateCmd.Flags().Bool("description-stdin", false, "Read new description from stdin (preserves multi-line content verbatim)")
+	issueUpdateCmd.Flags().String("description-file", "", "Read new description from a UTF-8 file (preserves multi-line content verbatim)")
 	issueUpdateCmd.Flags().String("status", "", "New status")
 	issueUpdateCmd.Flags().String("priority", "", "New priority")
 	issueUpdateCmd.Flags().String("assignee", "", "New assignee name (member or agent; fuzzy match)")
@@ -271,8 +305,9 @@ func init() {
 	issueRunMessagesCmd.Flags().String("issue", "", "Issue ID/key to scope short task ID prefix resolution")
 
 	// issue comment add
-	issueCommentAddCmd.Flags().String("content", "", "Comment content (decodes \\n, \\r, \\t, \\\\; pipe via --content-stdin for multi-line bodies or to preserve literal backslashes)")
+	issueCommentAddCmd.Flags().String("content", "", "Comment content (decodes \\n, \\r, \\t, \\\\; use --content-stdin/--content-file for multi-line bodies or to preserve literal backslashes)")
 	issueCommentAddCmd.Flags().Bool("content-stdin", false, "Read comment content from stdin (preserves multi-line content verbatim)")
+	issueCommentAddCmd.Flags().String("content-file", "", "Read comment content from a UTF-8 file (preserves multi-line content verbatim)")
 	issueCommentAddCmd.Flags().String("parent", "", "Parent comment ID (reply to a specific comment)")
 	issueCommentAddCmd.Flags().StringSlice("attachment", nil, "File path(s) to attach (can be specified multiple times)")
 	issueCommentAddCmd.Flags().String("output", "json", "Output format: table or json")
@@ -515,6 +550,9 @@ func runIssueCreate(cmd *cobra.Command, _ []string) error {
 		}
 		body["project_id"] = project.ID
 	}
+	if v, _ := cmd.Flags().GetString("local-path"); v != "" {
+		body["code_context"] = map[string]any{"type": "local_path", "path": v}
+	}
 	if v, _ := cmd.Flags().GetString("due-date"); v != "" {
 		body["due_date"] = v
 	}
@@ -623,7 +661,7 @@ func runIssueUpdate(cmd *cobra.Command, args []string) error {
 		v, _ := cmd.Flags().GetString("title")
 		body["title"] = v
 	}
-	if cmd.Flags().Changed("description") || cmd.Flags().Changed("description-stdin") {
+	if cmd.Flags().Changed("description") || cmd.Flags().Changed("description-stdin") || cmd.Flags().Changed("description-file") {
 		desc, _, err := resolveTextFlag(cmd, "description")
 		if err != nil {
 			return err

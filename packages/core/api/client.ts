@@ -81,6 +81,7 @@ import type {
   ListAutopilotRunsResponse,
   NotificationPreferenceResponse,
   NotificationPreferences,
+  CodeContext,
 } from "../types";
 import type { OnboardingCompletionPath } from "../onboarding/types";
 import { type Logger, noopLogger } from "../logger";
@@ -95,6 +96,12 @@ import {
   ListIssuesResponseSchema,
   SubscribersListSchema,
   TimelineEntriesSchema,
+  ChatSessionsSchema,
+  ChatSessionSchema,
+  ChatMessagesSchema,
+  ChatPendingTaskSchema,
+  PendingChatTasksResponseSchema,
+  SendChatMessageResponseSchema,
 } from "./schemas";
 
 /** Identifies the calling client to the server.
@@ -442,7 +449,7 @@ export class ApiClient {
     });
   }
 
-  async quickCreateIssue(data: { agent_id: string; prompt: string; project_id?: string | null }): Promise<{ task_id: string }> {
+  async quickCreateIssue(data: { agent_id: string; prompt: string; project_id?: string | null; code_context?: CodeContext }): Promise<{ task_id: string }> {
     return this.fetch("/api/issues/quick-create", {
       method: "POST",
       body: JSON.stringify(data),
@@ -1040,17 +1047,48 @@ export class ApiClient {
   // Chat Sessions
   async listChatSessions(params?: { status?: string }): Promise<ChatSession[]> {
     const query = params?.status ? `?status=${params.status}` : "";
-    return this.fetch(`/api/chat/sessions${query}`);
+    const raw = await this.fetch<unknown>(`/api/chat/sessions${query}`);
+    return parseWithFallback(raw, ChatSessionsSchema, [], {
+      endpoint: "GET /api/chat/sessions",
+    });
   }
 
   async getChatSession(id: string): Promise<ChatSession> {
-    return this.fetch(`/api/chat/sessions/${id}`);
+    const raw = await this.fetch<unknown>(`/api/chat/sessions/${id}`);
+    return parseWithFallback(raw, ChatSessionSchema, {
+      id: "",
+      workspace_id: "",
+      agent_id: "",
+      creator_id: "",
+      title: "",
+      status: "active",
+      code_context: { type: "default_repo" },
+      has_unread: false,
+      created_at: "",
+      updated_at: "",
+    }, {
+      endpoint: "GET /api/chat/sessions/:id",
+    });
   }
 
-  async createChatSession(data: { agent_id: string; title?: string }): Promise<ChatSession> {
-    return this.fetch("/api/chat/sessions", {
+  async createChatSession(data: { agent_id: string; title?: string; code_context?: CodeContext }): Promise<ChatSession> {
+    const raw = await this.fetch<unknown>("/api/chat/sessions", {
       method: "POST",
       body: JSON.stringify(data),
+    });
+    return parseWithFallback(raw, ChatSessionSchema, {
+      id: "",
+      workspace_id: "",
+      agent_id: "",
+      creator_id: "",
+      title: "",
+      status: "active",
+      code_context: { type: "default_repo" },
+      has_unread: false,
+      created_at: "",
+      updated_at: "",
+    }, {
+      endpoint: "POST /api/chat/sessions",
     });
   }
 
@@ -1059,22 +1097,38 @@ export class ApiClient {
   }
 
   async listChatMessages(sessionId: string): Promise<ChatMessage[]> {
-    return this.fetch(`/api/chat/sessions/${sessionId}/messages`);
+    const raw = await this.fetch<unknown>(`/api/chat/sessions/${sessionId}/messages`);
+    return parseWithFallback(raw, ChatMessagesSchema, [], {
+      endpoint: "GET /api/chat/sessions/:id/messages",
+    });
   }
 
   async sendChatMessage(sessionId: string, content: string): Promise<SendChatMessageResponse> {
-    return this.fetch(`/api/chat/sessions/${sessionId}/messages`, {
+    const raw = await this.fetch<unknown>(`/api/chat/sessions/${sessionId}/messages`, {
       method: "POST",
       body: JSON.stringify({ content }),
+    });
+    return parseWithFallback(raw, SendChatMessageResponseSchema, {
+      message_id: "",
+      task_id: "",
+      created_at: "",
+    }, {
+      endpoint: "POST /api/chat/sessions/:id/messages",
     });
   }
 
   async getPendingChatTask(sessionId: string): Promise<ChatPendingTask> {
-    return this.fetch(`/api/chat/sessions/${sessionId}/pending-task`);
+    const raw = await this.fetch<unknown>(`/api/chat/sessions/${sessionId}/pending-task`);
+    return parseWithFallback(raw, ChatPendingTaskSchema, {}, {
+      endpoint: "GET /api/chat/sessions/:id/pending-task",
+    });
   }
 
   async listPendingChatTasks(): Promise<PendingChatTasksResponse> {
-    return this.fetch(`/api/chat/pending-tasks`);
+    const raw = await this.fetch<unknown>(`/api/chat/pending-tasks`);
+    return parseWithFallback(raw, PendingChatTasksResponseSchema, { tasks: [] }, {
+      endpoint: "GET /api/chat/pending-tasks",
+    });
   }
 
   async markChatSessionRead(sessionId: string): Promise<void> {

@@ -17,6 +17,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/analytics"
+	"github.com/multica-ai/multica/server/internal/codecontext"
 	"github.com/multica-ai/multica/server/internal/daemonws"
 	"github.com/multica-ai/multica/server/internal/middleware"
 	"github.com/multica-ai/multica/server/internal/service"
@@ -1036,14 +1037,17 @@ func (h *Handler) ClaimTaskByRuntime(w http.ResponseWriter, r *http.Request) {
 
 	// Include workspace ID and repos so the daemon can set up worktrees.
 	//
-	// Repo precedence: project-bound github_repo resources override workspace
-	// repos when present. Mixing both would just confuse the agent — if a
-	// project explicitly attached its repos, those are the authoritative set
-	// for issues inside that project. When the project has no github_repo
-	// resources (or no project at all), we fall back to the workspace repos.
+	// Repo precedence: local_path code context overrides everything because the
+	// daemon mounts repo/ directly from the runtime machine. Otherwise,
+	// project-bound github_repo resources override workspace repos when present.
+	// Mixing both would just confuse the agent — if a project explicitly
+	// attached its repos, those are the authoritative set for issues inside
+	// that project. When the project has no github_repo resources (or no
+	// project at all), we fall back to the workspace repos.
 	if task.IssueID.Valid {
 		if issue, err := h.Queries.GetIssue(r.Context(), task.IssueID); err == nil {
 			resp.WorkspaceID = uuidToString(issue.WorkspaceID)
+			resp.CodeContext = issueCodeContext(issue.CodeContext)
 
 			var projectRepos []RepoData
 			if issue.ProjectID.Valid {
@@ -1084,7 +1088,9 @@ func (h *Handler) ClaimTaskByRuntime(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
-			if len(projectRepos) > 0 {
+			if resp.CodeContext.IsLocalPath() {
+				resp.Repos = nil
+			} else if len(projectRepos) > 0 {
 				resp.Repos = projectRepos
 			} else if ws, err := h.Queries.GetWorkspace(r.Context(), issue.WorkspaceID); err == nil && ws.Repos != nil {
 				var repos []RepoData
@@ -1150,10 +1156,22 @@ func (h *Handler) ClaimTaskByRuntime(w http.ResponseWriter, r *http.Request) {
 		if cs, err := h.Queries.GetChatSession(r.Context(), task.ChatSessionID); err == nil {
 			resp.WorkspaceID = uuidToString(cs.WorkspaceID)
 			resp.ChatSessionID = uuidToString(cs.ID)
-			if ws, err := h.Queries.GetWorkspace(r.Context(), cs.WorkspaceID); err == nil && ws.Repos != nil {
-				var repos []RepoData
-				if json.Unmarshal(ws.Repos, &repos) == nil && len(repos) > 0 {
-					resp.Repos = repos
+			ctx := codecontext.Default()
+			if len(cs.CodeContext) > 0 {
+				var raw codecontext.Context
+				if err := json.Unmarshal(cs.CodeContext, &raw); err == nil {
+					if normalized, err := codecontext.Normalize(&raw); err == nil {
+						ctx = normalized
+					}
+				}
+			}
+			resp.CodeContext = ctx
+			if !resp.CodeContext.IsLocalPath() {
+				if ws, err := h.Queries.GetWorkspace(r.Context(), cs.WorkspaceID); err == nil && ws.Repos != nil {
+					var repos []RepoData
+					if json.Unmarshal(ws.Repos, &repos) == nil && len(repos) > 0 {
+						resp.Repos = repos
+					}
 				}
 			}
 			// Resume chat sessions only when the stored pointer was produced
@@ -1231,6 +1249,7 @@ func (h *Handler) ClaimTaskByRuntime(w http.ResponseWriter, r *http.Request) {
 			hasQuickCreate = true
 			resp.QuickCreatePrompt = qc.Prompt
 			resp.WorkspaceID = qc.WorkspaceID
+			resp.CodeContext = qc.CodeContext
 
 			// When the user picked a project in the modal, surface its title
 			// and resources to the daemon so the agent has the same context
@@ -1276,7 +1295,9 @@ func (h *Handler) ClaimTaskByRuntime(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
-			if len(projectRepos) > 0 {
+			if resp.CodeContext.IsLocalPath() {
+				resp.Repos = nil
+			} else if len(projectRepos) > 0 {
 				resp.Repos = projectRepos
 			} else if ws, err := h.Queries.GetWorkspace(r.Context(), parseUUID(qc.WorkspaceID)); err == nil && ws.Repos != nil {
 				var repos []RepoData

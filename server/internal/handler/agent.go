@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/analytics"
+	"github.com/multica-ai/multica/server/internal/codecontext"
 	"github.com/multica-ai/multica/server/internal/logger"
 	"github.com/multica-ai/multica/server/internal/service"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -45,6 +46,7 @@ type AgentResponse struct {
 	Status             string              `json:"status"`
 	MaxConcurrentTasks int32               `json:"max_concurrent_tasks"`
 	Model              string              `json:"model"`
+	DefaultCodeContext codecontext.Context `json:"default_code_context"`
 	OwnerID            *string             `json:"owner_id"`
 	Skills             []AgentSkillSummary `json:"skills"`
 	CreatedAt          string              `json:"created_at"`
@@ -104,6 +106,7 @@ func agentToResponse(a db.Agent) AgentResponse {
 		Status:             a.Status,
 		MaxConcurrentTasks: a.MaxConcurrentTasks,
 		Model:              a.Model.String,
+		DefaultCodeContext: decodeCodeContext(a.DefaultCodeContext),
 		OwnerID:            uuidToPtr(a.OwnerID),
 		Skills:             []AgentSkillSummary{},
 		CreatedAt:          timestampToString(a.CreatedAt),
@@ -155,6 +158,7 @@ type AgentTaskResponse struct {
 	ProjectID               string                `json:"project_id,omitempty"`        // issue's project, when present
 	ProjectTitle            string                `json:"project_title,omitempty"`     // for surfacing in agent context
 	ProjectResources        []ProjectResourceData `json:"project_resources,omitempty"` // resources attached to the project
+	CodeContext             codecontext.Context   `json:"code_context"`
 	CreatedAt               string                `json:"created_at"`
 	PriorSessionID          string                `json:"prior_session_id,omitempty"`          // session ID from a previous task on same issue
 	PriorWorkDir            string                `json:"prior_work_dir,omitempty"`            // work_dir from a previous task on same issue
@@ -219,6 +223,7 @@ func taskToResponse(t db.AgentTaskQueue) AgentTaskResponse {
 		MaxAttempts:      t.MaxAttempts,
 		ParentTaskID:     uuidToPtr(t.ParentTaskID),
 		CreatedAt:        timestampToString(t.CreatedAt),
+		CodeContext:      codecontext.Default(),
 		TriggerCommentID: uuidToPtr(t.TriggerCommentID),
 		TriggerSummary:   textToPtr(t.TriggerSummary),
 		WorkDir:          workDir,
@@ -347,18 +352,19 @@ func (h *Handler) GetAgent(w http.ResponseWriter, r *http.Request) {
 }
 
 type CreateAgentRequest struct {
-	Name               string            `json:"name"`
-	Description        string            `json:"description"`
-	Instructions       string            `json:"instructions"`
-	AvatarURL          *string           `json:"avatar_url"`
-	RuntimeID          string            `json:"runtime_id"`
-	RuntimeConfig      any               `json:"runtime_config"`
-	CustomEnv          map[string]string `json:"custom_env"`
-	CustomArgs         []string          `json:"custom_args"`
-	McpConfig          json.RawMessage   `json:"mcp_config"`
-	Visibility         string            `json:"visibility"`
-	MaxConcurrentTasks int32             `json:"max_concurrent_tasks"`
-	Model              string            `json:"model"`
+	Name               string               `json:"name"`
+	Description        string               `json:"description"`
+	Instructions       string               `json:"instructions"`
+	AvatarURL          *string              `json:"avatar_url"`
+	RuntimeID          string               `json:"runtime_id"`
+	RuntimeConfig      any                  `json:"runtime_config"`
+	CustomEnv          map[string]string    `json:"custom_env"`
+	CustomArgs         []string             `json:"custom_args"`
+	McpConfig          json.RawMessage      `json:"mcp_config"`
+	DefaultCodeContext *codecontext.Context `json:"default_code_context"`
+	Visibility         string               `json:"visibility"`
+	MaxConcurrentTasks int32                `json:"max_concurrent_tasks"`
+	Model              string               `json:"model"`
 	// Template records which template slug was used to seed this agent
 	// (e.g. "coding" / "planning" / "writing" / "assistant"). Empty when
 	// the caller didn't come from a template picker — the `agent_created`
@@ -470,6 +476,24 @@ func (h *Handler) CreateAgent(w http.ResponseWriter, r *http.Request) {
 		mc = append([]byte(nil), rawMcpConfig...)
 	}
 
+	var defaultCodeContextJSON []byte
+	if _, ok := rawFields["default_code_context"]; ok {
+		normalized, err := codecontext.Normalize(req.DefaultCodeContext)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if normalized.IsLocalPath() && runtime.RuntimeMode != "local" {
+			writeError(w, http.StatusBadRequest, "local path code context requires a local runtime")
+			return
+		}
+		defaultCodeContextJSON, err = json.Marshal(normalized)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to encode default code context")
+			return
+		}
+	}
+
 	agent, err := h.Queries.CreateAgent(r.Context(), db.CreateAgentParams{
 		WorkspaceID:        wsUUID,
 		Name:               req.Name,
@@ -486,6 +510,7 @@ func (h *Handler) CreateAgent(w http.ResponseWriter, r *http.Request) {
 		CustomArgs:         ca,
 		McpConfig:          mc,
 		Model:              pgtype.Text{String: req.Model, Valid: req.Model != ""},
+		DefaultCodeContext: defaultCodeContextJSON,
 	})
 	if err != nil {
 		// Unique constraint on (workspace_id, name) — return a clear conflict error
@@ -524,19 +549,20 @@ func (h *Handler) CreateAgent(w http.ResponseWriter, r *http.Request) {
 }
 
 type UpdateAgentRequest struct {
-	Name               *string            `json:"name"`
-	Description        *string            `json:"description"`
-	Instructions       *string            `json:"instructions"`
-	AvatarURL          *string            `json:"avatar_url"`
-	RuntimeID          *string            `json:"runtime_id"`
-	RuntimeConfig      any                `json:"runtime_config"`
-	CustomEnv          *map[string]string `json:"custom_env"`
-	CustomArgs         *[]string          `json:"custom_args"`
-	McpConfig          *json.RawMessage   `json:"mcp_config"`
-	Visibility         *string            `json:"visibility"`
-	Status             *string            `json:"status"`
-	MaxConcurrentTasks *int32             `json:"max_concurrent_tasks"`
-	Model              *string            `json:"model"`
+	Name               *string              `json:"name"`
+	Description        *string              `json:"description"`
+	Instructions       *string              `json:"instructions"`
+	AvatarURL          *string              `json:"avatar_url"`
+	RuntimeID          *string              `json:"runtime_id"`
+	RuntimeConfig      any                  `json:"runtime_config"`
+	CustomEnv          *map[string]string   `json:"custom_env"`
+	CustomArgs         *[]string            `json:"custom_args"`
+	McpConfig          *json.RawMessage     `json:"mcp_config"`
+	DefaultCodeContext *codecontext.Context `json:"default_code_context"`
+	Visibility         *string              `json:"visibility"`
+	Status             *string              `json:"status"`
+	MaxConcurrentTasks *int32               `json:"max_concurrent_tasks"`
+	Model              *string              `json:"model"`
 }
 
 // canViewAgentEnv checks whether the requesting user is allowed to see the
@@ -642,6 +668,7 @@ func (h *Handler) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 	if hasMcpConfig && !shouldClearMcpConfig {
 		params.McpConfig = append([]byte(nil), rawMcpConfig...)
 	}
+	effectiveRuntimeMode := agent.RuntimeMode
 	if req.RuntimeID != nil {
 		runtimeUUID, ok := parseUUIDOrBadRequest(w, *req.RuntimeID, "runtime_id")
 		if !ok {
@@ -657,6 +684,7 @@ func (h *Handler) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 		}
 		params.RuntimeID = runtime.ID
 		params.RuntimeMode = pgtype.Text{String: runtime.RuntimeMode, Valid: true}
+		effectiveRuntimeMode = runtime.RuntimeMode
 	}
 	if req.Visibility != nil {
 		params.Visibility = pgtype.Text{String: *req.Visibility, Valid: true}
@@ -669,6 +697,28 @@ func (h *Handler) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Model != nil {
 		params.Model = pgtype.Text{String: *req.Model, Valid: true}
+	}
+	rawDefaultCodeContext, hasDefaultCodeContext := rawFields["default_code_context"]
+	shouldClearDefaultCodeContext := hasDefaultCodeContext && bytes.Equal(bytes.TrimSpace(rawDefaultCodeContext), []byte("null"))
+	if hasDefaultCodeContext && !shouldClearDefaultCodeContext {
+		normalized, err := codecontext.Normalize(req.DefaultCodeContext)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if normalized.IsLocalPath() && effectiveRuntimeMode != "local" {
+			writeError(w, http.StatusBadRequest, "local path code context requires a local runtime")
+			return
+		}
+		encoded, err := json.Marshal(normalized)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to encode default code context")
+			return
+		}
+		params.DefaultCodeContext = encoded
+	} else if !shouldClearDefaultCodeContext && effectiveRuntimeMode != "local" && decodeCodeContext(agent.DefaultCodeContext).IsLocalPath() {
+		writeError(w, http.StatusBadRequest, "local path code context requires a local runtime")
+		return
 	}
 
 	agent, err = h.Queries.UpdateAgent(r.Context(), params)
@@ -685,6 +735,14 @@ func (h *Handler) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			slog.Warn("clear agent mcp_config failed", append(logger.RequestAttrs(r), "error", err, "agent_id", id)...)
 			writeError(w, http.StatusInternalServerError, "failed to clear mcp_config: "+err.Error())
+			return
+		}
+	}
+	if shouldClearDefaultCodeContext {
+		agent, err = h.Queries.ClearAgentDefaultCodeContext(r.Context(), agent.ID)
+		if err != nil {
+			slog.Warn("clear agent default_code_context failed", append(logger.RequestAttrs(r), "error", err, "agent_id", id)...)
+			writeError(w, http.StatusInternalServerError, "failed to clear default_code_context: "+err.Error())
 			return
 		}
 	}

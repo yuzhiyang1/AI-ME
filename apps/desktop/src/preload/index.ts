@@ -3,7 +3,7 @@ import { electronAPI } from "@electron-toolkit/preload";
 import type { RuntimeConfigResult } from "../shared/runtime-config";
 
 // Synchronously fetch app metadata from main at preload time so the renderer
-// can pass it into CoreProvider during the initial render — the alternative
+// can pass it into CoreProvider during the initial render —the alternative
 // (async ipc.invoke) would race the ApiClient construction in initCore and
 // the first few HTTP requests would go out without X-Client-Version/OS.
 function fetchAppInfo(): { version: string; os: "macos" | "windows" | "linux" | "unknown" } {
@@ -41,7 +41,7 @@ const appInfo = fetchAppInfo();
 const runtimeConfig = fetchRuntimeConfig();
 
 // Read the OS-preferred locale that main injected via additionalArguments.
-// Zero IPC, zero blocking — process.argv is populated before preload runs.
+// Zero IPC, zero blocking —process.argv is populated before preload runs.
 function fetchSystemLocale(): string {
   const arg = process.argv.find((a) => a.startsWith("--multica-locale="));
   return arg?.split("=")[1] ?? "en";
@@ -87,14 +87,16 @@ const desktopAPI = {
       ipcRenderer.removeListener("invite:open", handler);
     };
   },
+  selectDirectory: (): Promise<string | null> =>
+    ipcRenderer.invoke("dialog:select-directory"),
   /** Open a URL in the default browser */
   openExternal: (url: string) => ipcRenderer.invoke("shell:openExternal", url),
-  /** Toggle immersive mode — hide macOS traffic lights for full-screen modals */
+  /** Toggle immersive mode —hide macOS traffic lights for full-screen modals */
   setImmersiveMode: (immersive: boolean) =>
     ipcRenderer.invoke("window:setImmersive", immersive),
   /**
    * Show a native OS notification for a new inbox item. Fired from the
-   * renderer only when the app is unfocused — in-focus feedback is the
+   * renderer only when the app is unfocused —in-focus feedback is the
    * inbox sidebar's unread styling. `slug`, `itemId`, and `issueKey` are
    * all round-tripped on click: slug pins routing to the source workspace
    * (the user may switch workspaces before clicking the banner), itemId

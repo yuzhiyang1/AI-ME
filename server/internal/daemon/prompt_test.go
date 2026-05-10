@@ -20,6 +20,10 @@ func TestBuildQuickCreatePromptRules(t *testing.T) {
 		// high-fidelity invariant
 		"Faithfully restate what the user wants",
 		"Preserve specific names, identifiers, file paths",
+		// multi-line/non-ASCII descriptions must not be passed inline on Windows
+		"--description-file",
+		"--description-stdin",
+		"OutputEncoding",
 		// strip non-spec material: verbal routing wrappers + conversational fillers
 		"verbal routing wrappers about creating the issue",
 		"pure conversational fillers",
@@ -74,5 +78,35 @@ func TestBuildQuickCreatePromptProjectPinning(t *testing.T) {
 	}
 	if strings.Contains(plain, "--project") {
 		t.Errorf("buildQuickCreatePrompt without project must NOT mention --project, got:\n%s", plain)
+	}
+}
+
+func TestBuildQuickCreatePromptLocalPathPinning(t *testing.T) {
+	const localPath = `D:\program\code\workSpace\Lottery-master`
+	const renderedLocalPath = `D:\\program\\code\\workSpace\\Lottery-master`
+	out := buildQuickCreatePrompt(Task{
+		QuickCreatePrompt: "fix lottery bug",
+		CodeContext: CodeContext{
+			Type: "local_path",
+			Path: localPath,
+		},
+	})
+	mustContain := []string{
+		"--local-path",
+		renderedLocalPath,
+		"preserves the local code directory",
+		"include this section",
+		"mounted `repo/` directory",
+		"Do NOT write that the workspace has no code repository",
+	}
+	for _, s := range mustContain {
+		if !strings.Contains(out, s) {
+			t.Errorf("buildQuickCreatePrompt with local path missing %q\n--- output ---\n%s", s, out)
+		}
+	}
+
+	plain := buildQuickCreatePrompt(Task{QuickCreatePrompt: "fix lottery bug"})
+	if strings.Contains(plain, "--local-path") {
+		t.Errorf("buildQuickCreatePrompt without local path must NOT mention --local-path, got:\n%s", plain)
 	}
 }

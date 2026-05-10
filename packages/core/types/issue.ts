@@ -1,4 +1,5 @@
 import type { Label } from "./label";
+import type { CodeContext } from "./code-context";
 
 export type IssueStatus =
   | "backlog"
@@ -37,6 +38,7 @@ export interface Issue {
   creator_id: string;
   parent_issue_id: string | null;
   project_id: string | null;
+  code_context?: CodeContext;
   position: number;
   due_date: string | null;
   reactions?: IssueReaction[];
