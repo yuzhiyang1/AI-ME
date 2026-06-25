@@ -25,6 +25,10 @@ Multica is an AI-native task management platform — like Linear, but with AI ag
 - Supports local (daemon) and cloud agent runtimes
 - Built for 2-10 person AI-native teams
 
+## Project-Local Skills
+
+- `skills/aime-ui/SKILL.md` — use for AI-Me frontend design, implementation, review, and visual QA. It covers the AI-Me cockpit, board, exceptions, approvals, threads, memory, agents, tools/permissions, settings, and shared UI patterns.
+
 ## Architecture
 
 **Go backend + monorepo frontend (pnpm workspaces + Turborepo) with shared packages.**

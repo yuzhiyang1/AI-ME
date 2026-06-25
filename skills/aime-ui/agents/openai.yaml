@@ -1,0 +1,7 @@
+interface:
+  display_name: "AI-Me UI"
+  short_description: "Design and review AI-Me product UI"
+  default_prompt: "Use $aime-ui to design, implement, or review an AI-Me frontend page in this Multica codebase."
+
+policy:
+  allow_implicit_invocation: true
