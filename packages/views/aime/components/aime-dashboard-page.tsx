@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
   AlertCircle,
@@ -8,14 +9,23 @@ import {
   Bot,
   BrainCircuit,
   CheckCircle2,
+  Clock3,
   Clipboard,
+  Database,
+  ExternalLink,
+  Inbox,
   ListChecks,
   Loader2,
   Send,
   ShieldAlert,
   Sparkles,
+  UserCheck,
 } from "lucide-react";
+import { agentTaskSnapshotOptions } from "@multica/core/agents";
 import { aimeCockpitSummaryOptions, useThinkAIMe } from "@multica/core/aime";
+import { approvalListOptions } from "@multica/core/approvals";
+import { inboxListOptions, deduplicateInboxItems } from "@multica/core/inbox/queries";
+import { memoryListOptions } from "@multica/core/memory";
 import { agentListOptions } from "@multica/core/workspace";
 import { issueListOptions } from "@multica/core/issues";
 import { useWorkspaceId } from "@multica/core/hooks";
@@ -25,6 +35,8 @@ import type {
   AIMeSuggestedAction,
   AIMeThinkIntent,
   AIMeThinkResponse,
+  Agent,
+  Issue,
 } from "@multica/core/types";
 import { Alert, AlertDescription, AlertTitle } from "@multica/ui/components/ui/alert";
 import { Badge } from "@multica/ui/components/ui/badge";
@@ -39,6 +51,16 @@ import { cn } from "@multica/ui/lib/utils";
 import { toast } from "sonner";
 import { PageHeader } from "../../layout/page-header";
 import { AppLink } from "../../navigation";
+import {
+  buildCockpitQueues,
+  describeDashboardTask,
+  formatDashboardAge,
+  taskProgressPercent,
+  type CockpitQueues,
+  type CockpitDecisionItem,
+  type CockpitInboxItem,
+  type CockpitWorkItem,
+} from "./dashboard-data";
 
 const INTENTS: { value: AIMeThinkIntent; label: string }[] = [
   { value: "triage", label: "判断优先级" },
@@ -54,6 +76,9 @@ const STARTERS = [
   "这段外部消息应该怎么回复？需要我审批哪些点？",
 ];
 
+const EMPTY_AGENTS: Agent[] = [];
+const EMPTY_ISSUES: Issue[] = [];
+
 export function AIMeDashboardPage() {
   const wsId = useWorkspaceId();
   const paths = useWorkspacePaths();
@@ -65,8 +90,12 @@ export function AIMeDashboardPage() {
   const agentsQuery = useQuery(agentListOptions(wsId));
   const issuesQuery = useQuery(issueListOptions(wsId));
   const summaryQuery = useQuery(aimeCockpitSummaryOptions(wsId));
-  const agents = agentsQuery.data ?? [];
-  const issues = issuesQuery.data ?? [];
+  const approvalsQuery = useQuery(approvalListOptions(wsId, { status: "pending", limit: 20 }));
+  const inboxQuery = useQuery(inboxListOptions(wsId));
+  const taskSnapshotQuery = useQuery(agentTaskSnapshotOptions(wsId));
+  const memoryCandidatesQuery = useQuery(memoryListOptions(wsId, { status: "candidate", limit: 12 }));
+  const agents = agentsQuery.data ?? EMPTY_AGENTS;
+  const issues = issuesQuery.data ?? EMPTY_ISSUES;
   const onlineAgents = agents.filter((agent) => agent.status !== "offline" && !agent.archived_at);
   const activeIssues = issues.filter((issue) => !["done", "cancelled"].includes(issue.status));
 
@@ -74,6 +103,41 @@ export function AIMeDashboardPage() {
   const result = think.data ?? lastResult;
   const injectedMemories = result?.context.memories ?? [];
   const summary = summaryQuery.data;
+  const dedupedInbox = useMemo(
+    () => deduplicateInboxItems(inboxQuery.data ?? []),
+    [inboxQuery.data],
+  );
+  const cockpitQueues = useMemo(
+    () =>
+      buildCockpitQueues({
+        approvals: approvalsQuery.data?.approvals ?? [],
+        inboxItems: dedupedInbox,
+        tasks: taskSnapshotQuery.data ?? [],
+        agents,
+        issues,
+        memories: memoryCandidatesQuery.data?.memories ?? [],
+      }),
+    [
+      approvalsQuery.data?.approvals,
+      dedupedInbox,
+      taskSnapshotQuery.data,
+      agents,
+      issues,
+      memoryCandidatesQuery.data?.memories,
+    ],
+  );
+  const cockpitLoading =
+    approvalsQuery.isLoading ||
+    inboxQuery.isLoading ||
+    taskSnapshotQuery.isLoading ||
+    memoryCandidatesQuery.isLoading;
+  const cockpitError =
+    firstErrorMessage(
+      approvalsQuery.error,
+      inboxQuery.error,
+      taskSnapshotQuery.error,
+      memoryCandidatesQuery.error,
+    );
 
   async function handleSubmit() {
     const text = input.trim();
@@ -160,7 +224,33 @@ export function AIMeDashboardPage() {
           totalAgents={agents.length}
         />
 
-        <section className="grid min-h-[620px] flex-1 gap-4 xl:grid-cols-[minmax(360px,430px)_minmax(0,1fr)_392px]">
+        <section className="grid shrink-0 gap-4 xl:grid-cols-[minmax(0,1.25fr)_minmax(360px,0.75fr)]">
+          <DecisionQueuePanel
+            items={cockpitQueues.decisions}
+            isLoading={cockpitLoading}
+            error={cockpitError}
+            approvalPath={(id) => paths.approvals(id)}
+            className="xl:row-span-2"
+          />
+          <ActiveWorkPanel
+            items={cockpitQueues.activeWork}
+            isLoading={cockpitLoading}
+            agentsPath={paths.agents()}
+          />
+          <InboxExceptionPanel
+            items={cockpitQueues.inbox}
+            isLoading={cockpitLoading}
+            inboxPath={paths.inbox()}
+          />
+          <MemoryCandidatePanel
+            items={cockpitQueues.memoryCandidates}
+            isLoading={cockpitLoading}
+            memoryPath={paths.memory()}
+            className="xl:col-span-2"
+          />
+        </section>
+
+        <section className="grid min-h-[560px] flex-1 gap-4 xl:grid-cols-[minmax(360px,430px)_minmax(0,1fr)_392px]">
           <div className="flex min-h-0 flex-col rounded-2xl border border-[var(--aime-border)] bg-[var(--aime-surface)] shadow-[var(--aime-shadow-xs)]">
             <div className="border-b border-[var(--aime-border)] p-4">
               <div className="flex items-center justify-between gap-3">
@@ -277,6 +367,357 @@ function StatusPill({ configured }: { configured?: boolean }) {
     <span className="inline-flex items-center gap-2 rounded-lg border border-[var(--aime-success-bg)] bg-[var(--aime-success-bg)] px-3 py-1.5 text-xs font-medium text-[var(--aime-success)]">
       <CheckCircle2 className="size-3.5" />
       AI-Me 在线
+    </span>
+  );
+}
+
+function DecisionQueuePanel({
+  items,
+  isLoading,
+  error,
+  approvalPath,
+  className,
+}: {
+  items: CockpitDecisionItem[];
+  isLoading: boolean;
+  error: string;
+  approvalPath: (id: string) => string;
+  className?: string;
+}) {
+  return (
+    <PanelShell
+      className={className}
+      title="需要我决策"
+      description="高风险审批、外部回复和派工确认会优先出现在这里。"
+      icon={<UserCheck className="size-4 text-[var(--aime-brand-600)]" />}
+      actionHref={approvalPath("")}
+      actionLabel="审批中心"
+    >
+      {error ? (
+        <InlineError message={error} />
+      ) : isLoading ? (
+        <LoadingRows count={4} />
+      ) : items.length === 0 ? (
+        <EmptyQueue
+          icon={<CheckCircle2 className="size-5" />}
+          title="暂无待决策事项"
+          description="AI-Me 需要你确认的动作会沉淀到这里。"
+        />
+      ) : (
+        <div className="space-y-3">
+          {items.slice(0, 6).map(({ approval, issue }) => (
+            <AppLink
+              key={approval.id}
+              href={approvalPath(approval.id)}
+              className="block rounded-xl border border-[var(--aime-border)] bg-[var(--aime-surface-subtle)] px-3 py-3 transition-colors hover:border-[var(--aime-brand-200)] hover:bg-[var(--aime-brand-50)]"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <RiskBadge risk={approval.risk_level} />
+                    <span className="rounded-md bg-[var(--aime-surface-muted)] px-1.5 py-0.5 text-[11px] text-[var(--aime-text-tertiary)]">
+                      {actionLabel(approval.action_type)}
+                    </span>
+                    {issue && (
+                      <span className="font-mono text-[11px] text-[var(--aime-text-tertiary)]">
+                        {issue.identifier}
+                      </span>
+                    )}
+                  </div>
+                  <p className="mt-2 line-clamp-1 text-sm font-semibold text-[var(--aime-text)]">
+                    {approval.title}
+                  </p>
+                  <p className="mt-1 line-clamp-2 text-xs leading-5 text-[var(--aime-text-secondary)]">
+                    {approval.summary || approval.action_description || "等待你确认下一步处理方式。"}
+                  </p>
+                </div>
+                <div className="shrink-0 text-right">
+                  <p className="font-mono text-sm font-semibold tabular-nums text-[var(--aime-text)]">
+                    {Math.round(approval.confidence * 100)}%
+                  </p>
+                  <p className="mt-1 text-[11px] text-[var(--aime-text-tertiary)]">
+                    {formatDashboardAge(approval.created_at)}
+                  </p>
+                </div>
+              </div>
+            </AppLink>
+          ))}
+        </div>
+      )}
+    </PanelShell>
+  );
+}
+
+function ActiveWorkPanel({
+  items,
+  isLoading,
+  agentsPath,
+}: {
+  items: CockpitWorkItem[];
+  isLoading: boolean;
+  agentsPath: string;
+}) {
+  return (
+    <PanelShell
+      title="AI 员工正在做"
+      description="来自 agent task snapshot，不再使用页面 demo 数据。"
+      icon={<Bot className="size-4 text-[var(--aime-info)]" />}
+      actionHref={agentsPath}
+      actionLabel="员工页"
+    >
+      {isLoading ? (
+        <LoadingRows count={3} />
+      ) : items.length === 0 ? (
+        <EmptyQueue
+          icon={<Clock3 className="size-5" />}
+          title="暂无进行中任务"
+          description="有员工接到任务后会显示实时状态。"
+        />
+      ) : (
+        <div className="space-y-3">
+          {items.slice(0, 4).map(({ task, agent, issue }) => {
+            const progress = taskProgressPercent(task.status);
+            return (
+              <div key={task.id} className="rounded-xl border border-[var(--aime-border)] px-3 py-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-semibold">
+                      {agent?.name ?? "未知员工"}
+                    </p>
+                    <p className="mt-1 line-clamp-2 text-xs leading-5 text-[var(--aime-text-secondary)]">
+                      {describeDashboardTask(task, issue)}
+                    </p>
+                  </div>
+                  <TaskStatusPill status={task.status} />
+                </div>
+                <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-[var(--aime-brand-100)]">
+                  <div
+                    className="h-full rounded-full bg-[var(--aime-brand-500)]"
+                    style={{ width: `${progress}%` }}
+                  />
+                </div>
+                <div className="mt-2 flex items-center justify-between gap-3 text-[11px] text-[var(--aime-text-tertiary)]">
+                  <span>{task.work_dir || task.trigger_summary || "等待运行日志"}</span>
+                  <span className="shrink-0">{formatDashboardAge(task.started_at ?? task.dispatched_at ?? task.created_at)}</span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </PanelShell>
+  );
+}
+
+function InboxExceptionPanel({
+  items,
+  isLoading,
+  inboxPath,
+}: {
+  items: CockpitInboxItem[];
+  isLoading: boolean;
+  inboxPath: string;
+}) {
+  return (
+    <PanelShell
+      title="例外收件箱"
+      description="外部消息、失败任务和需要注意的事件。"
+      icon={<Inbox className="size-4 text-[var(--aime-warning)]" />}
+      actionHref={inboxPath}
+      actionLabel="收件箱"
+    >
+      {isLoading ? (
+        <LoadingRows count={3} />
+      ) : items.length === 0 ? (
+        <EmptyQueue
+          icon={<CheckCircle2 className="size-5" />}
+          title="暂无例外"
+          description="所有外部事件都已经处理或无需关注。"
+        />
+      ) : (
+        <div className="space-y-2">
+          {items.slice(0, 5).map(({ item, issue }) => (
+            <AppLink
+              key={item.id}
+              href={inboxPath}
+              className="flex items-start justify-between gap-3 rounded-xl border border-[var(--aime-border)] px-3 py-2.5 transition-colors hover:border-[var(--aime-brand-200)] hover:bg-[var(--aime-brand-50)]"
+            >
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  {!item.read && <span className="size-1.5 shrink-0 rounded-full bg-[var(--aime-brand-500)]" />}
+                  <p className="truncate text-sm font-semibold">{item.title}</p>
+                </div>
+                <p className="mt-1 line-clamp-1 text-xs text-[var(--aime-text-secondary)]">
+                  {item.body || issue?.title || "等待查看详情。"}
+                </p>
+                <p className="mt-1 text-[11px] text-[var(--aime-text-tertiary)]">
+                  {issue?.identifier ?? severityLabel(item.severity)} · {formatDashboardAge(item.created_at)}
+                </p>
+              </div>
+              <SeverityBadge severity={item.severity} />
+            </AppLink>
+          ))}
+        </div>
+      )}
+    </PanelShell>
+  );
+}
+
+function MemoryCandidatePanel({
+  items,
+  isLoading,
+  memoryPath,
+  className,
+}: {
+  items: CockpitQueues["memoryCandidates"];
+  isLoading: boolean;
+  memoryPath: string;
+  className?: string;
+}) {
+  return (
+    <PanelShell
+      className={className}
+      title="待确认记忆"
+      description="先作为候选保存，确认后才会进入 AI-Me 的可注入上下文。"
+      icon={<Database className="size-4 text-[var(--aime-success)]" />}
+      actionHref={memoryPath}
+      actionLabel="记忆库"
+    >
+      {isLoading ? (
+        <div className="grid gap-3 md:grid-cols-3">
+          <Skeleton className="h-24 rounded-xl" />
+          <Skeleton className="h-24 rounded-xl" />
+          <Skeleton className="h-24 rounded-xl" />
+        </div>
+      ) : items.length === 0 ? (
+        <EmptyQueue
+          icon={<BrainCircuit className="size-5" />}
+          title="暂无候选记忆"
+          description="AI-Me 发现稳定偏好或项目事实后会先放在这里。"
+        />
+      ) : (
+        <div className="grid gap-3 md:grid-cols-3">
+          {items.slice(0, 3).map((memory) => (
+            <AppLink
+              key={memory.id}
+              href={memoryPath}
+              className="rounded-xl border border-[var(--aime-border)] px-3 py-3 transition-colors hover:border-[var(--aime-brand-200)] hover:bg-[var(--aime-brand-50)]"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="rounded-md bg-[var(--aime-surface-muted)] px-1.5 py-0.5 text-[11px] text-[var(--aime-text-tertiary)]">
+                  {memoryTypeLabel(memory.type)}
+                </span>
+                <span className="font-mono text-[11px] text-[var(--aime-text-tertiary)]">
+                  {Math.round(memory.confidence * 100)}%
+                </span>
+              </div>
+              <p className="mt-2 line-clamp-1 text-sm font-semibold">{memory.title}</p>
+              <p className="mt-1 line-clamp-2 text-xs leading-5 text-[var(--aime-text-secondary)]">
+                {memory.summary || memory.content}
+              </p>
+            </AppLink>
+          ))}
+        </div>
+      )}
+    </PanelShell>
+  );
+}
+
+function PanelShell({
+  title,
+  description,
+  icon,
+  actionHref,
+  actionLabel,
+  className,
+  children,
+}: {
+  title: string;
+  description: string;
+  icon: ReactNode;
+  actionHref: string;
+  actionLabel: string;
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className={cn("flex min-h-0 flex-col rounded-2xl border border-[var(--aime-border)] bg-[var(--aime-surface)] shadow-[var(--aime-shadow-xs)]", className)}>
+      <div className="flex items-start justify-between gap-3 border-b border-[var(--aime-border)] p-4">
+        <div className="flex min-w-0 items-start gap-2.5">
+          <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-[var(--aime-surface-subtle)]">
+            {icon}
+          </span>
+          <div className="min-w-0">
+            <h2 className="truncate text-sm font-semibold">{title}</h2>
+            <p className="mt-1 line-clamp-2 text-xs leading-5 text-[var(--aime-text-tertiary)]">
+              {description}
+            </p>
+          </div>
+        </div>
+        <AppLink
+          href={actionHref}
+          className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-[var(--aime-border)] bg-[var(--aime-surface)] px-2.5 py-1.5 text-xs font-medium text-[var(--aime-text-secondary)] hover:bg-[var(--aime-surface-muted)]"
+        >
+          {actionLabel}
+          <ExternalLink className="size-3" />
+        </AppLink>
+      </div>
+      <div className="min-h-0 flex-1 overflow-auto p-4">{children}</div>
+    </section>
+  );
+}
+
+function LoadingRows({ count }: { count: number }) {
+  return (
+    <div className="space-y-3">
+      {Array.from({ length: count }).map((_, index) => (
+        <Skeleton key={index} className="h-20 rounded-xl" />
+      ))}
+    </div>
+  );
+}
+
+function EmptyQueue({
+  icon,
+  title,
+  description,
+}: {
+  icon: ReactNode;
+  title: string;
+  description: string;
+}) {
+  return (
+    <div className="flex min-h-32 flex-col items-center justify-center rounded-xl border border-dashed border-[var(--aime-border)] px-4 py-6 text-center text-[var(--aime-text-tertiary)]">
+      <span className="flex size-10 items-center justify-center rounded-xl bg-[var(--aime-surface-subtle)]">
+        {icon}
+      </span>
+      <p className="mt-3 text-sm font-medium text-[var(--aime-text)]">{title}</p>
+      <p className="mt-1 max-w-sm text-xs leading-5">{description}</p>
+    </div>
+  );
+}
+
+function InlineError({ message }: { message: string }) {
+  return (
+    <Alert className="border-[var(--aime-warning-bg)] bg-[var(--aime-warning-bg)]">
+      <AlertCircle className="size-4 text-[var(--aime-warning)]" />
+      <AlertTitle>队列暂不可用</AlertTitle>
+      <AlertDescription>{message}</AlertDescription>
+    </Alert>
+  );
+}
+
+function TaskStatusPill({ status }: { status: CockpitWorkItem["task"]["status"] }) {
+  return (
+    <span
+      className={cn(
+        "inline-flex shrink-0 items-center rounded-md px-1.5 py-0.5 text-[11px] font-medium",
+        status === "running" && "bg-[var(--aime-brand-50)] text-[var(--aime-brand-600)]",
+        status === "dispatched" && "bg-[var(--aime-info-bg)] text-[var(--aime-info)]",
+        status === "queued" && "bg-[var(--aime-surface-muted)] text-[var(--aime-text-tertiary)]",
+      )}
+    >
+      {taskStatusLabel(status)}
     </span>
   );
 }
@@ -702,8 +1143,86 @@ function RiskBadge({ risk }: { risk: string }) {
   );
 }
 
+function SeverityBadge({ severity }: { severity: string }) {
+  return (
+    <span
+      className={cn(
+        "inline-flex shrink-0 items-center rounded-md px-1.5 py-0.5 text-[11px] font-medium",
+        severity === "action_required" && "bg-[var(--aime-danger-bg)] text-[var(--aime-danger)]",
+        severity === "attention" && "bg-[var(--aime-warning-bg)] text-[var(--aime-warning)]",
+        severity === "info" && "bg-[var(--aime-info-bg)] text-[var(--aime-info)]",
+      )}
+    >
+      {severityLabel(severity)}
+    </span>
+  );
+}
+
+function firstErrorMessage(...errors: unknown[]): string {
+  const error = errors.find(Boolean);
+  if (!error) return "";
+  return error instanceof Error ? error.message : "数据加载失败";
+}
+
+function severityLabel(severity: string): string {
+  switch (severity) {
+    case "action_required":
+      return "需处理";
+    case "attention":
+      return "关注";
+    case "info":
+      return "信息";
+    default:
+      return "未知";
+  }
+}
+
+function taskStatusLabel(status: string): string {
+  switch (status) {
+    case "running":
+      return "执行中";
+    case "dispatched":
+      return "已派发";
+    case "queued":
+      return "排队中";
+    case "completed":
+      return "已完成";
+    case "failed":
+      return "失败";
+    case "cancelled":
+      return "已取消";
+    default:
+      return "未知";
+  }
+}
+
+function memoryTypeLabel(type: string): string {
+  switch (type) {
+    case "identity":
+      return "身份";
+    case "preference":
+      return "偏好";
+    case "rule":
+      return "规则";
+    case "project_fact":
+      return "项目事实";
+    case "process":
+      return "流程";
+    case "history":
+      return "历史";
+    case "relationship":
+      return "关系";
+    case "technical_context":
+      return "技术上下文";
+    default:
+      return "记忆";
+  }
+}
+
 function actionLabel(type: string) {
   switch (type) {
+    case "create_issue":
+      return "创建 issue";
     case "create_task":
       return "创建 task";
     case "assign_worker":
@@ -714,6 +1233,8 @@ function actionLabel(type: string) {
       return "外部发送";
     case "post_internal_comment":
       return "内部评论";
+    case "confirm_memory":
+      return "确认记忆";
     case "no_action":
       return "无需动作";
     default:
