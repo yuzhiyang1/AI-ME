@@ -1,5 +1,5 @@
 export { paths, isGlobalPath } from "./paths";
-export type { WorkspacePaths } from "./paths";
+export type { InboxPathTarget, WorkspacePaths } from "./paths";
 export { RESERVED_SLUGS, isReservedSlug } from "./reserved-slugs";
 export { resolvePostAuthDestination, useHasOnboarded } from "./resolve";
 export {

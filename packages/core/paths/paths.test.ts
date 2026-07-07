@@ -17,6 +17,8 @@ describe("paths.workspace(slug)", () => {
     expect(ws.approvals("apr 1")).toBe("/acme/approvals?approval=apr%201");
     expect(ws.agents()).toBe("/acme/agents");
     expect(ws.inbox()).toBe("/acme/inbox");
+    expect(ws.inbox({ issueId: "issue 1" })).toBe("/acme/inbox?issue=issue%201");
+    expect(ws.inbox({ inboxItemId: "inbox 1" })).toBe("/acme/inbox?inbox=inbox%201");
     expect(ws.myIssues()).toBe("/acme/my-issues");
     expect(ws.runtimes()).toBe("/acme/runtimes");
     expect(ws.skills()).toBe("/acme/skills");

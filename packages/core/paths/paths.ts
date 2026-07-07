@@ -14,6 +14,17 @@
 
 const encode = (id: string) => encodeURIComponent(id);
 
+export interface InboxPathTarget {
+  issueId?: string;
+  inboxItemId?: string;
+}
+
+function buildInboxPath(base: string, target?: InboxPathTarget): string {
+  if (target?.issueId) return `${base}?issue=${encode(target.issueId)}`;
+  if (target?.inboxItemId) return `${base}?inbox=${encode(target.inboxItemId)}`;
+  return base;
+}
+
 function workspaceScoped(slug: string) {
   const ws = `/${encode(slug)}`;
   return {
@@ -30,7 +41,7 @@ function workspaceScoped(slug: string) {
       approvalId ? `${ws}/approvals?approval=${encode(approvalId)}` : `${ws}/approvals`,
     agents: () => `${ws}/agents`,
     agentDetail: (id: string) => `${ws}/agents/${encode(id)}`,
-    inbox: () => `${ws}/inbox`,
+    inbox: (target?: InboxPathTarget) => buildInboxPath(`${ws}/inbox`, target),
     myIssues: () => `${ws}/my-issues`,
     runtimes: () => `${ws}/runtimes`,
     runtimeDetail: (id: string) => `${ws}/runtimes/${encode(id)}`,

@@ -70,14 +70,56 @@ import {
 } from "./inbox-display";
 import { useT } from "../../i18n";
 
+type InboxSelectionTarget =
+  | { kind: "none"; id: "" }
+  | { kind: "issue"; id: string }
+  | { kind: "inbox"; id: string };
+
+const NO_INBOX_SELECTION: InboxSelectionTarget = { kind: "none", id: "" };
+
+function getUrlInboxSelection(searchParams: URLSearchParams): InboxSelectionTarget {
+  const issueId = searchParams.get("issue")?.trim();
+  if (issueId) return { kind: "issue", id: issueId };
+
+  const inboxItemId = searchParams.get("inbox")?.trim();
+  if (inboxItemId) return { kind: "inbox", id: inboxItemId };
+
+  return NO_INBOX_SELECTION;
+}
+
+function getInboxItemSelectionTarget(item: InboxItem): InboxSelectionTarget {
+  return item.issue_id
+    ? { kind: "issue", id: item.issue_id }
+    : { kind: "inbox", id: item.id };
+}
+
+function getInboxSelectionRef(target: InboxSelectionTarget): string {
+  return target.kind === "none" ? "" : `${target.kind}:${target.id}`;
+}
+
+function findInboxSelection(
+  items: InboxItem[],
+  target: InboxSelectionTarget,
+): InboxItem | null {
+  if (target.kind === "issue") {
+    return items.find(
+      (item) => item.issue_id === target.id || (!item.issue_id && item.id === target.id),
+    ) ?? null;
+  }
+  if (target.kind === "inbox") {
+    return items.find((item) => item.id === target.id) ?? null;
+  }
+  return null;
+}
+
 export function InboxPage() {
   const { t } = useT("inbox");
   const { searchParams, replace, push } = useNavigation();
-  const urlIssue = searchParams.get("issue") ?? "";
+  const urlSelectionTarget = getUrlInboxSelection(searchParams);
   const wsPaths = useWorkspacePaths();
   const queryClient = useQueryClient();
 
-  const [selectedKey, setSelectedKeyState] = useState(() => urlIssue);
+  const [selectedTarget, setSelectedTargetState] = useState(() => urlSelectionTarget);
   const [aiMeResultsByInboxId, setAIMeResultsByInboxId] = useState<
     Record<string, AIMeThinkResponse>
   >({});
@@ -86,29 +128,37 @@ export function InboxPage() {
 
   // Sync from URL when searchParams change (e.g. navigation)
   useEffect(() => {
-    setSelectedKeyState(urlIssue);
-  }, [urlIssue]);
+    setSelectedTargetState(urlSelectionTarget);
+  }, [urlSelectionTarget.kind, urlSelectionTarget.id]);
 
   const wsId = useWorkspaceId();
   const { data: rawItems = [], isLoading: loading } = useQuery(inboxListOptions(wsId));
   const items = useMemo(() => deduplicateInboxItems(rawItems), [rawItems]);
 
-  const selected = items.find((i) => (i.issue_id ?? i.id) === selectedKey) ?? null;
+  const selected = useMemo(
+    () => findInboxSelection(items, selectedTarget),
+    [items, selectedTarget.kind, selectedTarget.id],
+  );
 
-  // Track the last key we actually resolved against the inbox list. Lets the
-  // fallback effect distinguish "shared-link to a notification not in our
-  // inbox" (never resolved → redirect to the issue page) from "item was in
-  // our inbox and just got removed" (was resolved → stay on /inbox).
-  const lastResolvedKeyRef = useRef<string>("");
+  // Track the last URL target we actually resolved against the inbox list.
+  // This lets the fallback effect distinguish "shared issue link not in this
+  // inbox" from "the selected inbox row was just removed locally".
+  const lastResolvedRef = useRef<string>("");
   useEffect(() => {
-    if (selected) lastResolvedKeyRef.current = selectedKey;
-  }, [selected, selectedKey]);
+    if (selected) lastResolvedRef.current = getInboxSelectionRef(selectedTarget);
+  }, [selected, selectedTarget]);
 
-  const setSelectedKey = useCallback((key: string) => {
-    setSelectedKeyState(key);
-    const inboxPath = wsPaths.inbox();
-    const url = key ? `${inboxPath}?issue=${key}` : inboxPath;
-    replace(url);
+  const setSelectedTarget = useCallback((target: InboxSelectionTarget) => {
+    setSelectedTargetState(target);
+    if (target.kind === "issue") {
+      replace(wsPaths.inbox({ issueId: target.id }));
+      return;
+    }
+    if (target.kind === "inbox") {
+      replace(wsPaths.inbox({ inboxItemId: target.id }));
+      return;
+    }
+    replace(wsPaths.inbox());
   }, [replace, wsPaths]);
 
   // Shared inbox links (?issue=<id>) may point to notifications not in this
@@ -116,17 +166,23 @@ export function InboxPage() {
   // so the URL still resolves to something meaningful. But if the key was
   // previously resolvable (e.g. the issue was just deleted in another tab
   // and `onInboxIssueDeleted` pruned the cache), the issue detail would 404
-  // too — clear the selection and stay on /inbox instead.
+  // too — clear the selection and stay on /inbox instead. Exact inbox links
+  // (?inbox=<id>) have no issue fallback, so missing rows simply clear.
   useEffect(() => {
     if (loading) return;
-    if (!selectedKey) return;
+    if (selectedTarget.kind === "none") return;
     if (selected) return;
-    if (lastResolvedKeyRef.current === selectedKey) {
-      setSelectedKey("");
+    const targetRef = getInboxSelectionRef(selectedTarget);
+    if (lastResolvedRef.current === targetRef) {
+      setSelectedTarget(NO_INBOX_SELECTION);
       return;
     }
-    replace(wsPaths.issueDetail(selectedKey));
-  }, [loading, selectedKey, selected, replace, wsPaths, setSelectedKey]);
+    if (selectedTarget.kind === "issue") {
+      replace(wsPaths.issueDetail(selectedTarget.id));
+      return;
+    }
+    setSelectedTarget(NO_INBOX_SELECTION);
+  }, [loading, selectedTarget, selected, replace, wsPaths, setSelectedTarget]);
 
   const { defaultLayout, onLayoutChanged } = useDefaultLayout({
     id: "multica_inbox_layout",
@@ -162,20 +218,19 @@ export function InboxPage() {
   }, [selectedId, selectedRead, markReadMutate, t]);
 
   const handleSelect = (item: InboxItem) => {
-    setSelectedKey(item.issue_id ?? item.id);
+    setSelectedTarget(getInboxItemSelectionTarget(item));
   };
 
   const handleArchive = (id: string) => {
     const idx = items.findIndex((i) => i.id === id);
     const archived = idx >= 0 ? items[idx] : null;
-    const wasSelected =
-      !!archived && (archived.issue_id ?? archived.id) === selectedKey;
+    const wasSelected = !!archived && archived.id === selected?.id;
     if (wasSelected) {
       // List is sorted newest-first; prefer the next (older) item, fall back
       // to the previous (newer) one when archiving at the bottom, and only
       // clear the selection when nothing else is left.
       const next = items[idx + 1] ?? items[idx - 1] ?? null;
-      setSelectedKey(next ? (next.issue_id ?? next.id) : "");
+      setSelectedTarget(next ? getInboxItemSelectionTarget(next) : NO_INBOX_SELECTION);
     }
     archiveMutation.mutate(id, {
       onError: () => toast.error(t(($) => $.errors.archive_failed)),
@@ -190,22 +245,22 @@ export function InboxPage() {
   };
 
   const handleArchiveAll = () => {
-    setSelectedKey("");
+    setSelectedTarget(NO_INBOX_SELECTION);
     archiveAllMutation.mutate(undefined, {
       onError: () => toast.error(t(($) => $.errors.archive_all_failed)),
     });
   };
 
   const handleArchiveAllRead = () => {
-    const readKeys = items.filter((i) => i.read).map((i) => i.issue_id ?? i.id);
-    if (readKeys.includes(selectedKey)) setSelectedKey("");
+    const selectedReadItem = selected ? items.find((item) => item.id === selected.id) : null;
+    if (selectedReadItem?.read) setSelectedTarget(NO_INBOX_SELECTION);
     archiveAllReadMutation.mutate(undefined, {
       onError: () => toast.error(t(($) => $.errors.archive_all_read_failed)),
     });
   };
 
   const handleArchiveCompleted = () => {
-    setSelectedKey("");
+    setSelectedTarget(NO_INBOX_SELECTION);
     archiveCompletedMutation.mutate(undefined, {
       onError: () => toast.error(t(($) => $.errors.archive_completed_failed)),
     });
@@ -305,7 +360,7 @@ export function InboxPage() {
         <InboxListItem
           key={item.id}
           item={item}
-          isSelected={(item.issue_id ?? item.id) === selectedKey}
+          isSelected={item.id === selected?.id}
           onClick={() => handleSelect(item)}
           onArchive={() => handleArchive(item.id)}
         />
@@ -347,7 +402,7 @@ export function InboxPage() {
               // issue:deleted WS event prunes it from the inbox cache. Just clear
               // the selection — calling archive here would 404 on a row that no
               // longer exists.
-              setSelectedKey("");
+              setSelectedTarget(NO_INBOX_SELECTION);
             }}
             onDone={() => {
               handleArchive(selected.id);
@@ -445,7 +500,7 @@ export function InboxPage() {
             <Button
               variant="ghost"
               size="sm"
-              onClick={() => setSelectedKey("")}
+              onClick={() => setSelectedTarget(NO_INBOX_SELECTION)}
               className="gap-1.5 text-muted-foreground"
             >
               <ArrowLeft className="h-4 w-4" />

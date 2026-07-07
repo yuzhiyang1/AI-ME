@@ -230,6 +230,7 @@ export function AIMeDashboardPage() {
             isLoading={cockpitLoading}
             error={cockpitError}
             approvalPath={(id) => paths.approvals(id)}
+            issuePath={(id) => paths.issueDetail(id)}
             className="xl:row-span-2"
           />
           <ActiveWorkPanel
@@ -241,6 +242,8 @@ export function AIMeDashboardPage() {
             items={cockpitQueues.inbox}
             isLoading={cockpitLoading}
             inboxPath={paths.inbox()}
+            inboxItemPath={(item) => paths.inbox({ inboxItemId: item.id })}
+            issuePath={(id) => paths.issueDetail(id)}
           />
           <MemoryCandidatePanel
             items={cockpitQueues.memoryCandidates}
@@ -376,12 +379,14 @@ function DecisionQueuePanel({
   isLoading,
   error,
   approvalPath,
+  issuePath,
   className,
 }: {
   items: CockpitDecisionItem[];
   isLoading: boolean;
   error: string;
   approvalPath: (id: string) => string;
+  issuePath: (id: string) => string;
   className?: string;
 }) {
   return (
@@ -406,10 +411,9 @@ function DecisionQueuePanel({
       ) : (
         <div className="space-y-3">
           {items.slice(0, 6).map(({ approval, issue }) => (
-            <AppLink
+            <article
               key={approval.id}
-              href={approvalPath(approval.id)}
-              className="block rounded-xl border border-[var(--aime-border)] bg-[var(--aime-surface-subtle)] px-3 py-3 transition-colors hover:border-[var(--aime-brand-200)] hover:bg-[var(--aime-brand-50)]"
+              className="rounded-xl border border-[var(--aime-border)] bg-[var(--aime-surface-subtle)] px-3 py-3"
             >
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
@@ -430,6 +434,9 @@ function DecisionQueuePanel({
                   <p className="mt-1 line-clamp-2 text-xs leading-5 text-[var(--aime-text-secondary)]">
                     {approval.summary || approval.action_description || "等待你确认下一步处理方式。"}
                   </p>
+                  <p className="mt-2 line-clamp-1 text-[11px] text-[var(--aime-text-tertiary)]">
+                    建议：{approval.action_title || actionLabel(approval.action_type)}
+                  </p>
                 </div>
                 <div className="shrink-0 text-right">
                   <p className="font-mono text-sm font-semibold tabular-nums text-[var(--aime-text)]">
@@ -440,7 +447,29 @@ function DecisionQueuePanel({
                   </p>
                 </div>
               </div>
-            </AppLink>
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[var(--aime-border)] pt-3">
+                <span className="text-[11px] text-[var(--aime-text-tertiary)]">
+                  {approval.evidence?.length ? `${approval.evidence.length} 条证据` : "证据在审批详情中查看"}
+                </span>
+                <div className="flex flex-wrap items-center gap-2">
+                  {issue && (
+                    <AppLink
+                      href={issuePath(issue.id)}
+                      className="inline-flex h-8 items-center rounded-lg border border-[var(--aime-border)] bg-[var(--aime-surface)] px-3 text-xs font-medium text-[var(--aime-text-secondary)] hover:bg-[var(--aime-surface-muted)]"
+                    >
+                      查看 issue
+                    </AppLink>
+                  )}
+                  <AppLink
+                    href={approvalPath(approval.id)}
+                    className="inline-flex h-8 items-center rounded-lg border border-[var(--aime-brand-500)] bg-[var(--aime-brand-500)] px-3 text-xs font-medium text-white hover:bg-[var(--aime-brand-600)]"
+                  >
+                    去审批
+                    <ArrowRight className="ml-1.5 size-3.5" />
+                  </AppLink>
+                </div>
+              </div>
+            </article>
           ))}
         </div>
       )}
@@ -513,10 +542,14 @@ function InboxExceptionPanel({
   items,
   isLoading,
   inboxPath,
+  inboxItemPath,
+  issuePath,
 }: {
   items: CockpitInboxItem[];
   isLoading: boolean;
   inboxPath: string;
+  inboxItemPath: (item: CockpitInboxItem["item"]) => string;
+  issuePath: (id: string) => string;
 }) {
   return (
     <PanelShell
@@ -537,25 +570,48 @@ function InboxExceptionPanel({
       ) : (
         <div className="space-y-2">
           {items.slice(0, 5).map(({ item, issue }) => (
-            <AppLink
+            <article
               key={item.id}
-              href={inboxPath}
-              className="flex items-start justify-between gap-3 rounded-xl border border-[var(--aime-border)] px-3 py-2.5 transition-colors hover:border-[var(--aime-brand-200)] hover:bg-[var(--aime-brand-50)]"
+              className="rounded-xl border border-[var(--aime-border)] px-3 py-2.5"
             >
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  {!item.read && <span className="size-1.5 shrink-0 rounded-full bg-[var(--aime-brand-500)]" />}
-                  <p className="truncate text-sm font-semibold">{item.title}</p>
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    {!item.read && <span className="size-1.5 shrink-0 rounded-full bg-[var(--aime-brand-500)]" />}
+                    <p className="truncate text-sm font-semibold">{item.title}</p>
+                  </div>
+                  <p className="mt-1 line-clamp-1 text-xs text-[var(--aime-text-secondary)]">
+                    {item.body || issue?.title || "等待查看详情。"}
+                  </p>
+                  <p className="mt-1 text-[11px] text-[var(--aime-text-tertiary)]">
+                    {issue?.identifier ?? severityLabel(item.severity)} · {formatDashboardAge(item.created_at)}
+                  </p>
                 </div>
-                <p className="mt-1 line-clamp-1 text-xs text-[var(--aime-text-secondary)]">
-                  {item.body || issue?.title || "等待查看详情。"}
-                </p>
-                <p className="mt-1 text-[11px] text-[var(--aime-text-tertiary)]">
-                  {issue?.identifier ?? severityLabel(item.severity)} · {formatDashboardAge(item.created_at)}
-                </p>
+                <SeverityBadge severity={item.severity} />
               </div>
-              <SeverityBadge severity={item.severity} />
-            </AppLink>
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[var(--aime-border)] pt-2.5">
+                <span className="text-[11px] text-[var(--aime-text-tertiary)]">
+                  原始事件：{inboxTypeLabel(item.type)}
+                </span>
+                <div className="flex flex-wrap items-center gap-2">
+                  {issue && (
+                    <AppLink
+                      href={issuePath(issue.id)}
+                      className="inline-flex h-8 items-center rounded-lg border border-[var(--aime-border)] bg-[var(--aime-surface)] px-3 text-xs font-medium text-[var(--aime-text-secondary)] hover:bg-[var(--aime-surface-muted)]"
+                    >
+                      查看 issue
+                    </AppLink>
+                  )}
+                  <AppLink
+                    href={inboxItemPath(item)}
+                    className="inline-flex h-8 items-center rounded-lg border border-[var(--aime-brand-500)] bg-[var(--aime-brand-500)] px-3 text-xs font-medium text-white hover:bg-[var(--aime-brand-600)]"
+                  >
+                    查看原事件
+                    <ArrowRight className="ml-1.5 size-3.5" />
+                  </AppLink>
+                </div>
+              </div>
+            </article>
           ))}
         </div>
       )}
@@ -1174,6 +1230,27 @@ function severityLabel(severity: string): string {
       return "信息";
     default:
       return "未知";
+  }
+}
+
+function inboxTypeLabel(type: string): string {
+  switch (type) {
+    case "new_comment":
+      return "新评论";
+    case "mentioned":
+      return "提及你";
+    case "review_requested":
+      return "请求 Review";
+    case "task_failed":
+      return "任务失败";
+    case "agent_blocked":
+      return "员工阻塞";
+    case "quick_create_failed":
+      return "快速创建失败";
+    case "issue_assigned":
+      return "分配给你";
+    default:
+      return type || "未知事件";
   }
 }
 
