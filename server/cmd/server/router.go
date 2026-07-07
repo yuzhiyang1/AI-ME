@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -58,6 +59,28 @@ func allowedOrigins() []string {
 	return origins
 }
 
+func envFloat(name string, def float64) float64 {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return def
+	}
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return def
+	}
+	return v
+}
+
+func aiModelAPIKey(provider string) string {
+	if key := strings.TrimSpace(os.Getenv("AI_ME_LLM_API_KEY")); key != "" {
+		return key
+	}
+	if strings.EqualFold(strings.TrimSpace(provider), "deepseek") {
+		return strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY"))
+	}
+	return ""
+}
+
 // NewRouter creates the fully-configured Chi router with all middleware and routes.
 // rdb is optional: when non-nil the runtime local-skill request stores are
 // swapped for Redis-backed implementations so multiple API nodes share the
@@ -102,10 +125,17 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 
 	cfSigner := auth.NewCloudFrontSignerFromEnv()
 
+	aiModelProvider := strings.TrimSpace(os.Getenv("AI_ME_LLM_PROVIDER"))
 	signupConfig := handler.Config{
 		AllowSignup:                   os.Getenv("ALLOW_SIGNUP") != "false",
 		AllowedEmails:                 splitAndTrim(os.Getenv("ALLOWED_EMAILS")),
 		AllowedEmailDomains:           splitAndTrim(os.Getenv("ALLOWED_EMAIL_DOMAINS")),
+		AIModelProvider:               aiModelProvider,
+		AIModelBaseURL:                strings.TrimSpace(os.Getenv("AI_ME_LLM_BASE_URL")),
+		AIModelAPIKey:                 aiModelAPIKey(aiModelProvider),
+		AIModelModel:                  strings.TrimSpace(os.Getenv("AI_ME_LLM_MODEL")),
+		AIModelTimeout:                envDuration("AI_ME_LLM_TIMEOUT", 45*time.Second),
+		AIModelTemperature:            envFloat("AI_ME_LLM_TEMPERATURE", 0.2),
 		UseDailyRollupForRuntimeUsage: os.Getenv("USAGE_DAILY_ROLLUP_ENABLED") == "true",
 	}
 	h := handler.New(queries, pool, hub, bus, emailSvc, store, cfSigner, analyticsClient, signupConfig, daemonHub)
@@ -320,6 +350,23 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 			// Assignee frequency
 			r.Get("/api/assignee-frequency", h.GetAssigneeFrequency)
 
+			// AI-Me command center
+			r.Get("/api/ai-me/cockpit/summary", h.GetAIMeCockpitSummary)
+			r.Post("/api/ai-me/think", h.ThinkAIMe)
+			r.Route("/api/ai-me/approvals", func(r chi.Router) {
+				r.Get("/", h.ListAIApprovals)
+				r.Post("/", h.CreateAIApproval)
+				r.Get("/stats", h.GetAIApprovalStats)
+				r.Route("/{id}", func(r chi.Router) {
+					r.Get("/", h.GetAIApproval)
+					r.Patch("/", h.UpdateAIApproval)
+					r.Post("/approve", h.ApproveAIApproval)
+					r.Post("/reject", h.RejectAIApproval)
+					r.Post("/observe", h.ObserveAIApproval)
+					r.Post("/take-over", h.TakeOverAIApproval)
+				})
+			})
+
 			// Issues
 			r.Route("/api/issues", func(r chi.Router) {
 				r.Get("/search", h.SearchIssues)
@@ -452,6 +499,24 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Put("/files", h.UpsertSkillFile)
 					r.Delete("/files/{fileId}", h.DeleteSkillFile)
 				})
+			})
+
+			// Memory and knowledge
+			r.Route("/api/memory", func(r chi.Router) {
+				r.Get("/", h.ListMemoryEntries)
+				r.Post("/", h.CreateMemoryEntry)
+				r.Route("/{id}", func(r chi.Router) {
+					r.Get("/", h.GetMemoryEntry)
+					r.Patch("/", h.UpdateMemoryEntry)
+					r.Post("/confirm", h.ConfirmMemoryEntry)
+					r.Post("/reject", h.RejectMemoryEntry)
+					r.Post("/archive", h.ArchiveMemoryEntry)
+					r.Post("/verify", h.VerifyMemoryEntry)
+				})
+			})
+			r.Route("/api/knowledge-documents", func(r chi.Router) {
+				r.Get("/", h.ListKnowledgeDocuments)
+				r.Post("/", h.CreateKnowledgeDocument)
 			})
 
 			// Usage

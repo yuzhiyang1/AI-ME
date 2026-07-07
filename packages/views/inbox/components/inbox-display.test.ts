@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { InboxItem } from "@multica/core/types";
 import {
+  buildInboxAIMeInput,
+  getInboxAIMeIntent,
   getInboxDisplayTitle,
   getQuickCreateFailureDetail,
   stripQuickCreatePrefix,
@@ -76,5 +78,36 @@ describe("inbox display helpers", () => {
     expect(getQuickCreateFailureDetail(failedItem)).toBe(
       "CLI failed with exit status 1",
     );
+  });
+
+  it("maps inbox exceptions to the most useful AI-Me intent", () => {
+    expect(getInboxAIMeIntent(item({ type: "new_comment" }))).toBe("reply");
+    expect(getInboxAIMeIntent(item({ type: "agent_blocked" }))).toBe("plan");
+    expect(getInboxAIMeIntent(item({ type: "priority_changed" }))).toBe(
+      "triage",
+    );
+  });
+
+  it("builds a compact evidence-first prompt for AI-Me", () => {
+    const prompt = buildInboxAIMeInput(
+      item({
+        type: "quick_create_failed",
+        severity: "action_required",
+        body: "agent finished without creating an issue",
+        details: {
+          original_prompt: "Fix payment callback",
+          error: "worker exited",
+        },
+      }),
+      { title: "Fix payment callback", typeLabel: "快速创建失败" },
+    );
+
+    expect(prompt).toContain("收件箱事件：Fix payment callback");
+    expect(prompt).toContain("事件类型：快速创建失败");
+    expect(prompt).toContain("严重程度：action_required");
+    expect(prompt).toContain("关联 Issue：issue-1");
+    expect(prompt).toContain("原始内容：");
+    expect(prompt).toContain("original_prompt: Fix payment callback");
+    expect(prompt).toContain("error: worker exited");
   });
 });

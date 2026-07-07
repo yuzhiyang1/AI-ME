@@ -17,6 +17,9 @@ import { ProjectsPage } from "@multica/views/projects/components";
 import { AutopilotsPage } from "@multica/views/autopilots/components";
 import { MyIssuesPage } from "@multica/views/my-issues";
 import { SkillsPage } from "@multica/views/skills";
+import { AIMeDashboardPage } from "@multica/views/aime";
+import { ApprovalCenterPage } from "@multica/views/approvals";
+import { MemoryPage } from "@multica/views/memory";
 import { DesktopRuntimesPage } from "./components/desktop-runtimes-page";
 import { AgentsPage } from "@multica/views/agents";
 import { InboxPage } from "@multica/views/inbox";
@@ -85,6 +88,11 @@ export const appRoutes: RouteObject[] = [
         children: [
           { index: true, element: <Navigate to="issues" replace /> },
           {
+            path: "dashboard",
+            element: <AIMeDashboardPage />,
+            handle: { title: "AI-Me" },
+          },
+          {
             path: "issues",
             element: (
               <ErrorBoundary>
@@ -133,6 +141,8 @@ export const appRoutes: RouteObject[] = [
             element: <RuntimeDetailPage />,
             handle: { title: "Runtime" },
           },
+          { path: "memory", element: <MemoryPage />, handle: { title: "Memory" } },
+          { path: "approvals", element: <ApprovalCenterPage />, handle: { title: "Approvals" } },
           { path: "skills", element: <SkillsPage />, handle: { title: "Skills" } },
           {
             path: "skills/:id",

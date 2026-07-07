@@ -29,8 +29,8 @@ const (
 	// subscribes by `task:` prefix and invalidates the workspace task
 	// snapshot, so the granularity here is "what does the user want to see
 	// change" — not "every internal status flip".
-	EventTaskQueued    = "task:queued"    // ∅ → queued (enqueue / retry create)
-	EventTaskDispatch  = "task:dispatch"  // queued → dispatched (daemon claim)
+	EventTaskQueued    = "task:queued"   // ∅ → queued (enqueue / retry create)
+	EventTaskDispatch  = "task:dispatch" // queued → dispatched (daemon claim)
 	EventTaskProgress  = "task:progress"
 	EventTaskCompleted = "task:completed" // running → completed
 	EventTaskFailed    = "task:failed"    // running → failed
@@ -64,6 +64,23 @@ const (
 	EventSkillCreated = "skill:created"
 	EventSkillUpdated = "skill:updated"
 	EventSkillDeleted = "skill:deleted"
+
+	// Memory and knowledge events
+	EventMemoryCreated            = "memory:created"
+	EventMemoryUpdated            = "memory:updated"
+	EventMemoryConfirmed          = "memory:confirmed"
+	EventMemoryRejected           = "memory:rejected"
+	EventMemoryArchived           = "memory:archived"
+	EventMemoryVerified           = "memory:verified"
+	EventKnowledgeDocumentCreated = "knowledge_document:created"
+
+	// AI-Me approval events
+	EventApprovalCreated            = "approval:created"
+	EventApprovalUpdated            = "approval:updated"
+	EventApprovalApproved           = "approval:approved"
+	EventApprovalRejected           = "approval:rejected"
+	EventApprovalExecutionSucceeded = "approval:execution_succeeded"
+	EventApprovalExecutionFailed    = "approval:execution_failed"
 
 	// Chat events
 	EventChatMessage        = "chat:message"

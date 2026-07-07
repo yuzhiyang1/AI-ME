@@ -11,10 +11,13 @@
     "recent": "最近"
   },
   "pages": {
+    "dashboard": "工作驾驶舱",
     "inbox": "收件箱",
     "my_issues": "我的 issue",
     "issues": "issue",
     "projects": "项目",
+    "memory": "记忆与知识",
+    "approvals": "审批中心",
     "agents": "智能体",
     "runtimes": "运行时",
     "skills": "skill",

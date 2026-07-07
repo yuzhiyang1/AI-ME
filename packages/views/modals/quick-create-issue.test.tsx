@@ -318,7 +318,7 @@ describe("AgentCreatePanel", () => {
         agent_id: "agent-1",
         prompt: "New agent prompt",
         project_id: undefined,
-        code_context: { type: "default_repo" },
+        code_context: undefined,
       });
     });
 

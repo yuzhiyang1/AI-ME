@@ -1,5 +1,17 @@
 import { z } from "zod";
-import type { ListIssuesResponse, TimelineEntry } from "../types";
+import type {
+  AIApproval,
+  AIApprovalStats,
+  AIMeCockpitSummary,
+  AIMeThinkResponse,
+  KnowledgeDocument,
+  ListAIApprovalsResponse,
+  ListKnowledgeDocumentsResponse,
+  ListMemoryEntriesResponse,
+  ListIssuesResponse,
+  MemoryEntry,
+  TimelineEntry,
+} from "../types";
 
 // ---------------------------------------------------------------------------
 // Schemas for the highest-risk API endpoints — those whose responses drive
@@ -190,3 +202,467 @@ export const SendChatMessageResponseSchema = z.object({
   task_id: z.string(),
   created_at: z.string(),
 }).loose();
+
+const MemorySourceSchema = z.object({
+  id: z.string(),
+  workspace_id: z.string(),
+  source_type: z.string(),
+  source_ref_id: z.string().nullable(),
+  source_url: z.string().nullable(),
+  title: z.string(),
+  excerpt: z.string(),
+  metadata: z.unknown(),
+  captured_at: z.string().nullable(),
+  created_at: z.string(),
+}).loose();
+
+const MemoryEvidenceSchema = z.object({
+  id: z.string(),
+  memory_id: z.string(),
+  source_id: z.string(),
+  excerpt: z.string(),
+  location: z.string(),
+  confidence: z.number(),
+  created_at: z.string(),
+  source: MemorySourceSchema,
+}).loose();
+
+const MemoryUsageSchema = z.object({
+  id: z.string(),
+  workspace_id: z.string(),
+  memory_id: z.string(),
+  used_by_type: z.string(),
+  used_by_id: z.string().nullable(),
+  issue_id: z.string().nullable(),
+  task_queue_id: z.string().nullable(),
+  chat_session_id: z.string().nullable(),
+  action: z.string(),
+  outcome: z.string(),
+  created_at: z.string(),
+}).loose();
+
+export const MemoryEntrySchema = z.object({
+  id: z.string(),
+  workspace_id: z.string(),
+  owner_user_id: z.string().nullable(),
+  project_id: z.string().nullable(),
+  type: z.string(),
+  category: z.string(),
+  title: z.string(),
+  content: z.string(),
+  summary: z.string(),
+  status: z.string(),
+  confidence: z.number(),
+  sensitivity: z.string(),
+  scope_type: z.string(),
+  scope_ref_id: z.string().nullable(),
+  external_use_policy: z.string(),
+  source_mode: z.string(),
+  created_by_type: z.string(),
+  created_by_id: z.string().nullable(),
+  verified_by: z.string().nullable(),
+  verified_at: z.string().nullable(),
+  last_used_at: z.string().nullable(),
+  expires_at: z.string().nullable(),
+  archived_at: z.string().nullable(),
+  created_at: z.string(),
+  updated_at: z.string(),
+  evidence: z.array(MemoryEvidenceSchema).optional(),
+  usage: z.array(MemoryUsageSchema).optional(),
+}).loose();
+
+export const EMPTY_MEMORY_ENTRY: MemoryEntry = {
+  id: "",
+  workspace_id: "",
+  owner_user_id: null,
+  project_id: null,
+  type: "preference",
+  category: "",
+  title: "",
+  content: "",
+  summary: "",
+  status: "candidate",
+  confidence: 0,
+  sensitivity: "normal",
+  scope_type: "workspace",
+  scope_ref_id: null,
+  external_use_policy: "with_approval",
+  source_mode: "manual",
+  created_by_type: "",
+  created_by_id: null,
+  verified_by: null,
+  verified_at: null,
+  last_used_at: null,
+  expires_at: null,
+  archived_at: null,
+  created_at: "",
+  updated_at: "",
+  evidence: [],
+  usage: [],
+};
+
+export const ListMemoryEntriesResponseSchema = z.object({
+  memories: z.array(MemoryEntrySchema).default([]),
+  total: z.number().default(0),
+}).loose();
+
+export const EMPTY_LIST_MEMORY_ENTRIES_RESPONSE: ListMemoryEntriesResponse = {
+  memories: [],
+  total: 0,
+};
+
+export const KnowledgeDocumentSchema = z.object({
+  id: z.string(),
+  workspace_id: z.string(),
+  title: z.string(),
+  source_type: z.string(),
+  source_url: z.string().nullable(),
+  attachment_id: z.string().nullable(),
+  status: z.string(),
+  imported_by: z.string().nullable(),
+  metadata: z.unknown(),
+  last_indexed_at: z.string().nullable(),
+  created_at: z.string(),
+  updated_at: z.string(),
+}).loose();
+
+export const EMPTY_KNOWLEDGE_DOCUMENT: KnowledgeDocument = {
+  id: "",
+  workspace_id: "",
+  title: "",
+  source_type: "manual",
+  source_url: null,
+  attachment_id: null,
+  status: "queued",
+  imported_by: null,
+  metadata: {},
+  last_indexed_at: null,
+  created_at: "",
+  updated_at: "",
+};
+
+export const ListKnowledgeDocumentsResponseSchema = z.object({
+  documents: z.array(KnowledgeDocumentSchema).default([]),
+  total: z.number().default(0),
+}).loose();
+
+export const EMPTY_LIST_KNOWLEDGE_DOCUMENTS_RESPONSE: ListKnowledgeDocumentsResponse = {
+  documents: [],
+  total: 0,
+};
+
+const AIApprovalEvidenceSchema = z.object({
+  id: z.string(),
+  approval_id: z.string(),
+  workspace_id: z.string(),
+  evidence_type: z.string(),
+  label: z.string(),
+  ref_id: z.string().nullable(),
+  source_url: z.string().nullable(),
+  quote: z.string(),
+  metadata: z.unknown(),
+  created_at: z.string(),
+}).loose();
+
+const AIApprovalEventSchema = z.object({
+  id: z.string(),
+  approval_id: z.string(),
+  workspace_id: z.string(),
+  actor_type: z.string(),
+  actor_id: z.string().nullable(),
+  event_type: z.string(),
+  from_status: z.string().nullable(),
+  to_status: z.string().nullable(),
+  payload: z.unknown(),
+  created_at: z.string(),
+}).loose();
+
+export const AIApprovalSchema = z.object({
+  id: z.string(),
+  workspace_id: z.string(),
+  requester_user_id: z.string().nullable(),
+  source_type: z.string(),
+  source_ref_id: z.string().nullable(),
+  source_url: z.string().nullable(),
+  issue_id: z.string().nullable(),
+  inbox_item_id: z.string().nullable(),
+  task_queue_id: z.string().nullable(),
+  memory_id: z.string().nullable(),
+  title: z.string(),
+  summary: z.string(),
+  status: z.string(),
+  risk_level: z.string(),
+  confidence: z.number(),
+  reversibility: z.string(),
+  action_type: z.string(),
+  action_title: z.string(),
+  action_description: z.string(),
+  original_payload: z.unknown(),
+  final_payload: z.unknown(),
+  ai_reasoning_summary: z.string(),
+  approval_note: z.string(),
+  rejection_reason: z.string(),
+  approved_by: z.string().nullable(),
+  approved_at: z.string().nullable(),
+  rejected_by: z.string().nullable(),
+  rejected_at: z.string().nullable(),
+  observed_by: z.string().nullable(),
+  observed_at: z.string().nullable(),
+  taken_over_by: z.string().nullable(),
+  taken_over_at: z.string().nullable(),
+  executed_at: z.string().nullable(),
+  execution_status: z.string(),
+  execution_error: z.string(),
+  created_issue_id: z.string().nullable(),
+  created_task_id: z.string().nullable(),
+  created_comment_id: z.string().nullable(),
+  expires_at: z.string().nullable(),
+  created_at: z.string(),
+  updated_at: z.string(),
+  evidence: z.array(AIApprovalEvidenceSchema).optional(),
+  events: z.array(AIApprovalEventSchema).optional(),
+}).loose();
+
+export const EMPTY_AI_APPROVAL: AIApproval = {
+  id: "",
+  workspace_id: "",
+  requester_user_id: null,
+  source_type: "manual",
+  source_ref_id: null,
+  source_url: null,
+  issue_id: null,
+  inbox_item_id: null,
+  task_queue_id: null,
+  memory_id: null,
+  title: "",
+  summary: "",
+  status: "pending",
+  risk_level: "medium",
+  confidence: 0,
+  reversibility: "partially_reversible",
+  action_type: "no_action",
+  action_title: "",
+  action_description: "",
+  original_payload: {},
+  final_payload: {},
+  ai_reasoning_summary: "",
+  approval_note: "",
+  rejection_reason: "",
+  approved_by: null,
+  approved_at: null,
+  rejected_by: null,
+  rejected_at: null,
+  observed_by: null,
+  observed_at: null,
+  taken_over_by: null,
+  taken_over_at: null,
+  executed_at: null,
+  execution_status: "not_started",
+  execution_error: "",
+  created_issue_id: null,
+  created_task_id: null,
+  created_comment_id: null,
+  expires_at: null,
+  created_at: "",
+  updated_at: "",
+  evidence: [],
+  events: [],
+};
+
+export const ListAIApprovalsResponseSchema = z.object({
+  approvals: z.array(AIApprovalSchema).default([]),
+  total: z.number().default(0),
+}).loose();
+
+export const EMPTY_LIST_AI_APPROVALS_RESPONSE: ListAIApprovalsResponse = {
+  approvals: [],
+  total: 0,
+};
+
+export const AIApprovalStatsSchema = z.object({
+  total: z.number().default(0),
+  pending: z.number().default(0),
+  high_risk_pending: z.number().default(0),
+  observing: z.number().default(0),
+  approved: z.number().default(0),
+  rejected: z.number().default(0),
+  taken_over: z.number().default(0),
+  expired: z.number().default(0),
+  succeeded: z.number().default(0),
+  failed: z.number().default(0),
+}).loose();
+
+export const EMPTY_AI_APPROVAL_STATS: AIApprovalStats = {
+  total: 0,
+  pending: 0,
+  high_risk_pending: 0,
+  observing: 0,
+  approved: 0,
+  rejected: 0,
+  taken_over: 0,
+  expired: 0,
+  succeeded: 0,
+  failed: 0,
+};
+
+export const AIMeCockpitSummarySchema = z.object({
+  active_tasks: z.number().default(0),
+  queued_tasks: z.number().default(0),
+  running_tasks: z.number().default(0),
+  completed_tasks_today: z.number().default(0),
+  failed_tasks_today: z.number().default(0),
+  pending_decisions: z.number().default(0),
+  high_risk_pending: z.number().default(0),
+  waiting_external: z.number().default(0),
+  execution_succeeded: z.number().default(0),
+  execution_failed: z.number().default(0),
+  external_reply_pending: z.number().default(0),
+  assign_worker_succeeded: z.number().default(0),
+  external_reply_succeeded: z.number().default(0),
+  active_memories: z.number().default(0),
+  memory_used_today: z.number().default(0),
+  unread_inbox: z.number().default(0),
+  active_issues: z.number().default(0),
+}).loose();
+
+export const EMPTY_AIME_COCKPIT_SUMMARY: AIMeCockpitSummary = {
+  active_tasks: 0,
+  queued_tasks: 0,
+  running_tasks: 0,
+  completed_tasks_today: 0,
+  failed_tasks_today: 0,
+  pending_decisions: 0,
+  high_risk_pending: 0,
+  waiting_external: 0,
+  execution_succeeded: 0,
+  execution_failed: 0,
+  external_reply_pending: 0,
+  assign_worker_succeeded: 0,
+  external_reply_succeeded: 0,
+  active_memories: 0,
+  memory_used_today: 0,
+  unread_inbox: 0,
+  active_issues: 0,
+};
+
+const AIMeSuggestedActionSchema = z.object({
+  type: z.string(),
+  title: z.string(),
+  description: z.string(),
+  target_agent_id: z.string().optional(),
+  target_agent_name: z.string().optional(),
+  issue_id: z.string().optional(),
+  priority: z.string().optional(),
+  requires_approval: z.boolean().default(true),
+}).loose();
+
+const AIMeEvidenceSchema = z.object({
+  type: z.string(),
+  label: z.string(),
+  ref_id: z.string().optional(),
+  quote: z.string().optional(),
+}).loose();
+
+const AIMeWorkspaceContextSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  slug: z.string(),
+  context: z.string().optional(),
+}).loose();
+
+const AIMeIssueContextSchema = z.object({
+  id: z.string(),
+  identifier: z.string(),
+  title: z.string(),
+  status: z.string(),
+  priority: z.string(),
+  assignee_type: z.string().optional(),
+  assignee_id: z.string().optional(),
+}).loose();
+
+const AIMeAgentContextSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  description: z.string(),
+  provider: z.string(),
+  status: z.string(),
+  runtime_status: z.string(),
+  model: z.string().optional(),
+}).loose();
+
+const AIMeMemoryContextSchema = z.object({
+  id: z.string(),
+  type: z.string(),
+  category: z.string().optional(),
+  title: z.string(),
+  content: z.string(),
+  summary: z.string().optional(),
+  confidence: z.number().default(0),
+  sensitivity: z.string(),
+  scope_type: z.string(),
+  external_use_policy: z.string(),
+}).loose();
+
+const AIMeContextSummarySchema = z.object({
+  workspace: AIMeWorkspaceContextSchema.default({
+    id: "",
+    name: "",
+    slug: "",
+  }),
+  issues: z.array(AIMeIssueContextSchema).nullish().transform((items) => items ?? []),
+  agents: z.array(AIMeAgentContextSchema).nullish().transform((items) => items ?? []),
+  memories: z.array(AIMeMemoryContextSchema).nullish().transform((items) => items ?? []),
+}).loose();
+
+export const AIMeThinkResponseSchema = z.object({
+  id: z.string(),
+  mode: z.string(),
+  provider: z.string().default(""),
+  model: z.string().default(""),
+  configured: z.boolean().default(false),
+  summary: z.string().default(""),
+  risk_level: z.string().default("medium"),
+  confidence: z.number().default(0),
+  need_approval: z.boolean().default(true),
+  approval_id: z.string().optional(),
+  approval_ids: z.array(z.string()).optional(),
+  reply_draft: z.string().default(""),
+  reasoning_summary: z.string().default(""),
+  actions: z.array(AIMeSuggestedActionSchema).default([]),
+  evidence: z.array(AIMeEvidenceSchema).default([]),
+  context: AIMeContextSummarySchema.default({
+    workspace: { id: "", name: "", slug: "" },
+    issues: [],
+    agents: [],
+    memories: [],
+  }),
+  configuration_required: z.boolean().default(false),
+  error: z.string().optional(),
+  created_at: z.string().default(""),
+}).loose();
+
+export const EMPTY_AIME_THINK_RESPONSE: AIMeThinkResponse = {
+  id: "",
+  mode: "fallback",
+  provider: "",
+  model: "",
+  configured: false,
+  summary: "",
+  risk_level: "medium",
+  confidence: 0,
+  need_approval: true,
+  approval_id: "",
+  approval_ids: [],
+  reply_draft: "",
+  reasoning_summary: "",
+  actions: [],
+  evidence: [],
+  context: {
+    workspace: { id: "", name: "", slug: "" },
+    issues: [],
+    agents: [],
+    memories: [],
+  },
+  configuration_required: false,
+  created_at: "",
+};

@@ -1,11 +1,14 @@
 {
   "nav": {
+    "dashboard": "工作驾驶舱",
     "inbox": "收件箱",
     "my_issues": "我的 Issue",
     "issues": "Issue",
     "projects": "项目",
     "autopilots": "自动化",
-    "agents": "智能体",
+    "memory": "记忆与知识",
+    "approvals": "审批中心",
+    "agents": "AI 员工 (Agents)",
     "runtimes": "运行时",
     "skills": "Skill",
     "settings": "设置"

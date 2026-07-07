@@ -70,6 +70,8 @@
         "projects",
         "autopilots",
         "agents",
+        "memory",
+        "approvals",
         "inbox",
         "my-issues",
         "runtimes",

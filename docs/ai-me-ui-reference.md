@@ -1,7 +1,7 @@
 # AI-Me UI 参考稿
 
-本文档收录 AI-Me v0.1 的 9 张 UI 参考稿。原图为 2K 设计稿，统一放在
-`docs/assets/ai-me-ui/`。
+本文档收录 AI-Me v0.1 的 9 张 UI 参考稿。原图为 2K 设计稿，由 GPT 生成，统一放在
+`docs/assets/ai-me-ui/`。这些图片只代表产品方向，不等同于最终生产界面。
 
 ## 页面清单
 

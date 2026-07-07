@@ -47,6 +47,12 @@ import type {
   AssigneeFrequencyEntry,
   TaskMessagePayload,
   Attachment,
+  AIApproval,
+  AIApprovalStats,
+  AIApprovalTransitionRequest,
+  AIMeCockpitSummary,
+  AIMeThinkRequest,
+  AIMeThinkResponse,
   ChatSession,
   ChatMessage,
   ChatPendingTask,
@@ -82,6 +88,19 @@ import type {
   NotificationPreferenceResponse,
   NotificationPreferences,
   CodeContext,
+  CreateKnowledgeDocumentRequest,
+  CreateAIApprovalRequest,
+  CreateMemoryEntryRequest,
+  KnowledgeDocument,
+  ListAIApprovalsParams,
+  ListAIApprovalsResponse,
+  ListKnowledgeDocumentsParams,
+  ListKnowledgeDocumentsResponse,
+  ListMemoryEntriesParams,
+  ListMemoryEntriesResponse,
+  MemoryEntry,
+  UpdateAIApprovalRequest,
+  UpdateMemoryEntryRequest,
 } from "../types";
 import type { OnboardingCompletionPath } from "../onboarding/types";
 import { type Logger, noopLogger } from "../logger";
@@ -100,8 +119,26 @@ import {
   ChatSessionSchema,
   ChatMessagesSchema,
   ChatPendingTaskSchema,
+  AIMeCockpitSummarySchema,
+  AIMeThinkResponseSchema,
+  AIApprovalStatsSchema,
+  AIApprovalSchema,
+  EMPTY_AIME_COCKPIT_SUMMARY,
+  EMPTY_AIME_THINK_RESPONSE,
+  EMPTY_AI_APPROVAL,
+  EMPTY_AI_APPROVAL_STATS,
+  EMPTY_KNOWLEDGE_DOCUMENT,
+  EMPTY_LIST_AI_APPROVALS_RESPONSE,
   PendingChatTasksResponseSchema,
   SendChatMessageResponseSchema,
+  EMPTY_LIST_KNOWLEDGE_DOCUMENTS_RESPONSE,
+  EMPTY_LIST_MEMORY_ENTRIES_RESPONSE,
+  EMPTY_MEMORY_ENTRY,
+  KnowledgeDocumentSchema,
+  ListAIApprovalsResponseSchema,
+  ListKnowledgeDocumentsResponseSchema,
+  ListMemoryEntriesResponseSchema,
+  MemoryEntrySchema,
 } from "./schemas";
 
 /** Identifies the calling client to the server.
@@ -399,6 +436,113 @@ export class ApiClient {
     return this.fetch("/api/me", {
       method: "PATCH",
       body: JSON.stringify(data),
+    });
+  }
+
+  // AI-Me
+  async getAIMeCockpitSummary(): Promise<AIMeCockpitSummary> {
+    const raw = await this.fetch<unknown>("/api/ai-me/cockpit/summary");
+    return parseWithFallback(raw, AIMeCockpitSummarySchema, EMPTY_AIME_COCKPIT_SUMMARY, {
+      endpoint: "GET /api/ai-me/cockpit/summary",
+    });
+  }
+
+  async thinkAIMe(data: AIMeThinkRequest): Promise<AIMeThinkResponse> {
+    const raw = await this.fetch<unknown>("/api/ai-me/think", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+    return parseWithFallback(raw, AIMeThinkResponseSchema, EMPTY_AIME_THINK_RESPONSE, {
+      endpoint: "POST /api/ai-me/think",
+    });
+  }
+
+  async listAIApprovals(params?: ListAIApprovalsParams): Promise<ListAIApprovalsResponse> {
+    const search = new URLSearchParams();
+    if (params?.status) search.set("status", params.status);
+    if (params?.risk_level) search.set("risk_level", params.risk_level);
+    if (params?.action_type) search.set("action_type", params.action_type);
+    if (params?.source_type) search.set("source_type", params.source_type);
+    if (params?.issue_id) search.set("issue_id", params.issue_id);
+    if (params?.limit !== undefined) search.set("limit", String(params.limit));
+    if (params?.offset !== undefined) search.set("offset", String(params.offset));
+    const raw = await this.fetch<unknown>(`/api/ai-me/approvals?${search}`);
+    return parseWithFallback(raw, ListAIApprovalsResponseSchema, EMPTY_LIST_AI_APPROVALS_RESPONSE, {
+      endpoint: "GET /api/ai-me/approvals",
+    });
+  }
+
+  async getAIApprovalStats(): Promise<AIApprovalStats> {
+    const raw = await this.fetch<unknown>("/api/ai-me/approvals/stats");
+    return parseWithFallback(raw, AIApprovalStatsSchema, EMPTY_AI_APPROVAL_STATS, {
+      endpoint: "GET /api/ai-me/approvals/stats",
+    });
+  }
+
+  async getAIApproval(id: string): Promise<AIApproval> {
+    const raw = await this.fetch<unknown>(`/api/ai-me/approvals/${id}`);
+    return parseWithFallback(raw, AIApprovalSchema, EMPTY_AI_APPROVAL, {
+      endpoint: "GET /api/ai-me/approvals/:id",
+    });
+  }
+
+  async createAIApproval(data: CreateAIApprovalRequest): Promise<AIApproval> {
+    const raw = await this.fetch<unknown>("/api/ai-me/approvals", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+    return parseWithFallback(raw, AIApprovalSchema, EMPTY_AI_APPROVAL, {
+      endpoint: "POST /api/ai-me/approvals",
+    });
+  }
+
+  async updateAIApproval(id: string, data: UpdateAIApprovalRequest): Promise<AIApproval> {
+    const raw = await this.fetch<unknown>(`/api/ai-me/approvals/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    });
+    return parseWithFallback(raw, AIApprovalSchema, EMPTY_AI_APPROVAL, {
+      endpoint: "PATCH /api/ai-me/approvals/:id",
+    });
+  }
+
+  async approveAIApproval(id: string, data?: AIApprovalTransitionRequest): Promise<AIApproval> {
+    const raw = await this.fetch<unknown>(`/api/ai-me/approvals/${id}/approve`, {
+      method: "POST",
+      body: JSON.stringify(data ?? {}),
+    });
+    return parseWithFallback(raw, AIApprovalSchema, EMPTY_AI_APPROVAL, {
+      endpoint: "POST /api/ai-me/approvals/:id/approve",
+    });
+  }
+
+  async rejectAIApproval(id: string, data?: AIApprovalTransitionRequest): Promise<AIApproval> {
+    const raw = await this.fetch<unknown>(`/api/ai-me/approvals/${id}/reject`, {
+      method: "POST",
+      body: JSON.stringify(data ?? {}),
+    });
+    return parseWithFallback(raw, AIApprovalSchema, EMPTY_AI_APPROVAL, {
+      endpoint: "POST /api/ai-me/approvals/:id/reject",
+    });
+  }
+
+  async observeAIApproval(id: string, data?: AIApprovalTransitionRequest): Promise<AIApproval> {
+    const raw = await this.fetch<unknown>(`/api/ai-me/approvals/${id}/observe`, {
+      method: "POST",
+      body: JSON.stringify(data ?? {}),
+    });
+    return parseWithFallback(raw, AIApprovalSchema, EMPTY_AI_APPROVAL, {
+      endpoint: "POST /api/ai-me/approvals/:id/observe",
+    });
+  }
+
+  async takeOverAIApproval(id: string, data?: AIApprovalTransitionRequest): Promise<AIApproval> {
+    const raw = await this.fetch<unknown>(`/api/ai-me/approvals/${id}/take-over`, {
+      method: "POST",
+      body: JSON.stringify(data ?? {}),
+    });
+    return parseWithFallback(raw, AIApprovalSchema, EMPTY_AI_APPROVAL, {
+      endpoint: "POST /api/ai-me/approvals/:id/take-over",
     });
   }
 
@@ -951,6 +1095,97 @@ export class ApiClient {
   async deleteWorkspace(workspaceId: string): Promise<void> {
     await this.fetch(`/api/workspaces/${workspaceId}`, {
       method: "DELETE",
+    });
+  }
+
+  // Memory & Knowledge
+  async listMemoryEntries(params?: ListMemoryEntriesParams): Promise<ListMemoryEntriesResponse> {
+    const search = new URLSearchParams();
+    if (params?.status) search.set("status", params.status);
+    if (params?.type) search.set("type", params.type);
+    if (params?.category) search.set("category", params.category);
+    if (params?.q) search.set("q", params.q);
+    if (params?.limit !== undefined) search.set("limit", String(params.limit));
+    if (params?.offset !== undefined) search.set("offset", String(params.offset));
+    const raw = await this.fetch<unknown>(`/api/memory?${search}`);
+    return parseWithFallback(raw, ListMemoryEntriesResponseSchema, EMPTY_LIST_MEMORY_ENTRIES_RESPONSE, {
+      endpoint: "GET /api/memory",
+    });
+  }
+
+  async getMemoryEntry(id: string): Promise<MemoryEntry> {
+    const raw = await this.fetch<unknown>(`/api/memory/${id}`);
+    return parseWithFallback(raw, MemoryEntrySchema, EMPTY_MEMORY_ENTRY, {
+      endpoint: "GET /api/memory/:id",
+    });
+  }
+
+  async createMemoryEntry(data: CreateMemoryEntryRequest): Promise<MemoryEntry> {
+    const raw = await this.fetch<unknown>("/api/memory", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+    return parseWithFallback(raw, MemoryEntrySchema, EMPTY_MEMORY_ENTRY, {
+      endpoint: "POST /api/memory",
+    });
+  }
+
+  async updateMemoryEntry(id: string, data: UpdateMemoryEntryRequest): Promise<MemoryEntry> {
+    const raw = await this.fetch<unknown>(`/api/memory/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    });
+    return parseWithFallback(raw, MemoryEntrySchema, EMPTY_MEMORY_ENTRY, {
+      endpoint: "PATCH /api/memory/:id",
+    });
+  }
+
+  async confirmMemoryEntry(id: string): Promise<MemoryEntry> {
+    const raw = await this.fetch<unknown>(`/api/memory/${id}/confirm`, { method: "POST" });
+    return parseWithFallback(raw, MemoryEntrySchema, EMPTY_MEMORY_ENTRY, {
+      endpoint: "POST /api/memory/:id/confirm",
+    });
+  }
+
+  async rejectMemoryEntry(id: string): Promise<MemoryEntry> {
+    const raw = await this.fetch<unknown>(`/api/memory/${id}/reject`, { method: "POST" });
+    return parseWithFallback(raw, MemoryEntrySchema, EMPTY_MEMORY_ENTRY, {
+      endpoint: "POST /api/memory/:id/reject",
+    });
+  }
+
+  async archiveMemoryEntry(id: string): Promise<MemoryEntry> {
+    const raw = await this.fetch<unknown>(`/api/memory/${id}/archive`, { method: "POST" });
+    return parseWithFallback(raw, MemoryEntrySchema, EMPTY_MEMORY_ENTRY, {
+      endpoint: "POST /api/memory/:id/archive",
+    });
+  }
+
+  async verifyMemoryEntry(id: string): Promise<MemoryEntry> {
+    const raw = await this.fetch<unknown>(`/api/memory/${id}/verify`, { method: "POST" });
+    return parseWithFallback(raw, MemoryEntrySchema, EMPTY_MEMORY_ENTRY, {
+      endpoint: "POST /api/memory/:id/verify",
+    });
+  }
+
+  async listKnowledgeDocuments(params?: ListKnowledgeDocumentsParams): Promise<ListKnowledgeDocumentsResponse> {
+    const search = new URLSearchParams();
+    if (params?.status) search.set("status", params.status);
+    if (params?.limit !== undefined) search.set("limit", String(params.limit));
+    if (params?.offset !== undefined) search.set("offset", String(params.offset));
+    const raw = await this.fetch<unknown>(`/api/knowledge-documents?${search}`);
+    return parseWithFallback(raw, ListKnowledgeDocumentsResponseSchema, EMPTY_LIST_KNOWLEDGE_DOCUMENTS_RESPONSE, {
+      endpoint: "GET /api/knowledge-documents",
+    });
+  }
+
+  async createKnowledgeDocument(data: CreateKnowledgeDocumentRequest): Promise<KnowledgeDocument> {
+    const raw = await this.fetch<unknown>("/api/knowledge-documents", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+    return parseWithFallback(raw, KnowledgeDocumentSchema, EMPTY_KNOWLEDGE_DOCUMENT, {
+      endpoint: "POST /api/knowledge-documents",
     });
   }
 

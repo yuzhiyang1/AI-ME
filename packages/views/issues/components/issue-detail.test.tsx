@@ -23,6 +23,15 @@ vi.mock("@multica/core/hooks", () => ({
   useWorkspaceId: () => "ws-1",
 }));
 
+const mockThinkAIMe = vi.hoisted(() => ({
+  mutateAsync: vi.fn(),
+  isPending: false,
+}));
+
+vi.mock("@multica/core/aime", () => ({
+  useThinkAIMe: () => mockThinkAIMe,
+}));
+
 // ---------------------------------------------------------------------------
 // Mocks
 // ---------------------------------------------------------------------------
@@ -397,6 +406,11 @@ describe("IssueDetail (shared)", () => {
       { user_id: "user-1", name: "Test User", email: "test@test.com", role: "admin" },
     ]);
     mockApiObj.listAgents.mockResolvedValue([]);
+    mockThinkAIMe.isPending = false;
+    mockThinkAIMe.mutateAsync.mockResolvedValue({
+      approval_id: "approval-1",
+      configuration_required: false,
+    });
   });
 
   it("shows loading skeleton while data is loading", () => {
@@ -508,6 +522,63 @@ describe("IssueDetail (shared)", () => {
     });
 
     expect(screen.getByText("I can help with this")).toBeInTheDocument();
+  });
+
+  it("labels AI-Me approval assignment activities in the timeline", async () => {
+    mockApiObj.listTimeline.mockResolvedValue([
+      ...mockTimeline,
+      {
+        type: "activity",
+        id: "activity-1",
+        actor_type: "member",
+        actor_id: "user-1",
+        action: "assignee_changed",
+        details: {
+          source: "ai_me_approval",
+          approval_id: "approval-1",
+          to_type: "agent",
+          to_id: "agent-1",
+        },
+        created_at: "2026-01-18T00:00:00Z",
+      },
+    ]);
+
+    renderIssueDetail();
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("AI-Me assigned it to Claude Agent after approval"),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("asks AI-Me to analyze the current issue and exposes the approval shortcut", async () => {
+    renderIssueDetail();
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("Implement authentication")).toBeInTheDocument();
+    });
+
+    fireEvent.click(screen.getByLabelText("Ask AI-Me to analyze"));
+
+    await waitFor(() => {
+      expect(mockThinkAIMe.mutateAsync).toHaveBeenCalledWith(
+        expect.objectContaining({
+          intent: "reply",
+          source_type: "issue",
+          source_ref_id: "issue-1",
+          issue_id: "issue-1",
+          need_worker_plan: true,
+        }),
+      );
+    });
+    const call = mockThinkAIMe.mutateAsync.mock.calls[0];
+    expect(call).toBeDefined();
+    const payload = call![0] as { input: string };
+    expect(payload.input).toContain("Implement authentication");
+    expect(payload.input).toContain("Add JWT auth to the backend");
+    expect(payload.input).toContain("Started working on this");
+    expect(screen.getByLabelText("Open approval center")).toBeInTheDocument();
   });
 
   it("sends empty description when editor is cleared", async () => {

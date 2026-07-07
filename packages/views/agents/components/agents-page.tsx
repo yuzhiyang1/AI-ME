@@ -4,17 +4,22 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertCircle,
   ArrowLeft,
-  ArrowUpDown,
   Bot,
   Plus,
   Search,
 } from "lucide-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { getCoreRowModel, useReactTable } from "@tanstack/react-table";
-import type { Agent, AgentRuntime, CreateAgentRequest } from "@multica/core/types";
+import type {
+  Agent,
+  AgentRuntime,
+  AgentTask,
+  CreateAgentRequest,
+} from "@multica/core/types";
 import {
-  type AgentAvailability,
+  type AgentActivity,
+  type AgentPresenceDetail,
   agentRunCounts30dOptions,
+  agentTaskSnapshotOptions,
   summarizeActivityWindow,
   useWorkspaceActivityMap,
   useWorkspacePresenceMap,
@@ -22,6 +27,8 @@ import {
 import { api } from "@multica/core/api";
 import { useAuthStore } from "@multica/core/auth";
 import { useWorkspaceId } from "@multica/core/hooks";
+import { useQuickCreateStore } from "@multica/core/issues/stores/quick-create-store";
+import { useModalStore } from "@multica/core/modals";
 import { canAssignAgentToIssue } from "@multica/core/permissions";
 import { useWorkspacePaths } from "@multica/core/paths";
 import {
@@ -31,45 +38,42 @@ import {
 } from "@multica/core/workspace/queries";
 import { runtimeListOptions } from "@multica/core/runtimes";
 import { Button } from "@multica/ui/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@multica/ui/components/ui/dropdown-menu";
 import { Input } from "@multica/ui/components/ui/input";
 import { Skeleton } from "@multica/ui/components/ui/skeleton";
-import { DataTable } from "@multica/ui/components/ui/data-table";
-import { useNavigation } from "../../navigation";
+import { cn } from "@multica/ui/lib/utils";
+import { ActorAvatar } from "../../common/actor-avatar";
 import { PageHeader } from "../../layout/page-header";
-import { availabilityConfig, availabilityOrder } from "../presence";
+import { useNavigation } from "../../navigation";
+import { availabilityConfig } from "../presence";
+import { AgentRowActions } from "./agent-row-actions";
 import { CreateAgentDialog } from "./create-agent-dialog";
-import { type AgentRow, createAgentColumns } from "./agent-columns";
+import { Sparkline } from "./sparkline";
 import { useT } from "../../i18n";
 
-// Filter axes:
-//
-//   View         = active vs archived dataset. Archived is low-frequency,
-//                  accessed through a ghost link in the toolbar.
-//   Scope        = ownership lens (All vs Mine). Layer-1 segment.
-//   Availability = "Can the agent take work right now?" — 3-state chip
-//                  group (online / unstable / offline) sourced from
-//                  AgentAvailability. The only chip filter we keep —
-//                  the previous Workload axis was dropped because its
-//                  "queued / failed / cancelled" buckets became
-//                  meaningless once Failed left the workload model.
 type View = "active" | "archived";
-type Scope = "all" | "mine";
-type AvailabilityFilter = "all" | AgentAvailability;
+type WorkerTab = "all" | "codex" | "claude" | "other";
 
-type SortKey = "recent" | "name" | "runs" | "created";
-const SORT_KEYS: SortKey[] = ["recent", "name", "runs", "created"];
-const SORT_LABEL_KEY: Record<SortKey, "label_recent" | "label_name" | "label_runs" | "label_created"> = {
-  recent: "label_recent",
-  name: "label_name",
-  runs: "label_runs",
-  created: "label_created",
-};
+const WORKER_TABS: WorkerTab[] = ["all", "codex", "claude", "other"];
+const ACTIVE_TASK_STATUS = new Set(["queued", "dispatched", "running"]);
+const TERMINAL_TASK_STATUS = new Set(["completed", "failed", "cancelled"]);
+
+interface WorkerRow {
+  agent: Agent;
+  runtime: AgentRuntime | null;
+  presence: AgentPresenceDetail | null | undefined;
+  activity: AgentActivity | null | undefined;
+  tasks: AgentTask[];
+  currentTask: AgentTask | null;
+  recentTasks: AgentTask[];
+  runCount: number;
+  todayRuns: number;
+  successRate: number | null;
+  avgDurationLabel: string;
+  workDirLabel: string;
+  canManage: boolean;
+  provider: string;
+  tab: Exclude<WorkerTab, "all">;
+}
 
 export function AgentsPage() {
   const { t } = useT("agents");
@@ -78,6 +82,8 @@ export function AgentsPage() {
   const navigation = useNavigation();
   const qc = useQueryClient();
   const currentUser = useAuthStore((s) => s.user);
+  const openModal = useModalStore((s) => s.open);
+  const setQuickCreateAgent = useQuickCreateStore((s) => s.setLastAgentId);
 
   const {
     data: agents = [],
@@ -90,219 +96,179 @@ export function AgentsPage() {
   );
   const { data: members = [] } = useQuery(memberListOptions(wsId));
   const { data: runCountsRaw = [] } = useQuery(agentRunCounts30dOptions(wsId));
-
-  // Single source of truth for derived agent state. The hook owns the
-  // 30s tick + the runtime/null/task orchestration; the page only reads
-  // the resulting Maps. Replaces the 24-line useMemo presenceMap +
-  // 12-line activityMap that lived here previously.
+  const { data: taskSnapshot = [] } = useQuery(agentTaskSnapshotOptions(wsId));
   const { byAgent: presenceMap } = useWorkspacePresenceMap(wsId);
   const { byAgent: activityMap } = useWorkspaceActivityMap(wsId);
 
   const [view, setView] = useState<View>("active");
-  // Default to "mine" — matches runtimes page convention and the visual
-  // ordering (Mine first). All is one click away when users want the
-  // workspace-wide view.
-  const [scope, setScope] = useState<Scope>("mine");
-  const [availabilityFilter, setAvailabilityFilter] =
-    useState<AvailabilityFilter>("all");
-  const [sort, setSort] = useState<SortKey>("recent");
+  const [tab, setTab] = useState<WorkerTab>("all");
   const [search, setSearch] = useState("");
+  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
-  // When set, the Create dialog opens pre-populated with this agent's
-  // config — driven by the row-level "Duplicate" action. We keep this
-  // separate from `showCreate` so a stray null-template doesn't open the
-  // dialog: the dialog opens iff `showCreate || duplicateTemplate`.
   const [duplicateTemplate, setDuplicateTemplate] = useState<Agent | null>(
     null,
   );
 
   const runtimesById = useMemo(() => {
-    const m = new Map<string, AgentRuntime>();
-    for (const r of runtimes) m.set(r.id, r);
-    return m;
+    const map = new Map<string, AgentRuntime>();
+    for (const runtime of runtimes) map.set(runtime.id, runtime);
+    return map;
   }, [runtimes]);
 
   const runCountsById = useMemo(() => {
-    const m = new Map<string, number>();
-    for (const r of runCountsRaw) m.set(r.agent_id, r.run_count);
-    return m;
+    const map = new Map<string, number>();
+    for (const count of runCountsRaw) map.set(count.agent_id, count.run_count);
+    return map;
   }, [runCountsRaw]);
 
-  // Workspace role of the current user, used to gate row-level "manage"
-  // operations (archive / cancel-tasks). Mirrors the back-end's
-  // canManageAgent rule: workspace owner/admin OR the agent's owner.
+  const tasksByAgent = useMemo(() => {
+    const map = new Map<string, AgentTask[]>();
+    for (const task of taskSnapshot) {
+      const existing = map.get(task.agent_id);
+      if (existing) existing.push(task);
+      else map.set(task.agent_id, [task]);
+    }
+    for (const tasks of map.values()) {
+      tasks.sort((a, b) => taskTime(b) - taskTime(a));
+    }
+    return map;
+  }, [taskSnapshot]);
+
   const myRole = useMemo(() => {
     if (!currentUser) return null;
-    return members.find((m) => m.user_id === currentUser.id)?.role ?? null;
+    return members.find((member) => member.user_id === currentUser.id)?.role ?? null;
   }, [members, currentUser]);
   const isWorkspaceAdmin = myRole === "owner" || myRole === "admin";
 
-  // Layer 1a — view (active / archived).
-  const inView = useMemo(
-    () =>
-      agents.filter((a) =>
-        view === "archived" ? !!a.archived_at : !a.archived_at,
-      ),
-    [agents, view],
-  );
-
-  // Layer 1b — visibility. Personal (visibility=private) agents owned by
-  // someone else are hidden from regular members; workspace owners/admins
-  // still see everything. Mirrors the assign-to-issue gate so the list
-  // only ever shows agents the user could actually act on. Backend keeps
-  // returning all agents, so admin tools (and the API itself) are
-  // unaffected — this is a UI-only filter.
-  const visibleInView = useMemo(() => {
-    return inView.filter((a) =>
-      canAssignAgentToIssue(a, {
+  const visibleAgents = useMemo(() => {
+    return agents.filter((agent) => {
+      const inRequestedLifecycle =
+        view === "archived" ? !!agent.archived_at : !agent.archived_at;
+      if (!inRequestedLifecycle) return false;
+      return canAssignAgentToIssue(agent, {
         userId: currentUser?.id ?? null,
         role: myRole,
-      }).allowed,
-    );
-  }, [inView, currentUser?.id, myRole]);
-
-  // Layer 1c — ownership scope. Counts shown on the segment are
-  // computed against the visibleInView set so the numbers always reflect
-  // "what would I see if I clicked this".
-  const scopeCounts = useMemo(() => {
-    let mine = 0;
-    if (currentUser) {
-      for (const a of visibleInView) {
-        if (a.owner_id === currentUser.id) mine += 1;
-      }
-    }
-    return { all: visibleInView.length, mine };
-  }, [visibleInView, currentUser]);
-
-  const inScope = useMemo(() => {
-    // Archived view ignores Mine / All — its toolbar has no scope
-    // segment, so silently filtering by `scope` would hide other
-    // people's archived agents without any UI to explain why.
-    if (view === "archived") return visibleInView;
-    if (scope === "all" || !currentUser) return visibleInView;
-    return visibleInView.filter((a) => a.owner_id === currentUser.id);
-  }, [visibleInView, scope, currentUser, view]);
-
-  // Final cut — availability chip + search.
-  const filteredAgents = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    return inScope.filter((a) => {
-      // Availability chip filter only applies to the Active view —
-      // archived agents have no presence to match against.
-      if (view === "active" && availabilityFilter !== "all") {
-        const detail = presenceMap.get(a.id);
-        if (detail?.availability !== availabilityFilter) return false;
-      }
-      if (q) {
-        if (
-          !a.name.toLowerCase().includes(q) &&
-          !(a.description ?? "").toLowerCase().includes(q)
-        ) {
-          return false;
-        }
-      }
-      return true;
+      }).allowed;
     });
-  }, [inScope, view, availabilityFilter, presenceMap, search]);
+  }, [agents, currentUser?.id, myRole, view]);
 
-  // Per-availability counts for the chip badges. Computed against
-  // `inScope` (ignoring the availability filter itself) so the numbers
-  // reflect "if I clicked this chip, this many agents would match"
-  // rather than collapsing to 0 for the unselected chips.
-  const availabilityCounts = useMemo(() => {
-    const counts: Record<AgentAvailability, number> = {
-      online: 0,
-      unstable: 0,
-      offline: 0,
+  const workerRows = useMemo<WorkerRow[]>(() => {
+    return visibleAgents.map((agent) => {
+      const runtime = runtimesById.get(agent.runtime_id) ?? null;
+      const tasks = tasksByAgent.get(agent.id) ?? [];
+      const currentTask = pickCurrentTask(tasks);
+      const activity = activityMap.get(agent.id) ?? null;
+      const todayRuns = summarizeActivityWindow(activity ?? undefined, 1).totalRuns;
+      const sevenDay = summarizeActivityWindow(activity ?? undefined, 7);
+      const successRate =
+        sevenDay.totalRuns > 0
+          ? Math.round(((sevenDay.totalRuns - sevenDay.totalFailed) / sevenDay.totalRuns) * 100)
+          : null;
+      const provider = runtime?.provider ?? "unknown";
+      const isOwner = !!currentUser?.id && agent.owner_id === currentUser.id;
+      const canManage = isWorkspaceAdmin || isOwner;
+      return {
+        agent,
+        runtime,
+        presence: presenceMap.get(agent.id) ?? null,
+        activity,
+        tasks,
+        currentTask,
+        recentTasks: tasks.filter((task) => TERMINAL_TASK_STATUS.has(task.status)).slice(0, 3),
+        runCount: runCountsById.get(agent.id) ?? 0,
+        todayRuns,
+        successRate,
+        avgDurationLabel: formatAverageDuration(tasks, t),
+        workDirLabel: workDirLabel(agent, currentTask, t),
+        canManage,
+        provider,
+        tab: providerToTab(provider),
+      };
+    });
+  }, [
+    visibleAgents,
+    runtimesById,
+    tasksByAgent,
+    activityMap,
+    currentUser?.id,
+    isWorkspaceAdmin,
+    presenceMap,
+    runCountsById,
+    t,
+  ]);
+
+  const tabCounts = useMemo(() => {
+    const counts: Record<WorkerTab, number> = {
+      all: workerRows.length,
+      codex: 0,
+      claude: 0,
+      other: 0,
     };
-    for (const a of inScope) {
-      const detail = presenceMap.get(a.id);
-      if (!detail) continue;
-      counts[detail.availability] += 1;
-    }
+    for (const row of workerRows) counts[row.tab] += 1;
     return counts;
-  }, [inScope, presenceMap]);
+  }, [workerRows]);
 
-  const sortedAgents = useMemo(() => {
-    const xs = [...filteredAgents];
-    switch (sort) {
-      case "name":
-        xs.sort((a, b) => a.name.localeCompare(b.name));
-        break;
-      case "runs":
-        xs.sort(
-          (a, b) =>
-            (runCountsById.get(b.id) ?? 0) - (runCountsById.get(a.id) ?? 0),
-        );
-        break;
-      case "created":
-        xs.sort((a, b) => +new Date(b.created_at) - +new Date(a.created_at));
-        break;
-      case "recent":
-      default:
-        // "Recent activity" prioritises 7d total completions (the same
-        // window the row's sparkline shows), then 30d run count, then
-        // created_at. We don't have a precise last-touched timestamp on
-        // Agent today; this approximates it closely without a new column.
-        xs.sort((a, b) => {
-          const aSum = summarizeActivityWindow(
-            activityMap.get(a.id),
-            7,
-          ).totalRuns;
-          const bSum = summarizeActivityWindow(
-            activityMap.get(b.id),
-            7,
-          ).totalRuns;
-          if (aSum !== bSum) return bSum - aSum;
-          const aRuns = runCountsById.get(a.id) ?? 0;
-          const bRuns = runCountsById.get(b.id) ?? 0;
-          if (aRuns !== bRuns) return bRuns - aRuns;
-          return +new Date(b.created_at) - +new Date(a.created_at);
-        });
-        break;
-    }
-    return xs;
-  }, [filteredAgents, sort, runCountsById, activityMap]);
+  const filteredRows = useMemo(() => {
+    const query = search.trim().toLowerCase();
+    return workerRows.filter((row) => {
+      if (tab !== "all" && row.tab !== tab) return false;
+      if (!query) return true;
+      return (
+        row.agent.name.toLowerCase().includes(query) ||
+        row.agent.description.toLowerCase().includes(query) ||
+        row.provider.toLowerCase().includes(query)
+      );
+    });
+  }, [workerRows, search, tab]);
+
+  const metrics = useMemo(() => buildMetrics(workerRows, t), [workerRows, t]);
 
   const archivedCount = useMemo(
-    () => agents.filter((a) => !!a.archived_at).length,
+    () => agents.filter((agent) => !!agent.archived_at).length,
+    [agents],
+  );
+  const activeCount = useMemo(
+    () => agents.filter((agent) => !agent.archived_at).length,
     [agents],
   );
 
-  const totalActiveCount = useMemo(
-    () => agents.filter((a) => !a.archived_at).length,
-    [agents],
-  );
-
-  // Auto-bounce out of Archived if the population empties (e.g. user
-  // restored the last archived agent from another surface).
   useEffect(() => {
     if (view === "archived" && archivedCount === 0) setView("active");
   }, [view, archivedCount]);
 
+  useEffect(() => {
+    if (filteredRows.length === 0) {
+      setSelectedAgentId(null);
+      return;
+    }
+    const stillVisible = filteredRows.some(
+      (row) => row.agent.id === selectedAgentId,
+    );
+    if (!stillVisible) setSelectedAgentId(filteredRows[0]?.agent.id ?? null);
+  }, [filteredRows, selectedAgentId]);
+
+  const selectedRow =
+    filteredRows.find((row) => row.agent.id === selectedAgentId) ??
+    filteredRows[0] ??
+    null;
+
   const handleCreate = async (data: CreateAgentRequest) => {
     const agent = await api.createAgent(data);
     let cachedAgent = agent;
-    // When duplicating, carry the source agent's skill assignments over.
-    // Skills aren't part of CreateAgentRequest (they're managed via
-    // setAgentSkills) so the create endpoint can't take them inline; we
-    // do a follow-up call. Failure here doesn't abort the duplicate —
-    // the agent already exists and the user can re-attach skills from
-    // the detail page.
     if (duplicateTemplate?.skills.length) {
       try {
         await api.setAgentSkills(agent.id, {
-          skill_ids: duplicateTemplate.skills.map((s) => s.id),
+          skill_ids: duplicateTemplate.skills.map((skill) => skill.id),
         });
         cachedAgent = { ...agent, skills: duplicateTemplate.skills };
       } catch {
-        // Surfaced softly; the agent itself is fine.
+        // The employee is created; skill attachment can be retried later.
       }
     }
     qc.setQueryData<Agent[]>(workspaceKeys.agents(wsId), (current = []) => {
-      const exists = current.some((a) => a.id === cachedAgent.id);
+      const exists = current.some((item) => item.id === cachedAgent.id);
       return exists
-        ? current.map((a) => (a.id === cachedAgent.id ? cachedAgent : a))
+        ? current.map((item) => (item.id === cachedAgent.id ? cachedAgent : item))
         : [...current, cachedAgent];
     });
     setShowCreate(false);
@@ -316,147 +282,128 @@ export function AgentsPage() {
     setShowCreate(true);
   }, []);
 
-  // Assemble per-row data once per render — agent + runtime + presence +
-  // activity + role flags. The columns reach into `row.original` and never
-  // pull their own queries, which keeps each cell a pure function.
-  const agentRows = useMemo<AgentRow[]>(() => {
-    return sortedAgents.map((agent) => {
-      const isOwner =
-        !!currentUser?.id && agent.owner_id === currentUser.id;
-      const canManage = isWorkspaceAdmin || isOwner;
-      const ownerIdToShow =
-        scope === "all" &&
-        agent.owner_id &&
-        agent.owner_id !== currentUser?.id
-          ? agent.owner_id
-          : null;
-      return {
-        agent,
-        runtime: runtimesById.get(agent.runtime_id) ?? null,
-        presence: presenceMap.get(agent.id) ?? null,
-        activity: activityMap.get(agent.id) ?? null,
-        runCount: runCountsById.get(agent.id) ?? 0,
-        ownerIdToShow,
-        isOwnedByMe: isOwner,
-        canManage,
-      };
-    });
-  }, [
-    sortedAgents,
-    currentUser,
-    isWorkspaceAdmin,
-    scope,
-    runtimesById,
-    presenceMap,
-    activityMap,
-    runCountsById,
-  ]);
-
-  const columns = useMemo(
-    () => createAgentColumns({ onDuplicate: handleDuplicate, t }),
-    [handleDuplicate, t],
+  const handleAssignTask = useCallback(
+    (agent: Agent) => {
+      setQuickCreateAgent(agent.id);
+      openModal("quick-create-issue");
+    },
+    [openModal, setQuickCreateAgent],
   );
 
-  const table = useReactTable({
-    data: agentRows,
-    columns,
-    getCoreRowModel: getCoreRowModel(),
-    enableColumnResizing: true,
-    // Pin the kebab column right so it stays accessible during horizontal
-    // scroll — matches the pattern in Linear / Notion / GitHub.
-    initialState: { columnPinning: { right: ["actions"] } },
-  });
-
-  // ---- Loading ----
   if (isLoading) {
     return (
-      <div className="flex flex-1 min-h-0 flex-col">
-        <PageHeaderBar totalCount={0} onCreate={() => setShowCreate(true)} />
-        <div className="flex flex-1 min-h-0 flex-col gap-4 p-6">
-          <div className="flex flex-1 min-h-0 flex-col overflow-hidden rounded-lg border">
-            <div className="flex h-12 shrink-0 items-center gap-2 border-b px-4">
-              <Skeleton className="h-7 w-32 rounded-md" />
-              <Skeleton className="h-7 w-32 rounded-md" />
-            </div>
-            <div className="flex h-11 shrink-0 items-center gap-2 border-b px-4">
-              <Skeleton className="h-6 w-16 rounded-full" />
-              <Skeleton className="h-6 w-24 rounded-full" />
-              <Skeleton className="h-6 w-20 rounded-full" />
-            </div>
-            <div className="space-y-2 p-4">
-              {Array.from({ length: 4 }).map((_, i) => (
-                <Skeleton key={i} className="h-14 w-full rounded-md" />
-              ))}
-            </div>
+      <div className="flex min-h-0 flex-1 flex-col bg-[var(--aime-bg)]">
+        <PageHeaderBar
+          totalCount={0}
+          onCreate={() => setShowCreate(true)}
+          onTemplate={() => setShowCreate(true)}
+        />
+        <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-hidden p-6">
+          <PageIntroSkeleton />
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
+            {Array.from({ length: 5 }).map((_, index) => (
+              <Skeleton key={index} className="h-24 rounded-xl" />
+            ))}
+          </div>
+          <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_392px]">
+            <Skeleton className="min-h-96 rounded-2xl" />
+            <Skeleton className="hidden rounded-2xl xl:block" />
           </div>
         </div>
       </div>
     );
   }
 
-  // ---- List request error ----
   if (listError) {
-    return <ListError onCreate={() => setShowCreate(true)} listError={listError} onRetry={refetchList} />;
+    return (
+      <ListError
+        listError={listError}
+        onCreate={() => setShowCreate(true)}
+        onRetry={refetchList}
+      />
+    );
   }
 
-  const showEmpty = totalActiveCount === 0 && archivedCount === 0;
+  const showEmpty = activeCount === 0 && archivedCount === 0;
 
   return (
-    <div className="flex flex-1 min-h-0 flex-col">
+    <div className="flex min-h-0 flex-1 flex-col bg-[var(--aime-bg)] text-[var(--aime-text)]">
       <PageHeaderBar
-        totalCount={totalActiveCount}
+        totalCount={activeCount}
         onCreate={() => setShowCreate(true)}
+        onTemplate={() => setShowCreate(true)}
       />
 
-      <div className="flex flex-1 min-h-0 flex-col gap-4 p-6">
+      <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-auto p-6">
         {showEmpty ? (
           <div className="flex flex-1 items-center justify-center">
             <EmptyState onCreate={() => setShowCreate(true)} />
           </div>
         ) : (
-          <div className="flex flex-1 min-h-0 flex-col overflow-hidden rounded-lg border bg-background">
-            {view === "active" ? (
-              <>
-                <ActiveToolbarRow
-                  scope={scope}
-                  setScope={setScope}
-                  scopeCounts={scopeCounts}
-                  sort={sort}
-                  setSort={setSort}
-                  search={search}
-                  setSearch={setSearch}
-                  visibleCount={sortedAgents.length}
-                  totalCount={inScope.length}
-                  archivedCount={archivedCount}
-                  onShowArchived={() => setView("archived")}
-                />
-                <AvailabilityFilterRow
-                  value={availabilityFilter}
-                  onChange={setAvailabilityFilter}
-                  counts={availabilityCounts}
-                  totalCount={inScope.length}
-                />
-              </>
-            ) : (
-              <ArchivedToolbarRow
-                onBack={() => setView("active")}
-                archivedCount={archivedCount}
-                sort={sort}
-                setSort={setSort}
-              />
+          <>
+            <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+              <div>
+                <h2 className="text-2xl font-semibold tracking-normal">
+                  {t(($) => $.worker_page.title)}
+                </h2>
+                <p className="mt-1 text-sm leading-6 text-[var(--aime-text-secondary)]">
+                  {t(($) => $.worker_page.description)}
+                </p>
+              </div>
+              {archivedCount > 0 && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setView(view === "archived" ? "active" : "archived")}
+                  className="self-start border-[var(--aime-border-strong)] bg-[var(--aime-surface)]"
+                >
+                  {view === "archived" && <ArrowLeft className="size-3.5" />}
+                  {view === "archived"
+                    ? t(($) => $.archived.active_link)
+                    : t(($) => $.page.show_archived, { count: archivedCount })}
+                </Button>
+              )}
+            </div>
+
+            {view === "active" && (
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-5">
+                {metrics.map((metric) => (
+                  <MetricCard key={metric.key} metric={metric} />
+                ))}
+              </div>
             )}
 
-            {sortedAgents.length === 0 ? (
-              <NoMatches view={view} search={search} scope={scope} />
-            ) : (
-              <DataTable
-                table={table}
-                onRowClick={(row) =>
-                  navigation.push(paths.agentDetail(row.original.agent.id))
-                }
+            <div className="grid min-h-[620px] grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_392px]">
+              <section className="flex min-w-0 flex-col overflow-hidden rounded-2xl border border-[var(--aime-border)] bg-[var(--aime-surface)] shadow-[var(--aime-shadow-xs)]">
+                <WorkerToolbar
+                  tab={tab}
+                  onTabChange={setTab}
+                  counts={tabCounts}
+                  search={search}
+                  onSearchChange={setSearch}
+                  view={view}
+                />
+                {filteredRows.length === 0 ? (
+                  <NoMatches view={view} search={search} />
+                ) : (
+                  <WorkerTable
+                    rows={filteredRows}
+                    selectedAgentId={selectedRow?.agent.id ?? null}
+                    onSelect={setSelectedAgentId}
+                    onOpenDetail={(agent) => navigation.push(paths.agentDetail(agent.id))}
+                    onDuplicate={handleDuplicate}
+                  />
+                )}
+              </section>
+
+              <WorkerDetailPanel
+                row={selectedRow}
+                onOpenDetail={(agent) => navigation.push(paths.agentDetail(agent.id))}
+                onAssignTask={handleAssignTask}
               />
-            )}
-          </div>
+            </div>
+          </>
         )}
       </div>
 
@@ -478,64 +425,81 @@ export function AgentsPage() {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Page header — icon + title + count + create CTA. Unchanged.
-// ---------------------------------------------------------------------------
-
 function PageHeaderBar({
   totalCount,
   onCreate,
+  onTemplate,
 }: {
   totalCount: number;
   onCreate: () => void;
+  onTemplate: () => void;
 }) {
   const { t } = useT("agents");
   return (
-    <PageHeader className="justify-between px-5">
-      <div className="flex items-center gap-2">
-        <Bot className="h-4 w-4 text-muted-foreground" />
-        <h1 className="text-sm font-medium">{t(($) => $.page.title)}</h1>
-        {totalCount > 0 && (
-          <span className="font-mono text-xs tabular-nums text-muted-foreground/70">
-            {totalCount}
-          </span>
-        )}
-        {/* Tagline next to the title — mirrors Runtimes / Skills. */}
-        <p className="ml-2 hidden text-xs text-muted-foreground md:block">
-          {t(($) => $.page.tagline)}{" "}
-          <a
-            href="https://multica.ai/docs/agents"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="underline decoration-muted-foreground/30 underline-offset-4 transition-colors hover:text-foreground"
-          >
-            {t(($) => $.page.learn_more)}
-          </a>
+    <PageHeader className="h-16 justify-between border-b border-[var(--aime-border)] bg-[var(--aime-surface)] px-6">
+      <div className="min-w-0">
+        <div className="flex items-center gap-2">
+          <h1 className="truncate text-base font-semibold tracking-normal">
+            {t(($) => $.worker_page.header_title)}
+          </h1>
+          {totalCount > 0 && (
+            <span className="font-mono text-xs tabular-nums text-[var(--aime-text-tertiary)]">
+              {totalCount}
+            </span>
+          )}
+        </div>
+        <p className="mt-0.5 truncate text-xs text-[var(--aime-text-tertiary)]">
+          {t(($) => $.worker_page.header_description)}
         </p>
       </div>
-      <Button type="button" size="sm" onClick={onCreate}>
-        <Plus className="h-3 w-3" />
-        {t(($) => $.page.new_agent)}
-      </Button>
+      <div className="flex shrink-0 items-center gap-2">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={onTemplate}
+          className="hidden border-[var(--aime-border-strong)] bg-[var(--aime-surface)] md:inline-flex"
+        >
+          {t(($) => $.worker_page.templates)}
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          onClick={onCreate}
+          className="border-[var(--aime-brand-500)] bg-[var(--aime-brand-500)] text-white shadow-[var(--aime-shadow-sm)] hover:bg-[var(--aime-brand-600)]"
+        >
+          <Plus className="size-3.5" />
+          {t(($) => $.worker_page.add_worker)}
+        </Button>
+      </div>
     </PageHeader>
   );
 }
 
+function PageIntroSkeleton() {
+  return (
+    <div className="space-y-2">
+      <Skeleton className="h-8 w-36 rounded-md" />
+      <Skeleton className="h-5 w-96 max-w-full rounded-md" />
+    </div>
+  );
+}
+
 function ListError({
-  onCreate,
   listError,
+  onCreate,
   onRetry,
 }: {
-  onCreate: () => void;
   listError: unknown;
+  onCreate: () => void;
   onRetry: () => void;
 }) {
   const { t } = useT("agents");
   return (
-    <div className="flex flex-1 min-h-0 flex-col">
-      <PageHeaderBar totalCount={0} onCreate={onCreate} />
+    <div className="flex min-h-0 flex-1 flex-col bg-[var(--aime-bg)]">
+      <PageHeaderBar totalCount={0} onCreate={onCreate} onTemplate={onCreate} />
       <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 py-16 text-center">
-        <AlertCircle className="h-8 w-8 text-destructive" />
+        <AlertCircle className="size-8 text-destructive" />
         <div>
           <p className="text-sm font-medium">{t(($) => $.page.list_load_failed)}</p>
           <p className="mt-1 text-xs text-muted-foreground">
@@ -544,12 +508,7 @@ function ListError({
               : t(($) => $.page.list_load_failed_default)}
           </p>
         </div>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          onClick={onRetry}
-        >
+        <Button type="button" variant="outline" size="sm" onClick={onRetry}>
           {t(($) => $.page.try_again)}
         </Button>
       </div>
@@ -557,333 +516,763 @@ function ListError({
   );
 }
 
-// ---------------------------------------------------------------------------
-// Active view — Layer 1: scope segment + sort + search + archived link + live
-// ---------------------------------------------------------------------------
+interface Metric {
+  key: string;
+  label: string;
+  value: string;
+  sub: string;
+  tone: "brand" | "success" | "info" | "warning" | "danger";
+}
 
-function ActiveToolbarRow({
-  scope,
-  setScope,
-  scopeCounts,
-  sort,
-  setSort,
+function MetricCard({ metric }: { metric: Metric }) {
+  return (
+    <div className="rounded-xl border border-[var(--aime-border)] bg-[var(--aime-surface)] p-4 shadow-[var(--aime-shadow-xs)]">
+      <div className="flex items-center justify-between gap-3">
+        <span className={cn("text-xs font-medium", metricToneClass(metric.tone))}>
+          {metric.label}
+        </span>
+      </div>
+      <div className="mt-2 flex items-end justify-between gap-3">
+        <span className="font-mono text-3xl font-semibold leading-none tracking-normal text-[var(--aime-text)]">
+          {metric.value}
+        </span>
+        <span className="text-right text-xs text-[var(--aime-text-tertiary)]">
+          {metric.sub}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function WorkerToolbar({
+  tab,
+  onTabChange,
+  counts,
   search,
-  setSearch,
-  visibleCount,
-  totalCount,
-  archivedCount,
-  onShowArchived,
+  onSearchChange,
+  view,
 }: {
-  scope: Scope;
-  setScope: (v: Scope) => void;
-  scopeCounts: { all: number; mine: number };
-  sort: SortKey;
-  setSort: (v: SortKey) => void;
+  tab: WorkerTab;
+  onTabChange: (tab: WorkerTab) => void;
+  counts: Record<WorkerTab, number>;
   search: string;
-  setSearch: (v: string) => void;
-  visibleCount: number;
-  totalCount: number;
-  archivedCount: number;
-  onShowArchived: () => void;
+  onSearchChange: (value: string) => void;
+  view: View;
 }) {
   const { t } = useT("agents");
   return (
-    <div className="flex h-12 shrink-0 items-center gap-3 border-b px-4">
-      <div className="relative">
-        <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+    <div className="flex shrink-0 flex-col gap-3 border-b border-[var(--aime-border)] px-4 py-3 lg:flex-row lg:items-center lg:justify-between">
+      <div className="flex min-w-0 items-center gap-5 overflow-x-auto">
+        {WORKER_TABS.map((item) => (
+          <button
+            key={item}
+            type="button"
+            onClick={() => onTabChange(item)}
+            className={cn(
+              "relative shrink-0 whitespace-nowrap pb-2 text-xs font-semibold transition-colors",
+              tab === item
+                ? "text-[var(--aime-brand-600)]"
+                : "text-[var(--aime-text-tertiary)] hover:text-[var(--aime-text)]",
+            )}
+          >
+            {t(($) => $.worker_page.tabs[item])}
+            <span className="ml-1 font-mono font-medium tabular-nums">
+              {counts[item]}
+            </span>
+            {tab === item && (
+              <span className="absolute inset-x-0 -bottom-0.5 h-0.5 rounded-full bg-[var(--aime-brand-500)]" />
+            )}
+          </button>
+        ))}
+      </div>
+      <div className="relative w-full lg:w-72">
+        <Search className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-[var(--aime-text-tertiary)]" />
         <Input
           value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder={t(($) => $.page.search_placeholder)}
-          className="h-8 w-64 pl-8 text-sm"
+          onChange={(event) => onSearchChange(event.target.value)}
+          placeholder={
+            view === "archived"
+              ? t(($) => $.worker_page.search_archived_placeholder)
+              : t(($) => $.worker_page.search_placeholder)
+          }
+          className="h-9 rounded-lg border-[var(--aime-border-strong)] bg-[var(--aime-surface)] pl-9 text-sm"
         />
       </div>
-      <ScopeSegment scope={scope} setScope={setScope} counts={scopeCounts} />
-      <div className="ml-auto flex items-center gap-3">
-        {archivedCount > 0 && (
-          <button
-            type="button"
-            onClick={onShowArchived}
-            className="text-xs text-muted-foreground transition-colors hover:text-foreground"
-          >
-            {t(($) => $.page.show_archived, { count: archivedCount })}
-          </button>
-        )}
-        <span className="font-mono text-xs tabular-nums text-muted-foreground/70">
-          {t(($) => $.page.of_total, { visible: visibleCount, total: totalCount })}
+    </div>
+  );
+}
+
+function WorkerTable({
+  rows,
+  selectedAgentId,
+  onSelect,
+  onOpenDetail,
+  onDuplicate,
+}: {
+  rows: WorkerRow[];
+  selectedAgentId: string | null;
+  onSelect: (agentId: string) => void;
+  onOpenDetail: (agent: Agent) => void;
+  onDuplicate: (agent: Agent) => void;
+}) {
+  const { t } = useT("agents");
+  return (
+    <div className="min-h-0 flex-1 overflow-auto">
+      <table className="w-full min-w-[920px] table-fixed text-sm">
+        <thead className="sticky top-0 z-10 bg-[var(--aime-surface-subtle)]">
+          <tr className="border-b border-[var(--aime-border)] text-left text-xs font-medium text-[var(--aime-text-tertiary)]">
+            <th className="w-[26%] px-4 py-3">{t(($) => $.worker_page.columns.worker)}</th>
+            <th className="w-[10%] px-4 py-3">{t(($) => $.worker_page.columns.status)}</th>
+            <th className="w-[18%] px-4 py-3">{t(($) => $.worker_page.columns.current_task)}</th>
+            <th className="w-[18%] px-4 py-3">{t(($) => $.worker_page.columns.work_dir)}</th>
+            <th className="w-[9%] px-4 py-3 text-right">{t(($) => $.worker_page.columns.today_runs)}</th>
+            <th className="w-[10%] px-4 py-3 text-right">{t(($) => $.worker_page.columns.avg_duration)}</th>
+            <th className="w-[9%] px-4 py-3 text-right">{t(($) => $.worker_page.columns.success_rate)}</th>
+            <th className="w-12 px-4 py-3" />
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => {
+            const selected = selectedAgentId === row.agent.id;
+            return (
+              <tr
+                key={row.agent.id}
+                role="button"
+                tabIndex={0}
+                onClick={() => onSelect(row.agent.id)}
+                onDoubleClick={() => onOpenDetail(row.agent)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    onSelect(row.agent.id);
+                  }
+                }}
+                className={cn(
+                  "cursor-pointer border-b border-[var(--aime-border)] outline-none transition-colors hover:bg-[var(--aime-surface-muted)] focus-visible:bg-[var(--aime-brand-50)]",
+                  selected && "bg-[var(--aime-brand-50)]",
+                )}
+              >
+                <td className="px-4 py-3">
+                  <WorkerIdentity row={row} />
+                </td>
+                <td className="px-4 py-3">
+                  <AvailabilityBadge presence={row.presence} archived={!!row.agent.archived_at} />
+                </td>
+                <td className="px-4 py-3">
+                  <TaskCell task={row.currentTask} />
+                </td>
+                <td className="px-4 py-3">
+                  <div className="truncate text-xs text-[var(--aime-text-secondary)]">
+                    {row.workDirLabel}
+                  </div>
+                </td>
+                <td className="px-4 py-3 text-right font-mono text-xs tabular-nums text-[var(--aime-text-secondary)]">
+                  {row.todayRuns}
+                </td>
+                <td className="px-4 py-3 text-right font-mono text-xs tabular-nums text-[var(--aime-text-secondary)]">
+                  {row.avgDurationLabel}
+                </td>
+                <td className="px-4 py-3 text-right font-mono text-xs font-semibold tabular-nums text-[var(--aime-text-secondary)]">
+                  {formatPercent(row.successRate, t)}
+                </td>
+                <td
+                  className="px-4 py-3"
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  <AgentRowActions
+                    agent={row.agent}
+                    presence={row.presence}
+                    canManage={row.canManage}
+                    onDuplicate={onDuplicate}
+                  />
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function WorkerIdentity({ row }: { row: WorkerRow }) {
+  const description =
+    row.agent.description || row.runtime?.name || providerLabel(row.provider);
+
+  return (
+    <div className="flex min-w-0 items-center gap-3">
+      <ActorAvatar
+        actorType="agent"
+        actorId={row.agent.id}
+        size={30}
+        className="shrink-0 rounded-lg"
+      />
+      <div className="min-w-0">
+        <span className="block truncate text-sm font-semibold text-[var(--aime-text)]">
+          {row.agent.name}
         </span>
-        <SortDropdown sort={sort} setSort={setSort} />
+        <p className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-[var(--aime-text-tertiary)]">
+          <span className="shrink-0 rounded-full bg-[var(--aime-surface-muted)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--aime-text-secondary)]">
+            {providerLabel(row.provider)}
+          </span>
+          <span className="truncate">{description}</span>
+        </p>
       </div>
     </div>
   );
 }
 
-function ScopeSegment({
-  scope,
-  setScope,
-  counts,
+function AvailabilityBadge({
+  presence,
+  archived,
 }: {
-  scope: Scope;
-  setScope: (v: Scope) => void;
-  counts: { all: number; mine: number };
+  presence: AgentPresenceDetail | null | undefined;
+  archived: boolean;
 }) {
   const { t } = useT("agents");
+  if (archived) {
+    return (
+      <span className="inline-flex items-center rounded-full bg-[var(--aime-surface-muted)] px-2 py-0.5 text-xs font-medium text-[var(--aime-text-tertiary)]">
+        {t(($) => $.row.archived)}
+      </span>
+    );
+  }
+  if (!presence) {
+    return <span className="inline-flex h-5 w-14 animate-pulse rounded-full bg-muted/60" />;
+  }
+  const cfg = availabilityConfig[presence.availability];
   return (
-    <div className="flex items-center gap-0.5 rounded-md bg-muted p-0.5">
-      <ScopeButton
-        active={scope === "mine"}
-        label={t(($) => $.scope.mine)}
-        count={counts.mine}
-        onClick={() => setScope("mine")}
-      />
-      <ScopeButton
-        active={scope === "all"}
-        label={t(($) => $.scope.all)}
-        count={counts.all}
-        onClick={() => setScope("all")}
-      />
-    </div>
-  );
-}
-
-function ScopeButton({
-  active,
-  label,
-  count,
-  onClick,
-}: {
-  active: boolean;
-  label: string;
-  count: number;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`inline-flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium transition-colors ${
-        active
-          ? "bg-background text-foreground shadow-sm"
-          : "text-muted-foreground hover:text-foreground"
-      }`}
+    <span
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium",
+        presence.availability === "online" && "bg-[var(--aime-success-bg)] text-[var(--aime-success)]",
+        presence.availability === "unstable" && "bg-[var(--aime-warning-bg)] text-[var(--aime-warning)]",
+        presence.availability === "offline" && "bg-[var(--aime-surface-muted)] text-[var(--aime-text-tertiary)]",
+      )}
     >
-      <span>{label}</span>
-      <span
-        className={`font-mono tabular-nums ${
-          active ? "text-muted-foreground/80" : "text-muted-foreground/50"
-        }`}
-      >
-        {count}
-      </span>
-    </button>
+      <span className={cn("size-1.5 rounded-full", cfg.dotClass)} />
+      {t(($) => $.availability[presence.availability])}
+    </span>
   );
 }
 
-function SortDropdown({
-  sort,
-  setSort,
-}: {
-  sort: SortKey;
-  setSort: (v: SortKey) => void;
-}) {
+function TaskCell({ task }: { task: AgentTask | null }) {
   const { t } = useT("agents");
+  if (!task) {
+    return <span className="text-xs text-[var(--aime-text-tertiary)]">{t(($) => $.worker_page.no_current_task)}</span>;
+  }
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger
-        render={
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-8 gap-1.5 text-xs text-muted-foreground hover:text-foreground"
-          />
-        }
-      >
-        <ArrowUpDown className="h-3 w-3" />
-        {t(($) => $.sort[SORT_LABEL_KEY[sort]])}
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="w-auto">
-        {SORT_KEYS.map((k) => (
-          <DropdownMenuItem
-            key={k}
-            onClick={() => setSort(k)}
-            className="text-xs"
-          >
-            {t(($) => $.sort[SORT_LABEL_KEY[k]])}
-          </DropdownMenuItem>
-        ))}
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Availability chip row — All / Online / Unstable / Offline. Only shown
-// in the Active view; archived agents have no presence.
-// ---------------------------------------------------------------------------
-
-function AvailabilityFilterRow({
-  value,
-  onChange,
-  counts,
-  totalCount,
-}: {
-  value: AvailabilityFilter;
-  onChange: (v: AvailabilityFilter) => void;
-  counts: Record<AgentAvailability, number>;
-  totalCount: number;
-}) {
-  const { t } = useT("agents");
-  return (
-    <div className="flex h-11 shrink-0 items-center gap-2 border-b px-4">
-      <AvailabilityChip
-        active={value === "all"}
-        onClick={() => onChange("all")}
-        label={t(($) => $.availability.all)}
-        count={totalCount}
-      />
-      {availabilityOrder.map((a) => {
-        const cfg = availabilityConfig[a];
-        return (
-          <AvailabilityChip
-            key={a}
-            active={value === a}
-            onClick={() => onChange(a)}
-            label={t(($) => $.availability[a])}
-            count={counts[a]}
-            dotClass={cfg.dotClass}
-          />
-        );
-      })}
-    </div>
-  );
-}
-
-function AvailabilityChip({
-  active,
-  onClick,
-  label,
-  count,
-  dotClass,
-}: {
-  active: boolean;
-  onClick: () => void;
-  label: string;
-  count: number;
-  dotClass?: string;
-}) {
-  return (
-    <Button
-      variant="outline"
-      size="sm"
-      onClick={onClick}
-      className={
-        active
-          ? "bg-accent text-accent-foreground hover:bg-accent/80"
-          : "text-muted-foreground"
-      }
-    >
-      {dotClass && <span className={`h-1.5 w-1.5 rounded-full ${dotClass}`} />}
-      <span>{label}</span>
-      <span className="font-mono tabular-nums text-muted-foreground/70">
-        {count}
-      </span>
-    </Button>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Archived view — single toolbar row (back link + title + count + sort).
-// No presence chip row: presence is undefined for archived agents.
-// ---------------------------------------------------------------------------
-
-function ArchivedToolbarRow({
-  onBack,
-  archivedCount,
-  sort,
-  setSort,
-}: {
-  onBack: () => void;
-  archivedCount: number;
-  sort: SortKey;
-  setSort: (v: SortKey) => void;
-}) {
-  const { t } = useT("agents");
-  return (
-    <div className="flex h-12 shrink-0 items-center gap-3 border-b px-4">
-      <button
-        type="button"
-        onClick={onBack}
-        className="inline-flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
-      >
-        <ArrowLeft className="h-3 w-3" />
-        {t(($) => $.archived.active_link)}
-      </button>
-      <span className="text-muted-foreground/40">/</span>
-      <span className="text-xs font-medium">{t(($) => $.archived.title)}</span>
-      <span className="font-mono text-xs tabular-nums text-muted-foreground/70">
-        {archivedCount}
-      </span>
-      <div className="ml-auto">
-        <SortDropdown sort={sort} setSort={setSort} />
+    <div className="min-w-0">
+      <div className="truncate text-xs font-semibold text-[var(--aime-text)]">
+        {describeTask(task, t)}
+      </div>
+      <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-[var(--aime-text-tertiary)]">
+        <TaskStatusDot status={task.status} />
+        <span>{t(($) => $.worker_page.task_status[task.status])}</span>
       </div>
     </div>
   );
 }
 
-// ---------------------------------------------------------------------------
-// Empty / no-matches states
-// ---------------------------------------------------------------------------
+function WorkerDetailPanel({
+  row,
+  onOpenDetail,
+  onAssignTask,
+}: {
+  row: WorkerRow | null;
+  onOpenDetail: (agent: Agent) => void;
+  onAssignTask: (agent: Agent) => void;
+}) {
+  const { t } = useT("agents");
+  if (!row) {
+    return (
+      <aside className="hidden min-h-0 flex-col rounded-2xl border border-[var(--aime-border)] bg-[var(--aime-surface)] shadow-[var(--aime-shadow-xs)] xl:flex">
+        <div className="flex flex-1 flex-col items-center justify-center px-8 text-center">
+          <Bot className="size-8 text-[var(--aime-text-tertiary)]" />
+          <p className="mt-3 text-sm font-medium">{t(($) => $.worker_page.detail.empty_title)}</p>
+          <p className="mt-1 text-xs leading-5 text-[var(--aime-text-tertiary)]">
+            {t(($) => $.worker_page.detail.empty_description)}
+          </p>
+        </div>
+      </aside>
+    );
+  }
+
+  const currentTask = row.currentTask;
+
+  return (
+    <aside className="hidden min-h-0 flex-col overflow-hidden rounded-2xl border border-[var(--aime-border)] bg-[var(--aime-surface)] shadow-[var(--aime-shadow-xs)] xl:flex">
+      <div className="flex shrink-0 items-start justify-between gap-3 border-b border-[var(--aime-border)] p-4">
+        <div className="flex min-w-0 items-center gap-3">
+          <ActorAvatar
+            actorType="agent"
+            actorId={row.agent.id}
+            size={38}
+            className="shrink-0 rounded-xl"
+          />
+          <div className="min-w-0">
+            <h3 className="truncate text-sm font-semibold text-[var(--aime-text)]">
+              {row.agent.name}
+            </h3>
+            <p className="mt-0.5 truncate text-xs text-[var(--aime-text-tertiary)]">
+              {providerLabel(row.provider)}
+              {row.runtime?.name ? ` · ${row.runtime.name}` : ""}
+            </p>
+          </div>
+        </div>
+        <AvailabilityBadge presence={row.presence} archived={!!row.agent.archived_at} />
+      </div>
+
+      <div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-4">
+        <section>
+          <SectionTitle>{t(($) => $.worker_page.detail.current_task)}</SectionTitle>
+          {currentTask ? (
+            <div className="mt-3 rounded-xl border border-[var(--aime-border)] bg-[var(--aime-surface-subtle)] p-3">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-semibold text-[var(--aime-text)]">
+                    {describeTask(currentTask, t)}
+                  </p>
+                  <p className="mt-1 truncate text-xs text-[var(--aime-text-tertiary)]">
+                    {currentTask.trigger_summary || t(($) => $.worker_page.detail.current_task_hint)}
+                  </p>
+                </div>
+                <span className="shrink-0 text-xs font-medium text-[var(--aime-brand-600)]">
+                  {t(($) => $.worker_page.task_status[currentTask.status])}
+                </span>
+              </div>
+              {row.presence && (
+                <div className="mt-3">
+                  <div className="h-1.5 overflow-hidden rounded-full bg-[var(--aime-brand-100)]">
+                    <div
+                      className="h-full rounded-full bg-[var(--aime-brand-500)]"
+                      style={{
+                        width: `${Math.min(100, Math.max(8, (row.presence.runningCount / Math.max(1, row.presence.capacity)) * 100))}%`,
+                      }}
+                    />
+                  </div>
+                  <div className="mt-2 flex justify-between text-[11px] text-[var(--aime-text-tertiary)]">
+                    <span>
+                      {t(($) => $.worker_page.detail.capacity, {
+                        running: row.presence.runningCount,
+                        capacity: row.presence.capacity,
+                      })}
+                    </span>
+                    {row.presence.queuedCount > 0 && (
+                      <span>
+                        {t(($) => $.worker_page.detail.queued, {
+                          count: row.presence.queuedCount,
+                        })}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : (
+            <p className="mt-2 rounded-xl border border-dashed border-[var(--aime-border)] px-3 py-4 text-sm text-[var(--aime-text-tertiary)]">
+              {t(($) => $.worker_page.detail.no_current_task)}
+            </p>
+          )}
+        </section>
+
+        <section>
+          <SectionTitle>{t(($) => $.worker_page.detail.skills)}</SectionTitle>
+          <div className="mt-3 flex flex-wrap gap-1.5">
+            {row.agent.skills.length > 0 ? (
+              row.agent.skills.slice(0, 8).map((skill) => (
+                <span
+                  key={skill.id}
+                  className="rounded-lg bg-[var(--aime-surface-muted)] px-2 py-1 text-xs font-medium text-[var(--aime-text-secondary)]"
+                >
+                  {skill.name}
+                </span>
+              ))
+            ) : (
+              <span className="text-sm text-[var(--aime-text-tertiary)]">
+                {t(($) => $.worker_page.detail.no_skills)}
+              </span>
+            )}
+          </div>
+        </section>
+
+        <section>
+          <SectionTitle>{t(($) => $.worker_page.detail.today_performance)}</SectionTitle>
+          <div className="mt-3 grid grid-cols-2 gap-2">
+            <MiniStat label={t(($) => $.worker_page.detail.today_runs)} value={`${row.todayRuns}`} />
+            <MiniStat label={t(($) => $.worker_page.detail.avg_duration)} value={row.avgDurationLabel} />
+            <MiniStat label={t(($) => $.worker_page.detail.success_rate)} value={formatPercent(row.successRate, t)} />
+            <MiniStat label={t(($) => $.worker_page.detail.run_count_30d)} value={`${row.runCount}`} />
+          </div>
+        </section>
+
+        <section>
+          <div className="flex items-center justify-between gap-3">
+            <SectionTitle>{t(($) => $.worker_page.detail.recent_runs)}</SectionTitle>
+            {row.activity && (
+              <Sparkline
+                buckets={summarizeActivityWindow(row.activity, 7).buckets}
+                width={64}
+                height={20}
+              />
+            )}
+          </div>
+          <div className="mt-3 divide-y divide-[var(--aime-border)]">
+            {row.recentTasks.length > 0 ? (
+              row.recentTasks.map((task) => (
+                <div key={task.id} className="flex items-center gap-3 py-2.5">
+                  <TaskStatusBadge status={task.status} />
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-xs font-semibold text-[var(--aime-text)]">
+                      {describeTask(task, t)}
+                    </p>
+                    <p className="mt-0.5 text-[11px] text-[var(--aime-text-tertiary)]">
+                      {formatTaskAge(task, t)}
+                    </p>
+                  </div>
+                </div>
+              ))
+            ) : (
+              <p className="py-3 text-sm text-[var(--aime-text-tertiary)]">
+                {t(($) => $.worker_page.detail.no_recent_runs)}
+              </p>
+            )}
+          </div>
+        </section>
+      </div>
+
+      <div className="grid shrink-0 grid-cols-3 gap-2 border-t border-[var(--aime-border)] p-3">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() => onOpenDetail(row.agent)}
+          className="border-[var(--aime-border-strong)] bg-[var(--aime-surface)]"
+        >
+          {t(($) => $.worker_page.detail.view_log)}
+        </Button>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() => onOpenDetail(row.agent)}
+          className="border-[var(--aime-border-strong)] bg-[var(--aime-surface)]"
+        >
+          {t(($) => $.worker_page.detail.configure)}
+        </Button>
+        <Button
+          type="button"
+          size="sm"
+          onClick={() => onAssignTask(row.agent)}
+          className="border-[var(--aime-brand-500)] bg-[var(--aime-brand-500)] text-white hover:bg-[var(--aime-brand-600)]"
+        >
+          {t(($) => $.worker_page.detail.assign_task)}
+        </Button>
+      </div>
+    </aside>
+  );
+}
+
+function SectionTitle({ children }: { children: React.ReactNode }) {
+  return (
+    <h4 className="text-sm font-semibold tracking-normal text-[var(--aime-text)]">
+      {children}
+    </h4>
+  );
+}
+
+function MiniStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-lg border border-[var(--aime-border)] px-3 py-2">
+      <p className="text-[11px] text-[var(--aime-text-tertiary)]">{label}</p>
+      <p className="mt-1 font-mono text-sm font-semibold tabular-nums text-[var(--aime-text)]">
+        {value}
+      </p>
+    </div>
+  );
+}
+
+function TaskStatusBadge({ status }: { status: AgentTask["status"] }) {
+  const { t } = useT("agents");
+  return (
+    <span
+      className={cn(
+        "inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-[11px] font-semibold",
+        status === "completed" && "bg-[var(--aime-success-bg)] text-[var(--aime-success)]",
+        status === "failed" && "bg-[var(--aime-danger-bg)] text-[var(--aime-danger)]",
+        status === "cancelled" && "bg-[var(--aime-warning-bg)] text-[var(--aime-warning)]",
+        ACTIVE_TASK_STATUS.has(status) && "bg-[var(--aime-brand-50)] text-[var(--aime-brand-600)]",
+      )}
+    >
+      {t(($) => $.worker_page.task_status[status])}
+    </span>
+  );
+}
+
+function TaskStatusDot({ status }: { status: AgentTask["status"] }) {
+  return (
+    <span
+      className={cn(
+        "size-1.5 rounded-full",
+        status === "completed" && "bg-[var(--aime-success)]",
+        status === "failed" && "bg-[var(--aime-danger)]",
+        status === "cancelled" && "bg-[var(--aime-warning)]",
+        ACTIVE_TASK_STATUS.has(status) && "bg-[var(--aime-brand-500)]",
+      )}
+    />
+  );
+}
 
 function EmptyState({ onCreate }: { onCreate: () => void }) {
   const { t } = useT("agents");
   return (
-    <div className="flex flex-1 flex-col items-center justify-center px-6 py-16 text-center">
-      <div className="flex h-12 w-12 items-center justify-center rounded-full bg-muted">
-        <Bot className="h-6 w-6 text-muted-foreground" />
+    <div className="flex max-w-md flex-col items-center rounded-2xl border border-[var(--aime-border)] bg-[var(--aime-surface)] px-8 py-10 text-center shadow-[var(--aime-shadow-xs)]">
+      <div className="flex size-12 items-center justify-center rounded-xl bg-[var(--aime-brand-50)] text-[var(--aime-brand-600)]">
+        <Bot className="size-6" />
       </div>
       <h2 className="mt-4 text-base font-semibold">{t(($) => $.empty.title)}</h2>
-      <p className="mt-1 max-w-md text-sm text-muted-foreground">
+      <p className="mt-2 text-sm leading-6 text-[var(--aime-text-secondary)]">
         {t(($) => $.empty.description)}
       </p>
-      <Button type="button" onClick={onCreate} size="sm" className="mt-5">
-        <Plus className="h-3 w-3" />
-        {t(($) => $.page.new_agent)}
+      <Button
+        type="button"
+        onClick={onCreate}
+        size="sm"
+        className="mt-5 border-[var(--aime-brand-500)] bg-[var(--aime-brand-500)] text-white hover:bg-[var(--aime-brand-600)]"
+      >
+        <Plus className="size-3.5" />
+        {t(($) => $.worker_page.add_worker)}
       </Button>
     </div>
   );
 }
 
-function NoMatches({
-  view,
-  search,
-  scope,
-}: {
-  view: View;
-  search: string;
-  scope: Scope;
-}) {
+function NoMatches({ view, search }: { view: View; search: string }) {
   const { t } = useT("agents");
-  const hasSearch = search.length > 0;
-  const hasFilter = scope === "mine";
-
-  let body: string;
-  if (view === "archived") {
-    body = hasSearch
-      ? t(($) => $.no_matches.search_archived, { query: search })
-      : t(($) => $.no_matches.no_archived);
-  } else if (hasSearch) {
-    body = hasFilter
-      ? t(($) => $.no_matches.search_active_filtered, { query: search })
-      : t(($) => $.no_matches.search_active, { query: search });
-  } else {
-    body = t(($) => $.no_matches.no_filter_match);
-  }
-
   return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-2 px-4 py-16 text-center text-muted-foreground">
-      <Search className="h-8 w-8 text-muted-foreground/40" />
-      <p className="text-sm">{t(($) => $.no_matches.title)}</p>
-      <p className="max-w-xs text-xs">{body}</p>
+    <div className="flex flex-1 flex-col items-center justify-center gap-2 px-4 py-16 text-center text-[var(--aime-text-tertiary)]">
+      <Search className="size-8 opacity-50" />
+      <p className="text-sm font-medium text-[var(--aime-text)]">
+        {t(($) => $.no_matches.title)}
+      </p>
+      <p className="max-w-xs text-xs leading-5">
+        {view === "archived"
+          ? search
+            ? t(($) => $.no_matches.search_archived, { query: search })
+            : t(($) => $.no_matches.no_archived)
+          : search
+            ? t(($) => $.no_matches.search_active, { query: search })
+            : t(($) => $.no_matches.no_filter_match)}
+      </p>
     </div>
   );
+}
+
+function buildMetrics(rows: WorkerRow[], t: ReturnType<typeof useT<"agents">>["t"]): Metric[] {
+  let online = 0;
+  let running = 0;
+  let todayDone = 0;
+  let attention = 0;
+  let sevenDayRuns = 0;
+  let sevenDayFailed = 0;
+
+  for (const row of rows) {
+    if (row.presence?.availability === "online") online += 1;
+    running += row.presence?.runningCount ?? 0;
+    todayDone += row.todayRuns;
+    const sevenDay = summarizeActivityWindow(row.activity ?? undefined, 7);
+    sevenDayRuns += sevenDay.totalRuns;
+    sevenDayFailed += sevenDay.totalFailed;
+    if (
+      row.presence?.availability === "offline" ||
+      row.presence?.availability === "unstable" ||
+      row.presence?.workload === "queued" ||
+      sevenDay.totalFailed > 0
+    ) {
+      attention += 1;
+    }
+  }
+
+  const success =
+    sevenDayRuns > 0
+      ? Math.round(((sevenDayRuns - sevenDayFailed) / sevenDayRuns) * 100)
+      : null;
+
+  return [
+    {
+      key: "online",
+      label: t(($) => $.worker_page.metrics.online),
+      value: `${online}`,
+      sub: t(($) => $.worker_page.metrics.total_workers, { count: rows.length }),
+      tone: "brand",
+    },
+    {
+      key: "today",
+      label: t(($) => $.worker_page.metrics.completed_today),
+      value: `${todayDone}`,
+      sub: success === null
+        ? t(($) => $.worker_page.metrics.no_success_rate)
+        : t(($) => $.worker_page.metrics.success_rate, { percent: success }),
+      tone: "success",
+    },
+    {
+      key: "running",
+      label: t(($) => $.worker_page.metrics.running),
+      value: `${running}`,
+      sub: t(($) => $.worker_page.metrics.real_time),
+      tone: "info",
+    },
+    {
+      key: "cost",
+      label: t(($) => $.worker_page.metrics.cost_today),
+      value: t(($) => $.worker_page.metrics.cost_pending_value),
+      sub: t(($) => $.worker_page.metrics.cost_pending_hint),
+      tone: "warning",
+    },
+    {
+      key: "attention",
+      label: t(($) => $.worker_page.metrics.attention),
+      value: `${attention}`,
+      sub: t(($) => $.worker_page.metrics.attention_hint),
+      tone: "danger",
+    },
+  ];
+}
+
+function metricToneClass(tone: Metric["tone"]) {
+  switch (tone) {
+    case "brand":
+      return "text-[var(--aime-brand-600)]";
+    case "success":
+      return "text-[var(--aime-success)]";
+    case "info":
+      return "text-[var(--aime-info)]";
+    case "warning":
+      return "text-[var(--aime-warning)]";
+    case "danger":
+      return "text-[var(--aime-danger)]";
+  }
+}
+
+function providerToTab(provider: string): Exclude<WorkerTab, "all"> {
+  const normalized = provider.toLowerCase();
+  if (normalized.includes("codex")) return "codex";
+  if (normalized.includes("claude")) return "claude";
+  return "other";
+}
+
+function providerLabel(provider: string): string {
+  const normalized = provider.toLowerCase();
+  if (normalized.includes("codex")) return "Codex";
+  if (normalized.includes("claude")) return "Claude Code";
+  if (normalized === "unknown") return "Runtime";
+  return provider
+    .split(/[-_\s]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function pickCurrentTask(tasks: AgentTask[]): AgentTask | null {
+  const active = tasks.filter((task) => ACTIVE_TASK_STATUS.has(task.status));
+  if (active.length === 0) return null;
+  return active.sort((a, b) => activeTaskRank(a) - activeTaskRank(b) || taskTime(b) - taskTime(a))[0] ?? null;
+}
+
+function activeTaskRank(task: AgentTask): number {
+  switch (task.status) {
+    case "running":
+      return 0;
+    case "dispatched":
+      return 1;
+    case "queued":
+      return 2;
+    default:
+      return 3;
+  }
+}
+
+function taskTime(task: AgentTask): number {
+  const value =
+    task.completed_at ??
+    task.started_at ??
+    task.dispatched_at ??
+    task.created_at;
+  const ts = new Date(value).getTime();
+  return Number.isFinite(ts) ? ts : 0;
+}
+
+function describeTask(task: AgentTask, t: ReturnType<typeof useT<"agents">>["t"]): string {
+  if (task.trigger_summary) return task.trigger_summary;
+  if (task.issue_id) {
+    return t(($) => $.worker_page.task_issue_short, {
+      id: shortId(task.issue_id),
+    });
+  }
+  if (task.chat_session_id) return t(($) => $.tab_body.activity.source_chat_session);
+  if (task.autopilot_run_id) return t(($) => $.tab_body.activity.source_autopilot_run);
+  if (task.kind === "quick_create") return t(($) => $.tab_body.activity.source_quick_create);
+  return t(($) => $.worker_page.task_short, { id: shortId(task.id) });
+}
+
+function workDirLabel(
+  agent: Agent,
+  currentTask: AgentTask | null,
+  t: ReturnType<typeof useT<"agents">>["t"],
+): string {
+  if (currentTask?.work_dir) return compactPath(currentTask.work_dir);
+  if (agent.default_code_context?.type === "local_path") {
+    return compactPath(agent.default_code_context.path);
+  }
+  return t(($) => $.worker_page.default_workspace);
+}
+
+function compactPath(path: string): string {
+  const parts = path.split(/[\\/]+/).filter(Boolean);
+  if (parts.length <= 2) return path;
+  return parts.slice(-2).join("/");
+}
+
+function formatAverageDuration(
+  tasks: AgentTask[],
+  t: ReturnType<typeof useT<"agents">>["t"],
+): string {
+  const durations = tasks
+    .filter((task) => task.started_at && task.completed_at)
+    .map((task) => new Date(task.completed_at!).getTime() - new Date(task.started_at!).getTime())
+    .filter((duration) => Number.isFinite(duration) && duration > 0);
+  if (durations.length === 0) return t(($) => $.worker_page.not_available);
+  const avg = durations.reduce((sum, duration) => sum + duration, 0) / durations.length;
+  return formatDuration(avg, t);
+}
+
+function formatDuration(ms: number, t: ReturnType<typeof useT<"agents">>["t"]): string {
+  const minutes = Math.max(1, Math.round(ms / 60000));
+  if (minutes < 60) return t(($) => $.worker_page.duration_minutes, { count: minutes });
+  const hours = Math.floor(minutes / 60);
+  const remaining = minutes % 60;
+  if (remaining === 0) return t(($) => $.worker_page.duration_hours, { count: hours });
+  return t(($) => $.worker_page.duration_hours_minutes, {
+    hours,
+    minutes: remaining,
+  });
+}
+
+function formatPercent(
+  value: number | null,
+  t: ReturnType<typeof useT<"agents">>["t"],
+): string {
+  return value === null ? t(($) => $.worker_page.not_available) : `${value}%`;
+}
+
+function formatTaskAge(task: AgentTask, t: ReturnType<typeof useT<"agents">>["t"]): string {
+  const ageMs = Date.now() - taskTime(task);
+  const minutes = Math.max(1, Math.round(ageMs / 60000));
+  if (minutes < 60) return t(($) => $.worker_page.ago_minutes, { count: minutes });
+  const hours = Math.round(minutes / 60);
+  return t(($) => $.worker_page.ago_hours, { count: hours });
+}
+
+function shortId(id: string): string {
+  return id.slice(0, 8);
 }

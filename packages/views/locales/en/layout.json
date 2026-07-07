@@ -1,11 +1,14 @@
 {
   "nav": {
+    "dashboard": "Work Cockpit",
     "inbox": "Inbox",
     "my_issues": "My Issues",
     "issues": "Issues",
     "projects": "Projects",
     "autopilots": "Autopilot",
-    "agents": "Agents",
+    "memory": "Memory & Knowledge",
+    "approvals": "Approval Center",
+    "agents": "AI Workers",
     "runtimes": "Runtimes",
     "skills": "Skills",
     "settings": "Settings"

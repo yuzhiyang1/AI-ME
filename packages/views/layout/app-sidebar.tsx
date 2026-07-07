@@ -29,6 +29,9 @@ import {
   SquarePen,
   CircleUser,
   FolderKanban,
+  Brain,
+  BrainCircuit,
+  ShieldCheck,
   X,
   Zap,
 } from "lucide-react";
@@ -100,11 +103,14 @@ const EMPTY_INBOX: Awaited<ReturnType<typeof api.listInbox>> = [];
 // against the current workspace slug at render time (see AppSidebar body).
 // Only parameterless paths are valid nav destinations.
 type NavKey =
+  | "dashboard"
   | "inbox"
   | "myIssues"
   | "issues"
   | "projects"
   | "autopilots"
+  | "memory"
+  | "approvals"
   | "agents"
   | "runtimes"
   | "skills"
@@ -112,11 +118,14 @@ type NavKey =
 
 // Static schema (key + icon) — labels resolved at render via useT("layout").
 type NavLabelKey =
+  | "dashboard"
   | "inbox"
   | "my_issues"
   | "issues"
   | "projects"
   | "autopilots"
+  | "memory"
+  | "approvals"
   | "agents"
   | "runtimes"
   | "skills"
@@ -128,9 +137,12 @@ const personalNav: { key: NavKey; labelKey: NavLabelKey; icon: typeof Inbox }[] 
 ];
 
 const workspaceNav: { key: NavKey; labelKey: NavLabelKey; icon: typeof Inbox }[] = [
+  { key: "dashboard", labelKey: "dashboard", icon: BrainCircuit },
   { key: "issues", labelKey: "issues", icon: ListTodo },
   { key: "projects", labelKey: "projects", icon: FolderKanban },
   { key: "autopilots", labelKey: "autopilots", icon: Zap },
+  { key: "memory", labelKey: "memory", icon: Brain },
+  { key: "approvals", labelKey: "approvals", icon: ShieldCheck },
   { key: "agents", labelKey: "agents", icon: Bot },
 ];
 

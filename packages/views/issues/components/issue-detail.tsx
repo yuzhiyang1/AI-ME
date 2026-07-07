@@ -6,16 +6,19 @@ import { AppLink } from "../../navigation";
 import { useNavigation } from "../../navigation";
 import {
   Archive,
+  BrainCircuit,
   Calendar,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
   CircleCheck,
+  Loader2,
   MoreHorizontal,
   PanelRight,
   Pin,
   PinOff,
   Plus,
+  RotateCcw,
   Users,
 } from "lucide-react";
 import { PageHeader } from "../../layout/page-header";
@@ -37,7 +40,7 @@ import { Command, CommandInput, CommandList, CommandEmpty, CommandGroup, Command
 import { AvatarGroup, AvatarGroupCount } from "@multica/ui/components/ui/avatar";
 import { ActorAvatar } from "../../common/actor-avatar";
 import { PropRow } from "../../common/prop-row";
-import type { IssueStatus, IssuePriority, TimelineEntry } from "@multica/core/types";
+import type { AgentTask, AIApproval, Issue, IssueStatus, IssuePriority, TimelineEntry } from "@multica/core/types";
 import { STATUS_CONFIG, PRIORITY_CONFIG } from "@multica/core/issues/config";
 import { StatusIcon, PriorityIcon, StatusPicker, PriorityPicker, DueDatePicker, AssigneePicker, LabelPicker } from ".";
 import { IssueActionsDropdown, useIssueActions } from "../actions";
@@ -50,10 +53,12 @@ import { AgentLiveCard } from "./agent-live-card";
 import { ExecutionLogSection } from "./execution-log-section";
 import { useQuery } from "@tanstack/react-query";
 import { useAuthStore } from "@multica/core/auth";
+import { useThinkAIMe } from "@multica/core/aime";
+import { approvalListOptions } from "@multica/core/approvals";
 import { useCurrentWorkspace, useWorkspacePaths } from "@multica/core/paths";
 import { useActorName } from "@multica/core/workspace/hooks";
 import { useWorkspaceId } from "@multica/core/hooks";
-import { issueListOptions, issueDetailOptions, childIssuesOptions, issueUsageOptions } from "@multica/core/issues/queries";
+import { issueKeys, issueListOptions, issueDetailOptions, childIssuesOptions, issueUsageOptions } from "@multica/core/issues/queries";
 import { memberListOptions, agentListOptions } from "@multica/core/workspace/queries";
 import { useRecentIssuesStore } from "@multica/core/issues/stores";
 import { useIssueTimeline } from "../hooks/use-issue-timeline";
@@ -64,6 +69,7 @@ import { useFileUpload } from "@multica/core/hooks/use-file-upload";
 import { api } from "@multica/core/api";
 import { timeAgo } from "@multica/core/utils";
 import { cn } from "@multica/ui/lib/utils";
+import { toast } from "sonner";
 
 import { ProgressRing } from "./progress-ring";
 import { useT } from "../../i18n";
@@ -77,6 +83,13 @@ function shortDate(date: string | null): string {
 }
 
 type ActivityT = ReturnType<typeof useT<"issues">>["t"];
+
+function detailString(details: Record<string, unknown>, key: string): string {
+  const value = details[key];
+  if (typeof value === "string") return value;
+  if (value === null || value === undefined) return "";
+  return String(value);
+}
 
 function statusLabel(status: string, t: ActivityT): string {
   if (status in STATUS_CONFIG) {
@@ -97,39 +110,46 @@ function formatActivity(
   t: ActivityT,
   resolveActorName?: (type: string, id: string) => string,
 ): string {
-  const details = (entry.details ?? {}) as Record<string, string>;
+  const details = entry.details ?? {};
   switch (entry.action) {
     case "created":
       return t(($) => $.activity.created);
     case "status_changed":
       return t(($) => $.activity.status_changed, {
-        from: statusLabel(details.from ?? "?", t),
-        to: statusLabel(details.to ?? "?", t),
+        from: statusLabel(detailString(details, "from") || "?", t),
+        to: statusLabel(detailString(details, "to") || "?", t),
       });
     case "priority_changed":
       return t(($) => $.activity.priority_changed, {
-        from: priorityLabel(details.from ?? "?", t),
-        to: priorityLabel(details.to ?? "?", t),
+        from: priorityLabel(detailString(details, "from") || "?", t),
+        to: priorityLabel(detailString(details, "to") || "?", t),
       });
     case "assignee_changed": {
-      const isSelfAssign = details.to_type === entry.actor_type && details.to_id === entry.actor_id;
+      const toType = detailString(details, "to_type");
+      const toId = detailString(details, "to_id");
+      const fromId = detailString(details, "from_id");
+      const isSelfAssign = toType === entry.actor_type && toId === entry.actor_id;
       if (isSelfAssign) return t(($) => $.activity.self_assigned);
-      const toName = details.to_id && details.to_type && resolveActorName
-        ? resolveActorName(details.to_type, details.to_id)
+      const toName = toId && toType && resolveActorName
+        ? resolveActorName(toType, toId)
         : null;
+      if (toName && detailString(details, "source") === "ai_me_approval") {
+        return t(($) => $.activity.ai_me_assigned_to, { name: toName });
+      }
       if (toName) return t(($) => $.activity.assigned_to, { name: toName });
-      if (details.from_id && !details.to_id) return t(($) => $.activity.removed_assignee);
+      if (fromId && !toId) return t(($) => $.activity.removed_assignee);
       return t(($) => $.activity.changed_assignee);
     }
     case "due_date_changed": {
-      if (!details.to) return t(($) => $.activity.due_date_removed);
-      const formatted = new Date(details.to).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+      const to = detailString(details, "to");
+      if (!to) return t(($) => $.activity.due_date_removed);
+      const formatted = new Date(to).toLocaleDateString("en-US", { month: "short", day: "numeric" });
       return t(($) => $.activity.due_date_set, { date: formatted });
     }
     case "title_changed":
       return t(($) => $.activity.title_renamed, {
-        from: details.from ?? "?",
-        to: details.to ?? "?",
+        from: detailString(details, "from") || "?",
+        to: detailString(details, "to") || "?",
       });
     case "description_updated":
       return t(($) => $.activity.description_updated);
@@ -156,6 +176,177 @@ function formatTokenCount(n: number): string {
 // Stable reference for threads with no replies. Inline `[]` would create a
 // new array on every render and bust React.memo on CommentCard / ResolvedThreadBar.
 const EMPTY_REPLIES: TimelineEntry[] = [];
+
+function truncateAIMeIssueText(value: string | null | undefined, maxRunes: number): string {
+  const text = (value ?? "").trim();
+  if (!text) return "";
+  const chars = Array.from(text);
+  return chars.length <= maxRunes ? text : `${chars.slice(0, maxRunes).join("")}...`;
+}
+
+function buildAIMeIssueInput(issue: Issue, timeline: TimelineEntry[]): string {
+  const recentComments = timeline
+    .filter((entry) => entry.type === "comment" && entry.content)
+    .slice(-5)
+    .map((entry) => {
+      const author = `${entry.actor_type}:${entry.actor_id}`;
+      return `- ${author}: ${truncateAIMeIssueText(entry.content, 360)}`;
+    });
+
+  // Keep the direct prompt compact; backend context adds workspace and agent state.
+  return [
+    "请分析这个 issue，判断风险、建议回复草稿或下一步动作；如果要写入评论或对外回复，请创建需要我审批的动作。",
+    `Issue: ${issue.identifier} ${issue.title}`,
+    `状态: ${issue.status}`,
+    `优先级: ${issue.priority}`,
+    issue.description ? `描述:\n${truncateAIMeIssueText(issue.description, 1200)}` : "",
+    recentComments.length > 0 ? `最近评论:\n${recentComments.join("\n")}` : "",
+  ].filter(Boolean).join("\n\n");
+}
+
+function issueTaskStatusLabel(status: AgentTask["status"], t: ActivityT): string {
+  switch (status) {
+    case "queued":
+      return t(($) => $.detail.ai_me_assignment_status_queued);
+    case "dispatched":
+      return t(($) => $.detail.ai_me_assignment_status_dispatched);
+    case "running":
+      return t(($) => $.detail.ai_me_assignment_status_running);
+    case "completed":
+      return t(($) => $.detail.ai_me_assignment_status_completed);
+    case "failed":
+      return t(($) => $.detail.ai_me_assignment_status_failed);
+    case "cancelled":
+      return t(($) => $.detail.ai_me_assignment_status_cancelled);
+  }
+}
+
+function issueTaskStatusTone(status: AgentTask["status"]): string {
+  switch (status) {
+    case "queued":
+    case "dispatched":
+      return "text-warning";
+    case "running":
+      return "text-info";
+    case "completed":
+      return "text-success";
+    case "failed":
+      return "text-destructive";
+    case "cancelled":
+      return "text-muted-foreground";
+  }
+}
+
+function approvalStatusText(status: string, t: ActivityT): string {
+  switch (status) {
+    case "pending":
+      return t(($) => $.detail.ai_me_assignment_approval_pending);
+    case "approved":
+      return t(($) => $.detail.ai_me_assignment_approval_approved);
+    case "rejected":
+      return t(($) => $.detail.ai_me_assignment_approval_rejected);
+    case "observing":
+      return t(($) => $.detail.ai_me_assignment_approval_observing);
+    case "taken_over":
+      return t(($) => $.detail.ai_me_assignment_approval_taken_over);
+    case "expired":
+      return t(($) => $.detail.ai_me_assignment_approval_expired);
+    default:
+      return status;
+  }
+}
+
+function AIMeAssignmentStatus({
+  issueId,
+  approval,
+}: {
+  issueId: string;
+  approval: AIApproval | null;
+}) {
+  const { t } = useT("issues");
+  const { getAgentName } = useActorName();
+  const [retrying, setRetrying] = useState(false);
+  const taskQuery = useQuery({
+    queryKey: issueKeys.tasks(issueId),
+    queryFn: () => api.listTasksByIssue(issueId),
+    enabled: !!approval?.created_task_id,
+    staleTime: 30_000,
+    refetchOnWindowFocus: true,
+  });
+
+  if (!approval) return null;
+
+  const task = approval.created_task_id
+    ? (taskQuery.data ?? []).find((item) => item.id === approval.created_task_id) ?? null
+    : null;
+  const canRetry = task?.status === "failed" || task?.status === "cancelled";
+
+  const retryAssignment = async () => {
+    if (retrying) return;
+    setRetrying(true);
+    try {
+      await api.rerunIssue(issueId);
+      toast.success(t(($) => $.detail.ai_me_assignment_retry_success));
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t(($) => $.detail.ai_me_assignment_retry_failed));
+    } finally {
+      setRetrying(false);
+    }
+  };
+
+  return (
+    <div>
+      <div className="mb-2 flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium">
+        <BrainCircuit className="!size-3 shrink-0 text-muted-foreground" />
+        {t(($) => $.detail.ai_me_assignment_section)}
+      </div>
+      <div className="space-y-2 rounded-lg border border-border/70 bg-muted/20 p-3 text-xs">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-muted-foreground">{t(($) => $.detail.ai_me_assignment_approval)}</span>
+          <span className="font-medium">{approvalStatusText(approval.status, t)}</span>
+        </div>
+        {!approval.created_task_id ? (
+          <p className="leading-5 text-muted-foreground">
+            {t(($) => $.detail.ai_me_assignment_pending)}
+          </p>
+        ) : taskQuery.isLoading ? (
+          <div className="space-y-2">
+            <Skeleton className="h-4 w-full" />
+            <Skeleton className="h-4 w-2/3" />
+          </div>
+        ) : !task ? (
+          <p className="leading-5 text-warning">
+            {t(($) => $.detail.ai_me_assignment_missing_task)}
+          </p>
+        ) : (
+          <>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-muted-foreground">{t(($) => $.detail.ai_me_assignment_worker)}</span>
+              <span className="min-w-0 truncate font-medium">{getAgentName(task.agent_id)}</span>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-muted-foreground">{t(($) => $.detail.ai_me_assignment_task)}</span>
+              <span className={cn("font-medium", issueTaskStatusTone(task.status))}>
+                {issueTaskStatusLabel(task.status, t)}
+              </span>
+            </div>
+            {task.status === "failed" && (
+              <p className="leading-5 text-destructive">
+                {task.error || t(($) => $.detail.ai_me_assignment_failed)}
+              </p>
+            )}
+            {canRetry && (
+              <Button type="button" size="sm" variant="outline" className="h-7 w-full" disabled={retrying} onClick={retryAssignment}>
+                {retrying ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCcw className="h-3.5 w-3.5" />}
+                {t(($) => $.detail.ai_me_assignment_retry)}
+              </Button>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
 
 // Shallow array equality by element identity. Used to reuse the previous
 // render's per-thread reply slice when nothing in *this* thread changed,
@@ -210,6 +401,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
   const { t } = useT("issues");
   const id = issueId;
   const router = useNavigation();
+  const thinkAIMe = useThinkAIMe();
   const user = useAuthStore((s) => s.user);
   const workspace = useCurrentWorkspace();
   const paths = useWorkspacePaths();
@@ -235,6 +427,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
   const isMobile = useIsMobile();
   const [desktopSidebarOpen, setDesktopSidebarOpen] = useState(defaultSidebarOpen);
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [lastAIMeApprovalID, setLastAIMeApprovalID] = useState<string | null>(null);
 
   useEffect(() => {
     if (isMobile) {
@@ -429,6 +622,18 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
 
   // Token usage
   const { data: usage } = useQuery(issueUsageOptions(id));
+  const { data: aiAssignmentApprovals } = useQuery({
+    ...approvalListOptions(wsId, {
+      issue_id: id,
+      action_type: "assign_worker",
+      limit: 5,
+    }),
+    enabled: !!issue,
+  });
+  const aiAssignmentApproval = useMemo(() => {
+    const approvals = aiAssignmentApprovals?.approvals ?? [];
+    return approvals.find((approval) => !!approval.created_task_id) ?? approvals[0] ?? null;
+  }, [aiAssignmentApprovals?.approvals]);
 
   // Sub-issue queries
   const parentIssueId = issue?.parent_issue_id;
@@ -494,6 +699,32 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
     if (panel.isCollapsed()) panel.expand();
     else panel.collapse();
   }, [isMobile, sidebarRef]);
+
+  const handleAskAIMe = useCallback(async () => {
+    if (!issue) return;
+    try {
+      const result = await thinkAIMe.mutateAsync({
+        input: buildAIMeIssueInput(issue, timeline),
+        intent: "reply",
+        source_type: "issue",
+        source_ref_id: issue.id,
+        issue_id: issue.id,
+        need_worker_plan: true,
+      });
+      if (result.approval_id) {
+        setLastAIMeApprovalID(result.approval_id);
+        toast.success(t(($) => $.detail.ai_me_review_created));
+        return;
+      }
+      if (result.configuration_required) {
+        toast.error(t(($) => $.detail.ai_me_config_required));
+        return;
+      }
+      toast.success(t(($) => $.detail.ai_me_done));
+    } catch {
+      toast.error(t(($) => $.detail.ai_me_failed));
+    }
+  }, [issue, thinkAIMe, timeline, t]);
 
   if (loading) {
     return (
@@ -641,6 +872,7 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
       {/* Execution log — active runs + collapsed past runs. Self-contained;
           owns its own collapse state and WS subscriptions. Hides itself
           when there are no runs to show. */}
+      <AIMeAssignmentStatus issueId={id} approval={aiAssignmentApproval} />
       <ExecutionLogSection issueId={id} />
 
       {/* Token usage */}
@@ -762,6 +994,40 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
               />
               <TooltipContent side="bottom">{actions.isPinned ? t(($) => $.detail.unpin_tooltip) : t(($) => $.detail.pin_tooltip)}</TooltipContent>
             </Tooltip>
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    className="text-muted-foreground"
+                    onClick={handleAskAIMe}
+                    disabled={thinkAIMe.isPending}
+                    aria-label={t(($) => $.detail.ai_me_analyze_tooltip)}
+                  >
+                    {thinkAIMe.isPending ? <Loader2 className="animate-spin" /> : <BrainCircuit />}
+                  </Button>
+                }
+              />
+              <TooltipContent side="bottom">{t(($) => $.detail.ai_me_analyze_tooltip)}</TooltipContent>
+            </Tooltip>
+            {lastAIMeApprovalID && (
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      variant="outline"
+                      size="icon-sm"
+                      onClick={() => router.push(paths.approvals())}
+                      aria-label={t(($) => $.detail.ai_me_view_approval_tooltip)}
+                    >
+                      <CircleCheck />
+                    </Button>
+                  }
+                />
+                <TooltipContent side="bottom">{t(($) => $.detail.ai_me_view_approval_tooltip)}</TooltipContent>
+              </Tooltip>
+            )}
             <IssueActionsDropdown
               issue={issue}
               align="end"
@@ -1108,16 +1374,17 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
                 return (
                   <div key={group.entries[0]!.id} className="px-4 flex flex-col gap-3">
                     {group.entries.map((entry, _idx) => {
-                      const details = (entry.details ?? {}) as Record<string, string>;
+                      const details = entry.details ?? {};
                       const isStatusChange = entry.action === "status_changed";
                       const isPriorityChange = entry.action === "priority_changed";
                       const isDueDateChange = entry.action === "due_date_changed";
+                      const toValue = detailString(details, "to");
 
                       let leadIcon: React.ReactNode;
-                      if (isStatusChange && details.to) {
-                        leadIcon = <StatusIcon status={details.to as IssueStatus} className="h-4 w-4 shrink-0" />;
-                      } else if (isPriorityChange && details.to) {
-                        leadIcon = <PriorityIcon priority={details.to as IssuePriority} className="h-4 w-4 shrink-0" />;
+                      if (isStatusChange && toValue) {
+                        leadIcon = <StatusIcon status={toValue as IssueStatus} className="h-4 w-4 shrink-0" />;
+                      } else if (isPriorityChange && toValue) {
+                        leadIcon = <PriorityIcon priority={toValue as IssuePriority} className="h-4 w-4 shrink-0" />;
                       } else if (isDueDateChange) {
                         leadIcon = <Calendar className="h-4 w-4 shrink-0 text-muted-foreground" />;
                       } else {

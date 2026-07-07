@@ -1,199 +1,135 @@
-<p align="center">
-  <img src="docs/assets/banner.jpg" alt="Multica — humans and agents, side by side" width="100%">
-</p>
+# AI-ME
 
-<div align="center">
+AI-ME is an early-stage personal work cockpit for coordinating AI employees, approvals, exceptions, memory, and external work signals from one place.
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-dark.svg">
-  <source media="(prefers-color-scheme: light)" srcset="docs/assets/logo-light.svg">
-  <img alt="Multica" src="docs/assets/logo-light.svg" width="50">
-</picture>
+> Development status: this project is still under active development. APIs, database tables, UI copy, and product flows are expected to change quickly.
 
-# Multica
+AI-ME is being built on top of the existing Multica agent-management codebase. The current direction is simple: AI-ME acts as the owner-facing brain and operating desk, while tools like Codex and Claude Code remain executable AI employees routed through the existing agent runtime.
 
-**Your next 10 hires won't be human.**
+## What AI-ME Is
 
-The open-source managed agents platform.<br/>
-Turn coding agents into real teammates — assign tasks, track progress, compound skills.
+AI-ME is not just another chat window. It is intended to become a work operating layer that can:
 
-[![CI](https://github.com/multica-ai/multica/actions/workflows/ci.yml/badge.svg)](https://github.com/multica-ai/multica/actions/workflows/ci.yml)
-[![GitHub stars](https://img.shields.io/github/stars/multica-ai/multica?style=flat)](https://github.com/multica-ai/multica/stargazers)
+- read events from work systems such as Feishu, GitHub, issues, and future mail integrations;
+- reason with an LLM brain through an OpenAI-compatible API such as DeepSeek;
+- turn risky or outward-facing actions into approval items before doing anything;
+- dispatch approved work to AI employees such as Codex or Claude Code;
+- keep a governed memory and knowledge base for project facts, preferences, rules, and evidence.
 
-[Website](https://multica.ai) · [Cloud](https://multica.ai/app) · [X](https://x.com/MulticaAI) · [Self-Hosting](SELF_HOSTING.md) · [Contributing](CONTRIBUTING.md)
+The v0.1 product focus is the first practical loop:
 
-**English | [简体中文](README.zh-CN.md)**
-
-</div>
-
-## What is Multica?
-
-Multica turns coding agents into real teammates. Assign issues to an agent like you'd assign to a colleague — they'll pick up the work, write code, report blockers, and update statuses autonomously.
-
-No more copy-pasting prompts. No more babysitting runs. Your agents show up on the board, participate in conversations, and compound reusable skills over time. Think of it as open-source infrastructure for managed agents — vendor-neutral, self-hosted, and designed for human + AI teams. Works with **Claude Code**, **Codex**, **GitHub Copilot CLI**, **OpenClaw**, **OpenCode**, **Hermes**, **Gemini**, **Pi**, **Cursor Agent**, **Kimi**, and **Kiro CLI**.
-
-<p align="center">
-  <img src="docs/assets/hero-screenshot.png" alt="Multica board view" width="800">
-</p>
-
-## Why "Multica"?
-
-Multica — **Mul**tiplexed **I**nformation and **C**omputing **A**gent.
-
-The name is a nod to Multics, the pioneering operating system of the 1960s that introduced time-sharing — letting multiple users share a single machine as if each had it to themselves. Unix was born as a deliberate simplification of Multics: one user, one task, one elegant philosophy.
-
-We think the same inflection is happening again. For decades, software teams have been single-threaded — one engineer, one task, one context switch at a time. AI agents change that equation. Multica brings time-sharing back, but for an era where the "users" multiplexing the system are both humans and autonomous agents.
-
-In Multica, agents are first-class teammates. They get assigned issues, report progress, raise blockers, and ship code — just like their human colleagues. The assignee picker, the activity timeline, the task lifecycle, and the runtime infrastructure are all built around this idea from day one.
-
-Like Multics before it, the bet is on multiplexing: a small team shouldn't feel small. With the right system, two engineers and a fleet of agents can move like twenty.
-
-## Features
-
-Multica manages the full agent lifecycle: from task assignment to execution monitoring to skill reuse.
-
-- **Agents as Teammates** — assign to an agent like you'd assign to a colleague. They have profiles, show up on the board, post comments, create issues, and report blockers proactively.
-- **Autonomous Execution** — set it and forget it. Full task lifecycle management (enqueue, claim, start, complete/fail) with real-time progress streaming via WebSocket.
-- **Reusable Skills** — every solution becomes a reusable skill for the whole team. Deployments, migrations, code reviews — skills compound your team's capabilities over time.
-- **Unified Runtimes** — one dashboard for all your compute. Local daemons and cloud runtimes, auto-detection of available CLIs, real-time monitoring.
-- **Multi-Workspace** — organize work across teams with workspace-level isolation. Each workspace has its own agents, issues, and settings.
-
----
-
-## Quick Install
-
-### macOS / Linux (Homebrew - recommended)
-
-```bash
-brew install multica-ai/tap/multica
+```text
+Work signal
+-> AI-ME analysis
+-> approval gate
+-> issue / worker dispatch / reply draft
+-> execution result and audit trail
+-> memory and knowledge reuse
 ```
 
-Use `brew upgrade multica-ai/tap/multica` to keep the CLI current.
+## Current Scope
 
-### macOS / Linux (install script)
+The project currently includes or is actively implementing:
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/multica-ai/multica/main/scripts/install.sh | bash
-```
+- **Work cockpit**: a dashboard-style view for pending decisions, AI employee work, risk, and recent activity.
+- **AI employees**: Codex, Claude Code, and other agent runtimes continue to behave as assignable workers.
+- **Exception inbox**: external or internal signals can be triaged into AI-ME recommendations and approval items.
+- **Approval center**: risky actions are persisted, reviewed, approved, rejected, or taken over by the user.
+- **Memory and knowledge**: governed context for user preferences, project facts, rules, evidence, and candidate memories.
+- **LLM brain integration**: AI-ME can be configured to call an OpenAI-compatible LLM API. Local development currently targets DeepSeek because it is cost-effective.
+- **External action groundwork**: Feishu webhook and approval-backed external message sending are being connected incrementally.
 
-Use this if Homebrew is not available. The script installs the Multica CLI on macOS and Linux by using Homebrew when it is on `PATH`, otherwise it downloads the binary directly.
+## UI Direction
 
-### Windows (PowerShell)
+The images below are AI-ME UI concept drafts generated with GPT. They are product direction references, not final production screenshots.
 
-```powershell
-irm https://raw.githubusercontent.com/multica-ai/multica/main/scripts/install.ps1 | iex
-```
+<table>
+  <tr>
+    <td><img src="docs/assets/ai-me-ui/01-dashboard.png" alt="AI-ME work cockpit concept" width="100%"></td>
+    <td><img src="docs/assets/ai-me-ui/03-exceptions.png" alt="AI-ME exception inbox concept" width="100%"></td>
+    <td><img src="docs/assets/ai-me-ui/04-approvals.png" alt="AI-ME approval center concept" width="100%"></td>
+  </tr>
+  <tr>
+    <td><img src="docs/assets/ai-me-ui/06-memory.png" alt="AI-ME memory and knowledge concept" width="100%"></td>
+    <td><img src="docs/assets/ai-me-ui/07-agents.png" alt="AI-ME AI employees concept" width="100%"></td>
+    <td><img src="docs/assets/ai-me-ui/08-tools-permissions.png" alt="AI-ME tools and permissions concept" width="100%"></td>
+  </tr>
+</table>
 
-Then configure, authenticate, and start the daemon in one command:
-
-```bash
-multica setup          # Connect to Multica Cloud, log in, start daemon
-```
-
-> **Self-hosting?** Add `--with-server` to deploy a full Multica server on your machine:
->
-> ```bash
-> curl -fsSL https://raw.githubusercontent.com/multica-ai/multica/main/scripts/install.sh | bash -s -- --with-server
-> multica setup self-host
-> ```
->
-> This pulls the official Multica images from GHCR (latest stable by default). Requires Docker. See the [Self-Hosting Guide](SELF_HOSTING.md) for details.
-> If the selected GHCR tag has not been published yet, fall back to `make selfhost-build` from a checkout.
-
----
-
-## Getting Started
-
-### 1. Set up and start the daemon
-
-```bash
-multica setup           # Configure, authenticate, and start the daemon
-```
-
-The daemon runs in the background and auto-detects agent CLIs (`claude`, `codex`, `copilot`, `openclaw`, `opencode`, `hermes`, `gemini`, `pi`, `cursor-agent`, `kimi`, `kiro-cli`) on your PATH.
-
-### 2. Verify your runtime
-
-Open your workspace in the Multica web app. Navigate to **Settings → Runtimes** — you should see your machine listed as an active **Runtime**.
-
-> **What is a Runtime?** A Runtime is a compute environment that can execute agent tasks. It can be your local machine (via the daemon) or a cloud instance. Each runtime reports which agent CLIs are available, so Multica knows where to route work.
-
-### 3. Create an agent
-
-Go to **Settings → Agents** and click **New Agent**. Pick the runtime you just connected and choose a provider (Claude Code, Codex, GitHub Copilot CLI, OpenClaw, OpenCode, Hermes, Gemini, Pi, Cursor Agent, Kimi, or Kiro CLI). Give your agent a name — this is how it will appear on the board, in comments, and in assignments.
-
-### 4. Assign your first task
-
-Create an issue from the board (or via `multica issue create`), then assign it to your new agent. The agent will automatically pick up the task, execute it on your runtime, and report progress — just like a human teammate.
-
----
-
-## Multica vs Paperclip
-
-| | Multica | Paperclip |
-|---|---------|-----------|
-| **Focus** | Team AI agent collaboration platform | Solo AI agent company simulator |
-| **User model** | Multi-user teams with roles & permissions | Single board operator |
-| **Agent interaction** | Issues + Chat conversations | Issues + Heartbeat |
-| **Deployment** | Cloud-first | Local-first |
-| **Management depth** | Lightweight (Issues / Projects / Labels) | Heavy governance (Org chart / Approvals / Budgets) |
-| **Extensibility** | Skills system | Skills + Plugin system |
-
-**TL;DR — Multica is built for teams that want to collaborate with AI agents on real projects together.**
-
----
-
-## CLI
-
-The `multica` CLI connects your local machine to Multica — authenticate, manage workspaces, and run the agent daemon.
-
-| Command | Description |
-|---------|-------------|
-| `multica login` | Authenticate (opens browser) |
-| `multica daemon start` | Start the local agent runtime |
-| `multica daemon status` | Check daemon status |
-| `multica setup` | One-command setup for Multica Cloud (configure + login + start daemon) |
-| `multica setup self-host` | Same, but for self-hosted deployments |
-| `multica issue list` | List issues in your workspace |
-| `multica issue create` | Create a new issue |
-| `multica update` | Update to the latest version |
-
-See the [CLI and Daemon Guide](CLI_AND_DAEMON.md) for the full command reference.
-
----
+More reference images are listed in [docs/ai-me-ui-reference.md](docs/ai-me-ui-reference.md).
 
 ## Architecture
 
-```
-┌──────────────┐     ┌──────────────┐     ┌──────────────────┐
-│   Next.js    │────>│  Go Backend  │────>│   PostgreSQL     │
-│   Frontend   │<────│  (Chi + WS)  │<────│   (pgvector)     │
-└──────────────┘     └──────┬───────┘     └──────────────────┘
-                            │
-                     ┌──────┴───────┐
-                     │ Agent Daemon │  runs on your machine
-                     └──────────────┘  (Claude Code, Codex, GitHub Copilot CLI,
-                                        OpenCode, OpenClaw, Hermes, Gemini,
-                                        Pi, Cursor Agent, Kimi, Kiro CLI)
+AI-ME currently uses the original Multica architecture while the product surface is being reshaped:
+
+```text
+Next.js web app / Electron desktop
+        |
+Shared views and core packages
+        |
+Go backend API + WebSocket events
+        |
+PostgreSQL 17 with pgvector
+        |
+Local / cloud agent runtimes
+        |
+Codex, Claude Code, and other AI employee CLIs
 ```
 
-| Layer | Stack |
-|-------|-------|
-| Frontend | Next.js 16 (App Router) |
-| Backend | Go (Chi router, sqlc, gorilla/websocket) |
-| Database | PostgreSQL 17 with pgvector |
-| Agent Runtime | Local daemon executing Claude Code, Codex, GitHub Copilot CLI, OpenClaw, OpenCode, Hermes, Gemini, Pi, Cursor Agent, Kimi, or Kiro CLI |
+Key implementation boundaries:
+
+- `server/`: Go backend, handlers, migrations, sqlc queries, realtime events.
+- `apps/web/`: Next.js web app.
+- `apps/desktop/`: Electron desktop shell.
+- `packages/core/`: headless API client, schemas, query hooks, types, and shared state.
+- `packages/views/`: shared product pages and components.
+- `packages/ui/`: reusable UI primitives and design tokens.
+- `docs/`: product notes, PRDs, and UI references.
 
 ## Development
 
-For contributors working on the Multica codebase, see the [Contributing Guide](CONTRIBUTING.md).
+Prerequisites:
 
-**Prerequisites:** [Node.js](https://nodejs.org/) v20+, [pnpm](https://pnpm.io/) v10.28+, [Go](https://go.dev/) v1.26+, [Docker](https://www.docker.com/)
+- Node.js 22+
+- pnpm 10.28+
+- Go 1.26+
+- Docker, for local PostgreSQL
+
+Start the local stack:
 
 ```bash
 make dev
 ```
 
-`make dev` auto-detects your environment (main checkout or worktree), creates the env file, installs dependencies, sets up the database, runs migrations, and starts all services.
+Useful checks:
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the full development workflow, worktree support, testing, and troubleshooting.
+```bash
+pnpm typecheck
+pnpm test
+make test
+make check
+```
+
+## Configuration
+
+Use `.env.example` as the template for local configuration.
+
+Sensitive values must stay local:
+
+- LLM API keys, such as `AI_ME_LLM_API_KEY` or `DEEPSEEK_API_KEY`
+- Feishu app secrets and webhook tokens
+- OAuth secrets
+- database passwords for non-local deployments
+
+Do not commit a real `.env` file. The repository only keeps placeholders and public defaults.
+
+## Project Notes
+
+- This repository is currently a development-stage AI-ME fork built from the Multica foundation.
+- Some internal package names, CLI names, and docs may still reference Multica while the product is being renamed.
+- The project is not production-ready yet.
+- The approval-first safety model is intentional: AI-ME should not send external messages, modify important data, merge code, or make commitments without an explicit approval path.
+
+## License
+
+See [LICENSE](LICENSE).

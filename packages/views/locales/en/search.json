@@ -11,10 +11,13 @@
     "recent": "Recent"
   },
   "pages": {
+    "dashboard": "Work Cockpit",
     "inbox": "Inbox",
     "my_issues": "My Issues",
     "issues": "Issues",
     "projects": "Projects",
+    "memory": "Memory & Knowledge",
+    "approvals": "Approval Center",
     "agents": "Agents",
     "runtimes": "Runtimes",
     "skills": "Skills",

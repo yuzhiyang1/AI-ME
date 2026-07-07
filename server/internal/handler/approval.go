@@ -1,0 +1,1300 @@
+package handler
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strings"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgtype"
+	db "github.com/multica-ai/multica/server/pkg/db/generated"
+	"github.com/multica-ai/multica/server/pkg/protocol"
+)
+
+var (
+	approvalSourceTypes = map[string]bool{
+		"ai_me_think": true,
+		"exception":   true,
+		"inbox":       true,
+		"issue":       true,
+		"comment":     true,
+		"agent_task":  true,
+		"memory":      true,
+		"feishu":      true,
+		"email":       true,
+		"github":      true,
+		"manual":      true,
+	}
+	approvalStatuses = map[string]bool{
+		"pending":    true,
+		"approved":   true,
+		"rejected":   true,
+		"observing":  true,
+		"taken_over": true,
+		"expired":    true,
+	}
+	approvalRiskLevels = map[string]bool{
+		"low":    true,
+		"medium": true,
+		"high":   true,
+	}
+	approvalReversibilities = map[string]bool{
+		"reversible":           true,
+		"partially_reversible": true,
+		"irreversible":         true,
+	}
+	approvalActionTypes = map[string]bool{
+		"create_issue":          true,
+		"assign_worker":         true,
+		"draft_reply":           true,
+		"send_external_message": true,
+		"post_internal_comment": true,
+		"confirm_memory":        true,
+		"no_action":             true,
+	}
+	approvalEvidenceTypes = map[string]bool{
+		"user_input": true,
+		"issue":      true,
+		"comment":    true,
+		"activity":   true,
+		"agent_task": true,
+		"memory":     true,
+		"document":   true,
+		"feishu":     true,
+		"email":      true,
+		"github":     true,
+		"ci":         true,
+		"log":        true,
+	}
+)
+
+type AIApprovalResponse struct {
+	ID                 string                       `json:"id"`
+	WorkspaceID        string                       `json:"workspace_id"`
+	RequesterUserID    *string                      `json:"requester_user_id"`
+	SourceType         string                       `json:"source_type"`
+	SourceRefID        *string                      `json:"source_ref_id"`
+	SourceURL          *string                      `json:"source_url"`
+	IssueID            *string                      `json:"issue_id"`
+	InboxItemID        *string                      `json:"inbox_item_id"`
+	TaskQueueID        *string                      `json:"task_queue_id"`
+	MemoryID           *string                      `json:"memory_id"`
+	Title              string                       `json:"title"`
+	Summary            string                       `json:"summary"`
+	Status             string                       `json:"status"`
+	RiskLevel          string                       `json:"risk_level"`
+	Confidence         float64                      `json:"confidence"`
+	Reversibility      string                       `json:"reversibility"`
+	ActionType         string                       `json:"action_type"`
+	ActionTitle        string                       `json:"action_title"`
+	ActionDescription  string                       `json:"action_description"`
+	OriginalPayload    json.RawMessage              `json:"original_payload"`
+	FinalPayload       json.RawMessage              `json:"final_payload"`
+	AIReasoningSummary string                       `json:"ai_reasoning_summary"`
+	ApprovalNote       string                       `json:"approval_note"`
+	RejectionReason    string                       `json:"rejection_reason"`
+	ApprovedBy         *string                      `json:"approved_by"`
+	ApprovedAt         *string                      `json:"approved_at"`
+	RejectedBy         *string                      `json:"rejected_by"`
+	RejectedAt         *string                      `json:"rejected_at"`
+	ObservedBy         *string                      `json:"observed_by"`
+	ObservedAt         *string                      `json:"observed_at"`
+	TakenOverBy        *string                      `json:"taken_over_by"`
+	TakenOverAt        *string                      `json:"taken_over_at"`
+	ExecutedAt         *string                      `json:"executed_at"`
+	ExecutionStatus    string                       `json:"execution_status"`
+	ExecutionError     string                       `json:"execution_error"`
+	CreatedIssueID     *string                      `json:"created_issue_id"`
+	CreatedTaskID      *string                      `json:"created_task_id"`
+	CreatedCommentID   *string                      `json:"created_comment_id"`
+	ExpiresAt          *string                      `json:"expires_at"`
+	CreatedAt          string                       `json:"created_at"`
+	UpdatedAt          string                       `json:"updated_at"`
+	Evidence           []AIApprovalEvidenceResponse `json:"evidence,omitempty"`
+	Events             []AIApprovalEventResponse    `json:"events,omitempty"`
+}
+
+type AIApprovalEvidenceResponse struct {
+	ID           string          `json:"id"`
+	ApprovalID   string          `json:"approval_id"`
+	WorkspaceID  string          `json:"workspace_id"`
+	EvidenceType string          `json:"evidence_type"`
+	Label        string          `json:"label"`
+	RefID        *string         `json:"ref_id"`
+	SourceURL    *string         `json:"source_url"`
+	Quote        string          `json:"quote"`
+	Metadata     json.RawMessage `json:"metadata"`
+	CreatedAt    string          `json:"created_at"`
+}
+
+type AIApprovalEventResponse struct {
+	ID          string          `json:"id"`
+	ApprovalID  string          `json:"approval_id"`
+	WorkspaceID string          `json:"workspace_id"`
+	ActorType   string          `json:"actor_type"`
+	ActorID     *string         `json:"actor_id"`
+	EventType   string          `json:"event_type"`
+	FromStatus  *string         `json:"from_status"`
+	ToStatus    *string         `json:"to_status"`
+	Payload     json.RawMessage `json:"payload"`
+	CreatedAt   string          `json:"created_at"`
+}
+
+type AIApprovalStatsResponse struct {
+	Total           int64 `json:"total"`
+	Pending         int64 `json:"pending"`
+	HighRiskPending int64 `json:"high_risk_pending"`
+	Observing       int64 `json:"observing"`
+	Approved        int64 `json:"approved"`
+	Rejected        int64 `json:"rejected"`
+	TakenOver       int64 `json:"taken_over"`
+	Expired         int64 `json:"expired"`
+	Succeeded       int64 `json:"succeeded"`
+	Failed          int64 `json:"failed"`
+}
+
+type CreateAIApprovalEvidenceRequest struct {
+	EvidenceType string `json:"evidence_type"`
+	Label        string `json:"label"`
+	RefID        string `json:"ref_id"`
+	SourceURL    string `json:"source_url"`
+	Quote        string `json:"quote"`
+	Metadata     any    `json:"metadata"`
+}
+
+type CreateAIApprovalRequest struct {
+	SourceType         string                            `json:"source_type"`
+	SourceRefID        string                            `json:"source_ref_id"`
+	SourceURL          string                            `json:"source_url"`
+	IssueID            string                            `json:"issue_id"`
+	InboxItemID        string                            `json:"inbox_item_id"`
+	TaskQueueID        string                            `json:"task_queue_id"`
+	MemoryID           string                            `json:"memory_id"`
+	Title              string                            `json:"title"`
+	Summary            string                            `json:"summary"`
+	RiskLevel          string                            `json:"risk_level"`
+	Confidence         *float64                          `json:"confidence"`
+	Reversibility      string                            `json:"reversibility"`
+	ActionType         string                            `json:"action_type"`
+	ActionTitle        string                            `json:"action_title"`
+	ActionDescription  string                            `json:"action_description"`
+	OriginalPayload    any                               `json:"original_payload"`
+	FinalPayload       any                               `json:"final_payload"`
+	AIReasoningSummary string                            `json:"ai_reasoning_summary"`
+	ExpiresAt          string                            `json:"expires_at"`
+	Evidence           []CreateAIApprovalEvidenceRequest `json:"evidence"`
+}
+
+type UpdateAIApprovalRequest struct {
+	Title             *string          `json:"title"`
+	Summary           *string          `json:"summary"`
+	RiskLevel         *string          `json:"risk_level"`
+	Confidence        *float64         `json:"confidence"`
+	Reversibility     *string          `json:"reversibility"`
+	ActionTitle       *string          `json:"action_title"`
+	ActionDescription *string          `json:"action_description"`
+	FinalPayload      *json.RawMessage `json:"final_payload"`
+	ApprovalNote      *string          `json:"approval_note"`
+	ExpiresAt         *string          `json:"expires_at"`
+}
+
+type AIApprovalTransitionRequest struct {
+	Note         string           `json:"note"`
+	Reason       string           `json:"reason"`
+	FinalPayload *json.RawMessage `json:"final_payload"`
+}
+
+func aiApprovalToResponse(a db.AiMeApproval) AIApprovalResponse {
+	return AIApprovalResponse{
+		ID:                 uuidToString(a.ID),
+		WorkspaceID:        uuidToString(a.WorkspaceID),
+		RequesterUserID:    uuidToPtr(a.RequesterUserID),
+		SourceType:         a.SourceType,
+		SourceRefID:        textToPtr(a.SourceRefID),
+		SourceURL:          textToPtr(a.SourceUrl),
+		IssueID:            uuidToPtr(a.IssueID),
+		InboxItemID:        uuidToPtr(a.InboxItemID),
+		TaskQueueID:        uuidToPtr(a.TaskQueueID),
+		MemoryID:           uuidToPtr(a.MemoryID),
+		Title:              a.Title,
+		Summary:            a.Summary,
+		Status:             a.Status,
+		RiskLevel:          a.RiskLevel,
+		Confidence:         numericToFloat64(a.Confidence),
+		Reversibility:      a.Reversibility,
+		ActionType:         a.ActionType,
+		ActionTitle:        a.ActionTitle,
+		ActionDescription:  a.ActionDescription,
+		OriginalPayload:    rawJSONOrObject(a.OriginalPayload),
+		FinalPayload:       rawJSONOrObject(a.FinalPayload),
+		AIReasoningSummary: a.AiReasoningSummary,
+		ApprovalNote:       a.ApprovalNote,
+		RejectionReason:    a.RejectionReason,
+		ApprovedBy:         uuidToPtr(a.ApprovedBy),
+		ApprovedAt:         timestampToPtr(a.ApprovedAt),
+		RejectedBy:         uuidToPtr(a.RejectedBy),
+		RejectedAt:         timestampToPtr(a.RejectedAt),
+		ObservedBy:         uuidToPtr(a.ObservedBy),
+		ObservedAt:         timestampToPtr(a.ObservedAt),
+		TakenOverBy:        uuidToPtr(a.TakenOverBy),
+		TakenOverAt:        timestampToPtr(a.TakenOverAt),
+		ExecutedAt:         timestampToPtr(a.ExecutedAt),
+		ExecutionStatus:    a.ExecutionStatus,
+		ExecutionError:     a.ExecutionError,
+		CreatedIssueID:     uuidToPtr(a.CreatedIssueID),
+		CreatedTaskID:      uuidToPtr(a.CreatedTaskID),
+		CreatedCommentID:   uuidToPtr(a.CreatedCommentID),
+		ExpiresAt:          timestampToPtr(a.ExpiresAt),
+		CreatedAt:          timestampToString(a.CreatedAt),
+		UpdatedAt:          timestampToString(a.UpdatedAt),
+	}
+}
+
+func aiApprovalEvidenceToResponse(e db.AiMeApprovalEvidence) AIApprovalEvidenceResponse {
+	return AIApprovalEvidenceResponse{
+		ID:           uuidToString(e.ID),
+		ApprovalID:   uuidToString(e.ApprovalID),
+		WorkspaceID:  uuidToString(e.WorkspaceID),
+		EvidenceType: e.EvidenceType,
+		Label:        e.Label,
+		RefID:        textToPtr(e.RefID),
+		SourceURL:    textToPtr(e.SourceUrl),
+		Quote:        e.Quote,
+		Metadata:     rawJSONOrObject(e.Metadata),
+		CreatedAt:    timestampToString(e.CreatedAt),
+	}
+}
+
+func aiApprovalEventToResponse(e db.AiMeApprovalEvent) AIApprovalEventResponse {
+	return AIApprovalEventResponse{
+		ID:          uuidToString(e.ID),
+		ApprovalID:  uuidToString(e.ApprovalID),
+		WorkspaceID: uuidToString(e.WorkspaceID),
+		ActorType:   e.ActorType,
+		ActorID:     uuidToPtr(e.ActorID),
+		EventType:   e.EventType,
+		FromStatus:  textToPtr(e.FromStatus),
+		ToStatus:    textToPtr(e.ToStatus),
+		Payload:     rawJSONOrObject(e.Payload),
+		CreatedAt:   timestampToString(e.CreatedAt),
+	}
+}
+
+func (h *Handler) ListAIApprovals(w http.ResponseWriter, r *http.Request) {
+	workspaceID := h.resolveWorkspaceID(r)
+	params, ok := aiApprovalListParams(w, r, workspaceID)
+	if !ok {
+		return
+	}
+	countParams := db.CountAIApprovalsParams{
+		WorkspaceID: params.WorkspaceID,
+		Status:      params.Status,
+		RiskLevel:   params.RiskLevel,
+		ActionType:  params.ActionType,
+		SourceType:  params.SourceType,
+		IssueID:     params.IssueID,
+	}
+	approvals, err := h.Queries.ListAIApprovals(r.Context(), params)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list approvals")
+		return
+	}
+	total, err := h.Queries.CountAIApprovals(r.Context(), countParams)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to count approvals")
+		return
+	}
+	resp := make([]AIApprovalResponse, len(approvals))
+	for i, approval := range approvals {
+		resp[i] = aiApprovalToResponse(approval)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"approvals": resp, "total": total})
+}
+
+func (h *Handler) GetAIApprovalStats(w http.ResponseWriter, r *http.Request) {
+	workspaceID := h.resolveWorkspaceID(r)
+	workspaceUUID, ok := parseUUIDOrBadRequest(w, workspaceID, "workspace_id")
+	if !ok {
+		return
+	}
+	stats, err := h.Queries.GetAIApprovalStats(r.Context(), workspaceUUID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to get approval stats")
+		return
+	}
+	writeJSON(w, http.StatusOK, AIApprovalStatsResponse{
+		Total:           stats.Total,
+		Pending:         stats.Pending,
+		HighRiskPending: stats.HighRiskPending,
+		Observing:       stats.Observing,
+		Approved:        stats.Approved,
+		Rejected:        stats.Rejected,
+		TakenOver:       stats.TakenOver,
+		Expired:         stats.Expired,
+		Succeeded:       stats.Succeeded,
+		Failed:          stats.Failed,
+	})
+}
+
+func aiApprovalListParams(w http.ResponseWriter, r *http.Request, workspaceID string) (db.ListAIApprovalsParams, bool) {
+	workspaceUUID, ok := parseUUIDOrBadRequest(w, workspaceID, "workspace_id")
+	if !ok {
+		return db.ListAIApprovalsParams{}, false
+	}
+	limit, offset := listPagination(r)
+	status := optionalTextFromString(r.URL.Query().Get("status"))
+	if status.Valid && !validateEnum(w, status.String, "status", approvalStatuses) {
+		return db.ListAIApprovalsParams{}, false
+	}
+	riskLevel := optionalTextFromString(r.URL.Query().Get("risk_level"))
+	if riskLevel.Valid && !validateEnum(w, riskLevel.String, "risk_level", approvalRiskLevels) {
+		return db.ListAIApprovalsParams{}, false
+	}
+	actionType := optionalTextFromString(r.URL.Query().Get("action_type"))
+	if actionType.Valid && !validateEnum(w, actionType.String, "action_type", approvalActionTypes) {
+		return db.ListAIApprovalsParams{}, false
+	}
+	sourceType := optionalTextFromString(r.URL.Query().Get("source_type"))
+	if sourceType.Valid && !validateEnum(w, sourceType.String, "source_type", approvalSourceTypes) {
+		return db.ListAIApprovalsParams{}, false
+	}
+	issueID, ok := optionalUUIDFromString(w, r.URL.Query().Get("issue_id"), "issue_id")
+	if !ok {
+		return db.ListAIApprovalsParams{}, false
+	}
+	return db.ListAIApprovalsParams{
+		WorkspaceID: workspaceUUID,
+		Status:      status,
+		RiskLevel:   riskLevel,
+		ActionType:  actionType,
+		SourceType:  sourceType,
+		IssueID:     issueID,
+		Limit:       limit,
+		Offset:      offset,
+	}, true
+}
+
+func (h *Handler) GetAIApproval(w http.ResponseWriter, r *http.Request) {
+	approval, ok := h.loadAIApproval(w, r)
+	if !ok {
+		return
+	}
+	resp, ok := h.aiApprovalDetailResponse(w, r, approval)
+	if !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) CreateAIApproval(w http.ResponseWriter, r *http.Request) {
+	workspaceID := h.resolveWorkspaceID(r)
+	workspaceUUID := parseUUID(workspaceID)
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	var req CreateAIApprovalRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	params, ok := h.createAIApprovalParams(w, req, workspaceUUID, parseUUID(userID))
+	if !ok {
+		return
+	}
+	tx, err := h.TxStarter.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to start transaction")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	qtx := h.Queries.WithTx(tx)
+	approval, err := qtx.CreateAIApproval(r.Context(), params)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create approval")
+		return
+	}
+	for _, evidenceReq := range req.Evidence {
+		if err := createAIApprovalEvidence(r.Context(), qtx, workspaceUUID, approval.ID, evidenceReq); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	if _, err := createAIApprovalEvent(r.Context(), qtx, approval, "member", parseUUID(userID), "created", "", approval.Status, nil); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create approval event")
+		return
+	}
+	if err := recordAIApprovalActivity(r.Context(), qtx, approval, parseUUID(userID), "ai_me_approval_created", nil); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to record approval activity")
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit")
+		return
+	}
+	resp := aiApprovalToResponse(approval)
+	h.publish(protocol.EventApprovalCreated, workspaceID, "member", userID, map[string]any{"approval": resp})
+	writeJSON(w, http.StatusCreated, resp)
+}
+
+func (h *Handler) createAIMeApproval(ctx context.Context, workspaceID, userID string, params db.CreateAIApprovalParams, evidence []CreateAIApprovalEvidenceRequest) (db.AiMeApproval, error) {
+	// Keep AI-Me generated approvals on the same audit path as manual approvals.
+	tx, err := h.TxStarter.Begin(ctx)
+	if err != nil {
+		return db.AiMeApproval{}, err
+	}
+	defer tx.Rollback(ctx)
+	qtx := h.Queries.WithTx(tx)
+	approval, err := qtx.CreateAIApproval(ctx, params)
+	if err != nil {
+		return db.AiMeApproval{}, err
+	}
+	for _, evidenceReq := range evidence {
+		if err := createAIApprovalEvidence(ctx, qtx, params.WorkspaceID, approval.ID, evidenceReq); err != nil {
+			return db.AiMeApproval{}, err
+		}
+	}
+	eventPayload := map[string]any{
+		"source":        "ai_me_think",
+		"source_ref_id": textToPtr(params.SourceRefID),
+	}
+	if _, err := createAIApprovalEvent(ctx, qtx, approval, "member", params.RequesterUserID, "created", "", approval.Status, eventPayload); err != nil {
+		return db.AiMeApproval{}, err
+	}
+	if err := recordAIApprovalActivity(ctx, qtx, approval, params.RequesterUserID, "ai_me_approval_created", eventPayload); err != nil {
+		return db.AiMeApproval{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return db.AiMeApproval{}, err
+	}
+	resp := aiApprovalToResponse(approval)
+	h.publish(protocol.EventApprovalCreated, workspaceID, "member", userID, map[string]any{"approval": resp})
+	return approval, nil
+}
+
+func (h *Handler) createAIApprovalParams(w http.ResponseWriter, req CreateAIApprovalRequest, workspaceID, userID pgtype.UUID) (db.CreateAIApprovalParams, bool) {
+	req.Title = strings.TrimSpace(req.Title)
+	if req.Title == "" {
+		writeError(w, http.StatusBadRequest, "title is required")
+		return db.CreateAIApprovalParams{}, false
+	}
+	sourceType := normalizeOptionalEnum(req.SourceType, "manual")
+	if !validateEnum(w, sourceType, "source_type", approvalSourceTypes) {
+		return db.CreateAIApprovalParams{}, false
+	}
+	riskLevel := normalizeOptionalEnum(req.RiskLevel, "medium")
+	if !validateEnum(w, riskLevel, "risk_level", approvalRiskLevels) {
+		return db.CreateAIApprovalParams{}, false
+	}
+	reversibility := normalizeOptionalEnum(req.Reversibility, "partially_reversible")
+	if !validateEnum(w, reversibility, "reversibility", approvalReversibilities) {
+		return db.CreateAIApprovalParams{}, false
+	}
+	actionType := strings.TrimSpace(req.ActionType)
+	if !validateEnum(w, actionType, "action_type", approvalActionTypes) {
+		return db.CreateAIApprovalParams{}, false
+	}
+	confidence := 0.5
+	if req.Confidence != nil {
+		confidence = *req.Confidence
+	}
+	confidenceNumeric, err := numericFromFloat64(confidence)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "confidence must be between 0 and 1")
+		return db.CreateAIApprovalParams{}, false
+	}
+	issueID, ok := optionalUUIDFromString(w, req.IssueID, "issue_id")
+	if !ok {
+		return db.CreateAIApprovalParams{}, false
+	}
+	inboxItemID, ok := optionalUUIDFromString(w, req.InboxItemID, "inbox_item_id")
+	if !ok {
+		return db.CreateAIApprovalParams{}, false
+	}
+	taskQueueID, ok := optionalUUIDFromString(w, req.TaskQueueID, "task_queue_id")
+	if !ok {
+		return db.CreateAIApprovalParams{}, false
+	}
+	memoryID, ok := optionalUUIDFromString(w, req.MemoryID, "memory_id")
+	if !ok {
+		return db.CreateAIApprovalParams{}, false
+	}
+	expiresAt, ok := optionalTimestampFromString(w, req.ExpiresAt, "expires_at")
+	if !ok {
+		return db.CreateAIApprovalParams{}, false
+	}
+	originalPayload := jsonBytesOrObject(req.OriginalPayload)
+	finalPayload := jsonBytesOrObject(req.FinalPayload)
+	if req.FinalPayload == nil {
+		finalPayload = originalPayload
+	}
+	actionTitle := strings.TrimSpace(req.ActionTitle)
+	if actionTitle == "" {
+		actionTitle = req.Title
+	}
+	return db.CreateAIApprovalParams{
+		WorkspaceID:        workspaceID,
+		RequesterUserID:    userID,
+		SourceType:         sourceType,
+		SourceRefID:        optionalTextFromString(req.SourceRefID),
+		SourceUrl:          optionalTextFromString(req.SourceURL),
+		IssueID:            issueID,
+		InboxItemID:        inboxItemID,
+		TaskQueueID:        taskQueueID,
+		MemoryID:           memoryID,
+		Title:              req.Title,
+		Summary:            strings.TrimSpace(req.Summary),
+		RiskLevel:          riskLevel,
+		Confidence:         confidenceNumeric,
+		Reversibility:      reversibility,
+		ActionType:         actionType,
+		ActionTitle:        actionTitle,
+		ActionDescription:  strings.TrimSpace(req.ActionDescription),
+		OriginalPayload:    originalPayload,
+		FinalPayload:       finalPayload,
+		AiReasoningSummary: strings.TrimSpace(req.AIReasoningSummary),
+		ExpiresAt:          expiresAt,
+	}, true
+}
+
+func (h *Handler) UpdateAIApproval(w http.ResponseWriter, r *http.Request) {
+	workspaceID := h.resolveWorkspaceID(r)
+	workspaceUUID := parseUUID(workspaceID)
+	approvalID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "id"), "approval id")
+	if !ok {
+		return
+	}
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	var req UpdateAIApprovalRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	params := db.UpdateAIApprovalParams{ID: approvalID, WorkspaceID: workspaceUUID}
+	if req.Title != nil {
+		value := strings.TrimSpace(*req.Title)
+		if value == "" {
+			writeError(w, http.StatusBadRequest, "title cannot be empty")
+			return
+		}
+		params.Title = pgtype.Text{String: value, Valid: true}
+	}
+	params.Summary = optionalTextFromPtr(req.Summary)
+	if req.RiskLevel != nil {
+		value := strings.TrimSpace(*req.RiskLevel)
+		if !validateEnum(w, value, "risk_level", approvalRiskLevels) {
+			return
+		}
+		params.RiskLevel = pgtype.Text{String: value, Valid: true}
+	}
+	if req.Confidence != nil {
+		n, err := optionalNumericFromFloat64(req.Confidence)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "confidence must be between 0 and 1")
+			return
+		}
+		params.Confidence = n
+	}
+	if req.Reversibility != nil {
+		value := strings.TrimSpace(*req.Reversibility)
+		if !validateEnum(w, value, "reversibility", approvalReversibilities) {
+			return
+		}
+		params.Reversibility = pgtype.Text{String: value, Valid: true}
+	}
+	params.ActionTitle = optionalTextFromPtr(req.ActionTitle)
+	params.ActionDescription = optionalTextFromPtr(req.ActionDescription)
+	params.ApprovalNote = optionalTextFromPtr(req.ApprovalNote)
+	if req.FinalPayload != nil {
+		raw, ok := rawJSONFromRequest(w, req.FinalPayload, "final_payload")
+		if !ok {
+			return
+		}
+		params.FinalPayload = raw
+	}
+	if req.ExpiresAt != nil {
+		params.ExpiresAt, ok = optionalTimestampFromPtr(w, req.ExpiresAt, "expires_at")
+		if !ok {
+			return
+		}
+	}
+	tx, err := h.TxStarter.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to start transaction")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	qtx := h.Queries.WithTx(tx)
+	updated, err := qtx.UpdateAIApproval(r.Context(), params)
+	if err != nil {
+		if isNotFound(err) {
+			writeError(w, http.StatusConflict, "approval cannot be edited in its current status")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to update approval")
+		return
+	}
+	if _, err := qtx.CreateAIApprovalEvent(r.Context(), db.CreateAIApprovalEventParams{
+		ApprovalID:  updated.ID,
+		WorkspaceID: updated.WorkspaceID,
+		ActorType:   "member",
+		ActorID:     parseUUID(userID),
+		EventType:   "edited",
+		FromStatus:  pgtype.Text{String: updated.Status, Valid: true},
+		ToStatus:    pgtype.Text{String: updated.Status, Valid: true},
+		Payload:     jsonBytesOrObject(map[string]any{"approval_id": uuidToString(updated.ID)}),
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create approval event")
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit")
+		return
+	}
+	resp := aiApprovalToResponse(updated)
+	h.publish(protocol.EventApprovalUpdated, workspaceID, "member", userID, map[string]any{"approval": resp})
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) ApproveAIApproval(w http.ResponseWriter, r *http.Request) {
+	workspaceID := h.resolveWorkspaceID(r)
+	workspaceUUID := parseUUID(workspaceID)
+	approvalID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "id"), "approval id")
+	if !ok {
+		return
+	}
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	var req AIApprovalTransitionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	finalPayload, ok := rawJSONFromRequest(w, req.FinalPayload, "final_payload")
+	if !ok {
+		return
+	}
+	userUUID := parseUUID(userID)
+	tx, err := h.TxStarter.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to start transaction")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	qtx := h.Queries.WithTx(tx)
+	existing, err := qtx.GetAIApprovalInWorkspace(r.Context(), db.GetAIApprovalInWorkspaceParams{
+		ID: approvalID, WorkspaceID: workspaceUUID,
+	})
+	if err != nil {
+		writeError(w, http.StatusNotFound, "approval not found")
+		return
+	}
+	if existing.Status != "pending" && existing.Status != "observing" {
+		writeError(w, http.StatusConflict, "approval cannot be approved in its current status")
+		return
+	}
+	effectivePayload := approvalEffectivePayload(existing, finalPayload)
+	execution, err := h.executeApprovedAIAction(r.Context(), qtx, existing, workspaceUUID, userUUID, effectivePayload)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	updated, err := qtx.ApproveAIApproval(r.Context(), db.ApproveAIApprovalParams{
+		ApprovedBy:       userUUID,
+		ApprovalNote:     optionalTextFromString(req.Note),
+		FinalPayload:     finalPayload,
+		ExecutionStatus:  execution.Status,
+		CreatedIssueID:   execution.CreatedIssueID,
+		CreatedTaskID:    execution.CreatedTaskID,
+		CreatedCommentID: execution.CreatedCommentID,
+		ID:               approvalID,
+		WorkspaceID:      workspaceUUID,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to approve approval")
+		return
+	}
+	if _, err := createAIApprovalEvent(r.Context(), qtx, updated, "member", userUUID, "approved", existing.Status, updated.Status, map[string]any{"note": req.Note}); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create approval event")
+		return
+	}
+	if execution.Status == "succeeded" {
+		if _, err := createAIApprovalEvent(r.Context(), qtx, updated, "member", userUUID, "execution_succeeded", updated.Status, updated.Status, map[string]any{"action_type": updated.ActionType}); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to create execution event")
+			return
+		}
+	}
+	if err := recordAIApprovalActivity(r.Context(), qtx, updated, userUUID, "ai_me_approval_approved", map[string]any{"execution_status": execution.Status}); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to record approval activity")
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit")
+		return
+	}
+	resp := aiApprovalToResponse(updated)
+	if execution.UpdatedIssue != nil {
+		h.publishApprovalIssueUpdated(r.Context(), *execution.UpdatedIssue, execution.PreviousIssue, workspaceID, userID)
+	}
+	if h.TaskService != nil && len(execution.CancelledTasks) > 0 {
+		h.TaskService.BroadcastCancelledTasks(r.Context(), execution.CancelledTasks)
+	}
+	if execution.QueuedTask != nil {
+		h.publishApprovalTaskQueued(r.Context(), *execution.QueuedTask, workspaceID)
+	}
+	h.publish(protocol.EventApprovalApproved, workspaceID, "member", userID, map[string]any{"approval": resp})
+	if execution.Status == "succeeded" {
+		h.publish(protocol.EventApprovalExecutionSucceeded, workspaceID, "member", userID, map[string]any{"approval": resp})
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) RejectAIApproval(w http.ResponseWriter, r *http.Request) {
+	h.transitionAIApproval(w, r, "reject")
+}
+
+func (h *Handler) ObserveAIApproval(w http.ResponseWriter, r *http.Request) {
+	h.transitionAIApproval(w, r, "observe")
+}
+
+func (h *Handler) TakeOverAIApproval(w http.ResponseWriter, r *http.Request) {
+	h.transitionAIApproval(w, r, "take_over")
+}
+
+func (h *Handler) transitionAIApproval(w http.ResponseWriter, r *http.Request, action string) {
+	workspaceID := h.resolveWorkspaceID(r)
+	workspaceUUID := parseUUID(workspaceID)
+	approvalID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "id"), "approval id")
+	if !ok {
+		return
+	}
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	var req AIApprovalTransitionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	userUUID := parseUUID(userID)
+	tx, err := h.TxStarter.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to start transaction")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	qtx := h.Queries.WithTx(tx)
+	existing, err := qtx.GetAIApprovalInWorkspace(r.Context(), db.GetAIApprovalInWorkspaceParams{
+		ID: approvalID, WorkspaceID: workspaceUUID,
+	})
+	if err != nil {
+		writeError(w, http.StatusNotFound, "approval not found")
+		return
+	}
+	var (
+		updated   db.AiMeApproval
+		eventType string
+		proto     string
+	)
+	switch action {
+	case "reject":
+		updated, err = qtx.RejectAIApproval(r.Context(), db.RejectAIApprovalParams{
+			RejectedBy: userUUID, RejectionReason: optionalTextFromString(req.Reason), ID: approvalID, WorkspaceID: workspaceUUID,
+		})
+		eventType = "rejected"
+		proto = protocol.EventApprovalRejected
+	case "observe":
+		updated, err = qtx.ObserveAIApproval(r.Context(), db.ObserveAIApprovalParams{
+			ObservedBy: userUUID, ApprovalNote: optionalTextFromString(req.Note), ID: approvalID, WorkspaceID: workspaceUUID,
+		})
+		eventType = "observing"
+		proto = protocol.EventApprovalUpdated
+	case "take_over":
+		updated, err = qtx.TakeOverAIApproval(r.Context(), db.TakeOverAIApprovalParams{
+			TakenOverBy: userUUID, ApprovalNote: optionalTextFromString(req.Note), ID: approvalID, WorkspaceID: workspaceUUID,
+		})
+		eventType = "taken_over"
+		proto = protocol.EventApprovalUpdated
+	}
+	if err != nil {
+		if isNotFound(err) {
+			writeError(w, http.StatusConflict, "approval cannot transition in its current status")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to transition approval")
+		return
+	}
+	payload := map[string]any{"note": req.Note, "reason": req.Reason}
+	if _, err := createAIApprovalEvent(r.Context(), qtx, updated, "member", userUUID, eventType, existing.Status, updated.Status, payload); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create approval event")
+		return
+	}
+	if err := recordAIApprovalActivity(r.Context(), qtx, updated, userUUID, "ai_me_approval_"+eventType, payload); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to record approval activity")
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit")
+		return
+	}
+	resp := aiApprovalToResponse(updated)
+	h.publish(proto, workspaceID, "member", userID, map[string]any{"approval": resp})
+	writeJSON(w, http.StatusOK, resp)
+}
+
+type approvedAIActionExecution struct {
+	Status           string
+	CreatedIssueID   pgtype.UUID
+	CreatedTaskID    pgtype.UUID
+	CreatedCommentID pgtype.UUID
+	PreviousIssue    db.Issue
+	UpdatedIssue     *db.Issue
+	QueuedTask       *db.AgentTaskQueue
+	CancelledTasks   []db.AgentTaskQueue
+}
+
+// executeApprovedAIAction runs the audited command while the approval update
+// transaction is still open. Realtime publication happens after commit so
+// clients and daemons never observe rolled-back work.
+func (h *Handler) executeApprovedAIAction(ctx context.Context, q *db.Queries, approval db.AiMeApproval, workspaceID, userID pgtype.UUID, payload []byte) (approvedAIActionExecution, error) {
+	switch approval.ActionType {
+	case "no_action":
+		return approvedAIActionExecution{Status: "skipped"}, nil
+	case "draft_reply":
+		return approvedAIActionExecution{Status: "succeeded"}, nil
+	case "send_external_message":
+		return h.executeApprovalSendExternalMessage(ctx, approval, payload)
+	case "post_internal_comment":
+		return h.executeApprovalComment(ctx, q, approval, workspaceID, userID, payload)
+	case "assign_worker":
+		return h.executeApprovalAssignWorker(ctx, q, approval, workspaceID, userID, payload)
+	default:
+		return approvedAIActionExecution{}, errors.New("action_type is not executable in v0.1")
+	}
+}
+
+func (h *Handler) executeApprovalSendExternalMessage(ctx context.Context, approval db.AiMeApproval, payload []byte) (approvedAIActionExecution, error) {
+	channel := strings.ToLower(firstNonEmpty(
+		approvalPayloadText(payload, "channel", "provider"),
+		approval.SourceType,
+	))
+	if channel != "feishu" {
+		return approvedAIActionExecution{}, errors.New("only feishu external messages are supported")
+	}
+	messageID := firstNonEmpty(
+		approvalPayloadText(payload, "message_id", "feishu_message_id", "source_message_id"),
+		approval.SourceRefID.String,
+	)
+	if messageID == "" {
+		return approvedAIActionExecution{}, errors.New("message_id is required for send_external_message")
+	}
+	content := approvalPayloadText(payload, "text", "content", "reply_text", "reply_draft", "draft", "body")
+	if content == "" {
+		return approvedAIActionExecution{}, errors.New("text is required for send_external_message")
+	}
+	if h.Feishu == nil || !h.Feishu.Enabled() {
+		return approvedAIActionExecution{}, errors.New("feishu client is not configured")
+	}
+	if _, err := h.Feishu.ReplyText(ctx, messageID, content); err != nil {
+		return approvedAIActionExecution{}, err
+	}
+	return approvedAIActionExecution{Status: "succeeded"}, nil
+}
+
+func (h *Handler) executeApprovalComment(ctx context.Context, q *db.Queries, approval db.AiMeApproval, workspaceID, userID pgtype.UUID, payload []byte) (approvedAIActionExecution, error) {
+	issueID := approval.IssueID
+	if !issueID.Valid {
+		if parsed, ok := approvalPayloadUUID(payload, "issue_id", "target_issue_id"); ok {
+			issueID = parsed
+		}
+	}
+	if !issueID.Valid {
+		return approvedAIActionExecution{}, errors.New("issue_id is required for post_internal_comment")
+	}
+	issue, err := q.GetIssueInWorkspace(ctx, db.GetIssueInWorkspaceParams{ID: issueID, WorkspaceID: workspaceID})
+	if err != nil {
+		return approvedAIActionExecution{}, errors.New("issue not found")
+	}
+	content := approvalPayloadText(payload, "content", "comment", "body", "reply_draft", "draft")
+	if content == "" {
+		content = strings.TrimSpace(approval.ActionDescription)
+	}
+	if content == "" {
+		return approvedAIActionExecution{}, errors.New("comment content is required")
+	}
+	comment, err := q.CreateComment(ctx, db.CreateCommentParams{
+		IssueID:     issue.ID,
+		WorkspaceID: issue.WorkspaceID,
+		AuthorType:  "member",
+		AuthorID:    userID,
+		Content:     content,
+		Type:        "comment",
+	})
+	if err != nil {
+		return approvedAIActionExecution{}, errors.New("failed to create comment")
+	}
+	return approvedAIActionExecution{Status: "succeeded", CreatedCommentID: comment.ID}, nil
+}
+
+func (h *Handler) executeApprovalAssignWorker(ctx context.Context, q *db.Queries, approval db.AiMeApproval, workspaceID, userID pgtype.UUID, payload []byte) (approvedAIActionExecution, error) {
+	issueID := approval.IssueID
+	if !issueID.Valid {
+		if parsed, ok := approvalPayloadUUID(payload, "issue_id", "target_issue_id"); ok {
+			issueID = parsed
+		}
+	}
+	if !issueID.Valid {
+		return approvedAIActionExecution{}, errors.New("issue_id is required for assign_worker")
+	}
+
+	previousIssue, err := q.GetIssueInWorkspace(ctx, db.GetIssueInWorkspaceParams{ID: issueID, WorkspaceID: workspaceID})
+	if err != nil {
+		return approvedAIActionExecution{}, errors.New("issue not found")
+	}
+	if previousIssue.Status == "done" || previousIssue.Status == "cancelled" {
+		return approvedAIActionExecution{}, errors.New("cannot assign a closed issue")
+	}
+
+	agent, err := h.resolveApprovalTargetAgent(ctx, q, workspaceID, userID, payload)
+	if err != nil {
+		return approvedAIActionExecution{}, err
+	}
+	if agent.ArchivedAt.Valid {
+		return approvedAIActionExecution{}, errors.New("cannot assign to archived agent")
+	}
+	if !agent.RuntimeID.Valid {
+		return approvedAIActionExecution{}, errors.New("agent has no runtime")
+	}
+
+	cancelled, err := q.CancelAgentTasksByIssue(ctx, previousIssue.ID)
+	if err != nil {
+		return approvedAIActionExecution{}, errors.New("failed to cancel existing agent tasks")
+	}
+
+	updatedIssue, err := q.UpdateIssue(ctx, db.UpdateIssueParams{
+		ID:            previousIssue.ID,
+		AssigneeType:  pgtype.Text{String: "agent", Valid: true},
+		AssigneeID:    agent.ID,
+		DueDate:       previousIssue.DueDate,
+		ParentIssueID: previousIssue.ParentIssueID,
+		ProjectID:     previousIssue.ProjectID,
+	})
+	if err != nil {
+		return approvedAIActionExecution{}, errors.New("failed to assign issue to agent")
+	}
+
+	if err := h.recordApprovalAssigneeChangedActivity(ctx, q, approval, previousIssue, updatedIssue, userID); err != nil {
+		return approvedAIActionExecution{}, err
+	}
+
+	task, err := q.CreateAgentTask(ctx, db.CreateAgentTaskParams{
+		AgentID:   agent.ID,
+		RuntimeID: agent.RuntimeID,
+		IssueID:   updatedIssue.ID,
+		Priority:  approvalPriorityToInt(firstNonEmpty(approvalPayloadText(payload, "priority"), updatedIssue.Priority)),
+		TriggerSummary: pgtype.Text{
+			String: firstNonEmpty(approvalPayloadText(payload, "summary", "instruction"), approval.ActionDescription, approval.Summary),
+			Valid:  true,
+		},
+	})
+	if err != nil {
+		return approvedAIActionExecution{}, errors.New("failed to create agent task")
+	}
+
+	return approvedAIActionExecution{
+		Status:         "succeeded",
+		CreatedTaskID:  task.ID,
+		PreviousIssue:  previousIssue,
+		UpdatedIssue:   &updatedIssue,
+		QueuedTask:     &task,
+		CancelledTasks: cancelled,
+	}, nil
+}
+
+// resolveApprovalTargetAgent accepts either the stable agent UUID preferred by
+// AI-Me or an exact name fallback for manually edited approvals.
+func (h *Handler) resolveApprovalTargetAgent(ctx context.Context, q *db.Queries, workspaceID, userID pgtype.UUID, payload []byte) (db.Agent, error) {
+	targetIDText := approvalPayloadText(payload, "target_agent_id", "agent_id", "assignee_id", "worker_id")
+	if targetIDText != "" {
+		targetID, err := parseUUIDLoose(targetIDText)
+		if err != nil {
+			return db.Agent{}, errors.New("target_agent_id must be a valid UUID")
+		}
+		agent, err := q.GetAgentInWorkspace(ctx, db.GetAgentInWorkspaceParams{ID: targetID, WorkspaceID: workspaceID})
+		if err != nil {
+			return db.Agent{}, errors.New("target agent not found in workspace")
+		}
+		if err := h.ensureApprovalAgentAssignable(ctx, agent, workspaceID, userID); err != nil {
+			return db.Agent{}, err
+		}
+		return agent, nil
+	}
+
+	targetName := approvalPayloadText(payload, "target_agent_name", "agent_name", "worker_name")
+	if targetName == "" {
+		return db.Agent{}, errors.New("target_agent_id is required for assign_worker")
+	}
+	agents, err := q.ListAgents(ctx, workspaceID)
+	if err != nil {
+		return db.Agent{}, errors.New("failed to list agents")
+	}
+	for _, agent := range agents {
+		if strings.EqualFold(strings.TrimSpace(agent.Name), targetName) {
+			if err := h.ensureApprovalAgentAssignable(ctx, agent, workspaceID, userID); err != nil {
+				return db.Agent{}, err
+			}
+			return agent, nil
+		}
+	}
+	return db.Agent{}, errors.New("target agent not found in workspace")
+}
+
+// ensureApprovalAgentAssignable mirrors the issue update permission check so
+// approving an AI-Me command cannot bypass private-agent ownership rules.
+func (h *Handler) ensureApprovalAgentAssignable(ctx context.Context, agent db.Agent, workspaceID, userID pgtype.UUID) error {
+	if agent.ArchivedAt.Valid {
+		return errors.New("cannot assign to archived agent")
+	}
+	if agent.Visibility != "private" || agent.OwnerID == userID {
+		return nil
+	}
+	member, err := h.getWorkspaceMember(ctx, uuidToString(userID), uuidToString(workspaceID))
+	if err != nil || !roleAllowed(member.Role, "owner", "admin") {
+		return errors.New("cannot assign to private agent")
+	}
+	return nil
+}
+
+// recordApprovalAssigneeChangedActivity feeds the same frequency signal used
+// by manual assignment suggestions.
+func (h *Handler) recordApprovalAssigneeChangedActivity(ctx context.Context, q *db.Queries, approval db.AiMeApproval, previousIssue, updatedIssue db.Issue, actorID pgtype.UUID) error {
+	details := map[string]any{
+		"source":      "ai_me_approval",
+		"approval_id": uuidToString(approval.ID),
+		"from_type":   textToPtr(previousIssue.AssigneeType),
+		"from_id":     uuidToPtr(previousIssue.AssigneeID),
+		"to_type":     textToPtr(updatedIssue.AssigneeType),
+		"to_id":       uuidToPtr(updatedIssue.AssigneeID),
+	}
+	_, err := q.CreateActivity(ctx, db.CreateActivityParams{
+		WorkspaceID: approval.WorkspaceID,
+		IssueID:     updatedIssue.ID,
+		ActorType:   pgtype.Text{String: "member", Valid: true},
+		ActorID:     actorID,
+		Action:      "assignee_changed",
+		Details:     jsonBytesOrObject(details),
+	})
+	if err != nil {
+		return errors.New("failed to record assignee change")
+	}
+	return nil
+}
+
+func approvalPriorityToInt(priority string) int32 {
+	switch strings.TrimSpace(priority) {
+	case "urgent":
+		return 4
+	case "high":
+		return 3
+	case "medium":
+		return 2
+	case "low":
+		return 1
+	default:
+		return 0
+	}
+}
+
+func (h *Handler) publishApprovalIssueUpdated(ctx context.Context, issue db.Issue, previousIssue db.Issue, workspaceID, userID string) {
+	prefix := h.getIssuePrefix(ctx, issue.WorkspaceID)
+	resp := issueToResponse(issue, prefix)
+	prevDueDate := timestampToPtr(previousIssue.DueDate)
+	h.publish(protocol.EventIssueUpdated, workspaceID, "member", userID, map[string]any{
+		"issue":               resp,
+		"assignee_changed":    true,
+		"status_changed":      false,
+		"priority_changed":    false,
+		"due_date_changed":    false,
+		"description_changed": false,
+		"title_changed":       false,
+		"prev_title":          previousIssue.Title,
+		"prev_assignee_type":  textToPtr(previousIssue.AssigneeType),
+		"prev_assignee_id":    uuidToPtr(previousIssue.AssigneeID),
+		"prev_status":         previousIssue.Status,
+		"prev_priority":       previousIssue.Priority,
+		"prev_due_date":       prevDueDate,
+		"prev_description":    textToPtr(previousIssue.Description),
+		"creator_type":        previousIssue.CreatorType,
+		"creator_id":          uuidToString(previousIssue.CreatorID),
+	})
+}
+
+// publishApprovalTaskQueued mirrors TaskService.EnqueueTaskForIssue after the
+// approval transaction has committed.
+func (h *Handler) publishApprovalTaskQueued(ctx context.Context, task db.AgentTaskQueue, workspaceID string) {
+	h.publish(protocol.EventTaskQueued, workspaceID, "system", "", map[string]any{
+		"task_id":  uuidToString(task.ID),
+		"agent_id": uuidToString(task.AgentID),
+		"issue_id": uuidToString(task.IssueID),
+		"status":   task.Status,
+	})
+	if h.TaskService != nil {
+		h.TaskService.NotifyTaskEnqueued(ctx, task)
+	}
+}
+
+func (h *Handler) loadAIApproval(w http.ResponseWriter, r *http.Request) (db.AiMeApproval, bool) {
+	workspaceID := parseUUID(h.resolveWorkspaceID(r))
+	approvalID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "id"), "approval id")
+	if !ok {
+		return db.AiMeApproval{}, false
+	}
+	approval, err := h.Queries.GetAIApprovalInWorkspace(r.Context(), db.GetAIApprovalInWorkspaceParams{
+		ID: approvalID, WorkspaceID: workspaceID,
+	})
+	if err != nil {
+		writeError(w, http.StatusNotFound, "approval not found")
+		return db.AiMeApproval{}, false
+	}
+	return approval, true
+}
+
+func (h *Handler) aiApprovalDetailResponse(w http.ResponseWriter, r *http.Request, approval db.AiMeApproval) (AIApprovalResponse, bool) {
+	evidence, err := h.Queries.ListAIApprovalEvidence(r.Context(), db.ListAIApprovalEvidenceParams{
+		ApprovalID: approval.ID, WorkspaceID: approval.WorkspaceID,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list approval evidence")
+		return AIApprovalResponse{}, false
+	}
+	events, err := h.Queries.ListAIApprovalEvents(r.Context(), db.ListAIApprovalEventsParams{
+		ApprovalID: approval.ID, WorkspaceID: approval.WorkspaceID,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list approval events")
+		return AIApprovalResponse{}, false
+	}
+	resp := aiApprovalToResponse(approval)
+	resp.Evidence = make([]AIApprovalEvidenceResponse, len(evidence))
+	for i, item := range evidence {
+		resp.Evidence[i] = aiApprovalEvidenceToResponse(item)
+	}
+	resp.Events = make([]AIApprovalEventResponse, len(events))
+	for i, item := range events {
+		resp.Events[i] = aiApprovalEventToResponse(item)
+	}
+	return resp, true
+}
+
+func createAIApprovalEvidence(ctx context.Context, q *db.Queries, workspaceID, approvalID pgtype.UUID, req CreateAIApprovalEvidenceRequest) error {
+	evidenceType := normalizeOptionalEnum(req.EvidenceType, "user_input")
+	if !approvalEvidenceTypes[evidenceType] {
+		return errors.New("invalid evidence_type")
+	}
+	label := strings.TrimSpace(req.Label)
+	if label == "" {
+		return errors.New("evidence label is required")
+	}
+	_, err := q.CreateAIApprovalEvidence(ctx, db.CreateAIApprovalEvidenceParams{
+		ApprovalID:   approvalID,
+		WorkspaceID:  workspaceID,
+		EvidenceType: evidenceType,
+		Label:        label,
+		RefID:        optionalTextFromString(req.RefID),
+		SourceUrl:    optionalTextFromString(req.SourceURL),
+		Quote:        strings.TrimSpace(req.Quote),
+		Metadata:     jsonBytesOrObject(req.Metadata),
+	})
+	return err
+}
+
+func createAIApprovalEvent(ctx context.Context, q *db.Queries, approval db.AiMeApproval, actorType string, actorID pgtype.UUID, eventType, fromStatus, toStatus string, payload any) (db.AiMeApprovalEvent, error) {
+	return q.CreateAIApprovalEvent(ctx, db.CreateAIApprovalEventParams{
+		ApprovalID:  approval.ID,
+		WorkspaceID: approval.WorkspaceID,
+		ActorType:   actorType,
+		ActorID:     actorID,
+		EventType:   eventType,
+		FromStatus:  optionalTextFromString(fromStatus),
+		ToStatus:    optionalTextFromString(toStatus),
+		Payload:     jsonBytesOrObject(payload),
+	})
+}
+
+func recordAIApprovalActivity(ctx context.Context, q *db.Queries, approval db.AiMeApproval, actorID pgtype.UUID, action string, payload any) error {
+	if !approval.IssueID.Valid {
+		return nil
+	}
+	details := map[string]any{
+		"approval_id": uuidToString(approval.ID),
+		"action_type": approval.ActionType,
+		"status":      approval.Status,
+		"payload":     payload,
+	}
+	_, err := q.CreateActivity(ctx, db.CreateActivityParams{
+		WorkspaceID: approval.WorkspaceID,
+		IssueID:     approval.IssueID,
+		ActorType:   pgtype.Text{String: "member", Valid: true},
+		ActorID:     actorID,
+		Action:      action,
+		Details:     jsonBytesOrObject(details),
+	})
+	return err
+}
+
+func rawJSONFromRequest(w http.ResponseWriter, value *json.RawMessage, fieldName string) ([]byte, bool) {
+	if value == nil {
+		return nil, true
+	}
+	raw := []byte(*value)
+	if len(raw) == 0 || !json.Valid(raw) {
+		writeError(w, http.StatusBadRequest, "invalid "+fieldName)
+		return nil, false
+	}
+	return raw, true
+}
+
+func approvalEffectivePayload(approval db.AiMeApproval, override []byte) []byte {
+	if len(override) > 0 {
+		return override
+	}
+	if len(approval.FinalPayload) > 0 {
+		return approval.FinalPayload
+	}
+	return approval.OriginalPayload
+}
+
+func approvalPayloadText(payload []byte, keys ...string) string {
+	var obj map[string]any
+	if err := json.Unmarshal(payload, &obj); err != nil {
+		return ""
+	}
+	for _, key := range keys {
+		if value, ok := obj[key].(string); ok {
+			if trimmed := strings.TrimSpace(value); trimmed != "" {
+				return trimmed
+			}
+		}
+	}
+	return ""
+}
+
+func approvalPayloadUUID(payload []byte, keys ...string) (pgtype.UUID, bool) {
+	value := approvalPayloadText(payload, keys...)
+	if value == "" {
+		return pgtype.UUID{}, false
+	}
+	parsed, err := parseUUIDLoose(value)
+	if err != nil {
+		return pgtype.UUID{}, false
+	}
+	return parsed, true
+}

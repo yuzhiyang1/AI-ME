@@ -8,6 +8,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
@@ -48,6 +49,12 @@ type Config struct {
 	AllowSignup         bool
 	AllowedEmails       []string
 	AllowedEmailDomains []string
+	AIModelProvider     string
+	AIModelBaseURL      string
+	AIModelAPIKey       string
+	AIModelModel        string
+	AIModelTimeout      time.Duration
+	AIModelTemperature  float64
 	// UseDailyRollupForRuntimeUsage routes ListRuntimeUsage to the
 	// task_usage_daily rollup table when true. Default false: the read
 	// path stays on the raw task_usage stream so rollup-related issues
@@ -82,6 +89,7 @@ type Handler struct {
 	Analytics             analytics.Client
 	PATCache              *auth.PATCache
 	DaemonTokenCache      *auth.DaemonTokenCache
+	AIModel               AIModelClient
 	cfg                   Config
 }
 
@@ -121,6 +129,7 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 		Storage:               store,
 		CFSigner:              cfSigner,
 		Analytics:             analyticsClient,
+		AIModel:               NewAIModelClient(cfg),
 		cfg:                   cfg,
 	}
 }

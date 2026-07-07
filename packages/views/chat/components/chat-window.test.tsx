@@ -143,7 +143,10 @@ vi.mock("@multica/core/chat/mutations", () => ({
 
 vi.mock("@multica/core/chat", () => ({
   DRAFT_NEW_SESSION: "draft:new",
-  useChatStore: (selector: (state: typeof mockChatStore) => unknown) => selector(mockChatStore),
+  useChatStore: Object.assign(
+    (selector: (state: typeof mockChatStore) => unknown) => selector(mockChatStore),
+    { getState: () => mockChatStore },
+  ),
 }));
 
 vi.mock("@multica/core/logger", () => ({

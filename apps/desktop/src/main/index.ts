@@ -1,4 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, nativeImage, Notification } from "electron";
+import type { OpenDialogOptions } from "electron";
 import { homedir } from "os";
 import { join } from "path";
 import { electronApp, optimizer, is } from "@electron-toolkit/utils";
@@ -269,9 +270,10 @@ if (!gotTheLock) {
     });
 
     ipcMain.handle("dialog:select-directory", async () => {
-      const result = await dialog.showOpenDialog(mainWindow ?? undefined, {
-        properties: ["openDirectory"],
-      });
+      const options: OpenDialogOptions = { properties: ["openDirectory"] };
+      const result = mainWindow
+        ? await dialog.showOpenDialog(mainWindow, options)
+        : await dialog.showOpenDialog(options);
       if (result.canceled || result.filePaths.length === 0) return null;
       return result.filePaths[0] ?? null;
     });

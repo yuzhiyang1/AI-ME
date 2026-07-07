@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 // Wrapper around `electron-builder` that keeps the Desktop version in
 // lockstep with the CLI. Both are derived from `git describe --tags
 // --always --dirty` — the same source GoReleaser reads for the CLI
