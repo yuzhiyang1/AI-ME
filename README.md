@@ -1,107 +1,107 @@
 # AI-ME
 
-AI-ME is an early-stage personal work cockpit for coordinating AI employees, approvals, exceptions, memory, and external work signals from one place.
+AI-ME 是一个仍在开发中的个人工作驾驶舱，用来统一调度 AI 员工、处理例外消息、审批高风险动作、沉淀记忆与知识。
 
-> Development status: this project is still under active development. APIs, database tables, UI copy, and product flows are expected to change quickly.
+> 当前状态：项目仍处于开发阶段。API、数据库表、UI 文案和产品流程都可能快速调整，请不要按生产可用版本理解。
 
-AI-ME is being built on top of the existing Multica agent-management codebase. The current direction is simple: AI-ME acts as the owner-facing brain and operating desk, while tools like Codex and Claude Code remain executable AI employees routed through the existing agent runtime.
+AI-ME 基于现有 Multica Agent 管理底座继续演进。当前设计方向是：AI-ME 自己直连 LLM API 作为“大脑”和工作中枢；Codex、Claude Code 等工具继续通过现有 Agent Runtime 作为可调度的“AI 员工”执行任务。
 
-## What AI-ME Is
+## AI-ME 是什么
 
-AI-ME is not just another chat window. It is intended to become a work operating layer that can:
+AI-ME 不是一个普通聊天窗口，而是一个面向个人工作的代理层。它希望逐步做到：
 
-- read events from work systems such as Feishu, GitHub, issues, and future mail integrations;
-- reason with an LLM brain through an OpenAI-compatible API such as DeepSeek;
-- turn risky or outward-facing actions into approval items before doing anything;
-- dispatch approved work to AI employees such as Codex or Claude Code;
-- keep a governed memory and knowledge base for project facts, preferences, rules, and evidence.
+- 接收来自飞书、GitHub、Issue、后续邮件等系统的工作信号；
+- 通过兼容 OpenAI Chat Completions 的 LLM API 做判断，例如 DeepSeek；
+- 对高风险或对外动作生成待审批事项，而不是直接执行；
+- 在用户批准后，把任务分配给 Codex、Claude Code 等 AI 员工；
+- 用可治理的记忆与知识保存项目事实、个人偏好、流程规则和证据来源。
 
-The v0.1 product focus is the first practical loop:
+v0.1 阶段优先打通这个最小闭环：
 
 ```text
-Work signal
--> AI-ME analysis
--> approval gate
--> issue / worker dispatch / reply draft
--> execution result and audit trail
--> memory and knowledge reuse
+工作信号
+-> AI-ME 分析
+-> 审批门
+-> 创建任务 / 分配员工 / 生成回复草稿
+-> 执行结果与审计记录
+-> 记忆与知识复用
 ```
 
-## Current Scope
+## 当前范围
 
-The project currently includes or is actively implementing:
+当前项目已经包含或正在实现：
 
-- **Work cockpit**: a dashboard-style view for pending decisions, AI employee work, risk, and recent activity.
-- **AI employees**: Codex, Claude Code, and other agent runtimes continue to behave as assignable workers.
-- **Exception inbox**: external or internal signals can be triaged into AI-ME recommendations and approval items.
-- **Approval center**: risky actions are persisted, reviewed, approved, rejected, or taken over by the user.
-- **Memory and knowledge**: governed context for user preferences, project facts, rules, evidence, and candidate memories.
-- **LLM brain integration**: AI-ME can be configured to call an OpenAI-compatible LLM API. Local development currently targets DeepSeek because it is cost-effective.
-- **External action groundwork**: Feishu webhook and approval-backed external message sending are being connected incrementally.
+- **工作驾驶舱**：集中查看需要我决策、AI 员工运行、风险和最近活动。
+- **AI 员工**：Codex、Claude Code 等 Agent Runtime 继续作为可分配员工。
+- **例外收件箱**：外部或内部信号进入 AI-ME 分析后，可转成建议动作和审批事项。
+- **审批中心**：高风险动作会持久化，用户可以批准、驳回、接管或继续观察。
+- **记忆与知识**：管理用户偏好、项目事实、流程规则、证据来源和候选记忆。
+- **LLM 大脑接入**：AI-ME 可配置 OpenAI-compatible LLM API；本地开发优先接 DeepSeek，主要因为成本更可控。
+- **外部动作基础**：飞书 webhook 和审批后的外部回复链路正在逐步接入。
 
-## UI Direction
+## UI 方向
 
-The images below are AI-ME UI concept drafts generated with GPT. They are product direction references, not final production screenshots.
+下面几张是用 GPT 生成的 AI-ME UI 概念稿，只作为产品方向参考，不代表最终生产界面。
 
 <table>
   <tr>
-    <td><img src="docs/assets/ai-me-ui/01-dashboard.png" alt="AI-ME work cockpit concept" width="100%"></td>
-    <td><img src="docs/assets/ai-me-ui/03-exceptions.png" alt="AI-ME exception inbox concept" width="100%"></td>
-    <td><img src="docs/assets/ai-me-ui/04-approvals.png" alt="AI-ME approval center concept" width="100%"></td>
+    <td><img src="docs/assets/ai-me-ui/01-dashboard.png" alt="AI-ME 工作驾驶舱概念稿" width="100%"></td>
+    <td><img src="docs/assets/ai-me-ui/03-exceptions.png" alt="AI-ME 例外收件箱概念稿" width="100%"></td>
+    <td><img src="docs/assets/ai-me-ui/04-approvals.png" alt="AI-ME 审批中心概念稿" width="100%"></td>
   </tr>
   <tr>
-    <td><img src="docs/assets/ai-me-ui/06-memory.png" alt="AI-ME memory and knowledge concept" width="100%"></td>
-    <td><img src="docs/assets/ai-me-ui/07-agents.png" alt="AI-ME AI employees concept" width="100%"></td>
-    <td><img src="docs/assets/ai-me-ui/08-tools-permissions.png" alt="AI-ME tools and permissions concept" width="100%"></td>
+    <td><img src="docs/assets/ai-me-ui/06-memory.png" alt="AI-ME 记忆与知识概念稿" width="100%"></td>
+    <td><img src="docs/assets/ai-me-ui/07-agents.png" alt="AI-ME AI 员工概念稿" width="100%"></td>
+    <td><img src="docs/assets/ai-me-ui/08-tools-permissions.png" alt="AI-ME 工具与权限概念稿" width="100%"></td>
   </tr>
 </table>
 
-More reference images are listed in [docs/ai-me-ui-reference.md](docs/ai-me-ui-reference.md).
+完整 UI 参考图见 [docs/ai-me-ui-reference.md](docs/ai-me-ui-reference.md)。
 
-## Architecture
+## 技术架构
 
-AI-ME currently uses the original Multica architecture while the product surface is being reshaped:
+AI-ME 当前仍复用原 Multica 的工程结构，产品层正在逐步改造成 AI-ME：
 
 ```text
-Next.js web app / Electron desktop
+Next.js Web / Electron Desktop
         |
-Shared views and core packages
+共享 views 与 core packages
         |
-Go backend API + WebSocket events
+Go 后端 API + WebSocket 事件
         |
-PostgreSQL 17 with pgvector
+PostgreSQL 17 + pgvector
         |
-Local / cloud agent runtimes
+本地 / 云端 Agent Runtime
         |
-Codex, Claude Code, and other AI employee CLIs
+Codex、Claude Code 等 AI 员工 CLI
 ```
 
-Key implementation boundaries:
+主要目录：
 
-- `server/`: Go backend, handlers, migrations, sqlc queries, realtime events.
-- `apps/web/`: Next.js web app.
-- `apps/desktop/`: Electron desktop shell.
-- `packages/core/`: headless API client, schemas, query hooks, types, and shared state.
-- `packages/views/`: shared product pages and components.
-- `packages/ui/`: reusable UI primitives and design tokens.
-- `docs/`: product notes, PRDs, and UI references.
+- `server/`：Go 后端、handler、migration、sqlc query、实时事件。
+- `apps/web/`：Next.js Web 应用。
+- `apps/desktop/`：Electron 桌面端。
+- `packages/core/`：无 UI 的 API client、schema、query hooks、类型和共享状态。
+- `packages/views/`：共享业务页面和组件。
+- `packages/ui/`：通用 UI 组件和设计 token。
+- `docs/`：产品说明、PRD 和 UI 参考资料。
 
-## Development
+## 本地开发
 
-Prerequisites:
+环境要求：
 
 - Node.js 22+
 - pnpm 10.28+
 - Go 1.26+
-- Docker, for local PostgreSQL
+- Docker，用于本地 PostgreSQL
 
-Start the local stack:
+启动本地开发环境：
 
 ```bash
 make dev
 ```
 
-Useful checks:
+常用检查：
 
 ```bash
 pnpm typecheck
@@ -110,26 +110,26 @@ make test
 make check
 ```
 
-## Configuration
+## 配置与敏感信息
 
-Use `.env.example` as the template for local configuration.
+本地配置从 `.env.example` 复制。
 
-Sensitive values must stay local:
+下面这些值只应该保留在本地或部署环境里，不要提交到仓库：
 
-- LLM API keys, such as `AI_ME_LLM_API_KEY` or `DEEPSEEK_API_KEY`
-- Feishu app secrets and webhook tokens
-- OAuth secrets
-- database passwords for non-local deployments
+- LLM API key，例如 `AI_ME_LLM_API_KEY` 或 `DEEPSEEK_API_KEY`
+- 飞书 app secret、webhook token
+- OAuth secret
+- 非本地环境的数据库密码
 
-Do not commit a real `.env` file. The repository only keeps placeholders and public defaults.
+仓库只保留空占位和公开默认值，真实 `.env` 文件不应提交。
 
-## Project Notes
+## 项目备注
 
-- This repository is currently a development-stage AI-ME fork built from the Multica foundation.
-- Some internal package names, CLI names, and docs may still reference Multica while the product is being renamed.
-- The project is not production-ready yet.
-- The approval-first safety model is intentional: AI-ME should not send external messages, modify important data, merge code, or make commitments without an explicit approval path.
+- 这个仓库目前是从 Multica 底座演进出来的 AI-ME 开发版本。
+- 部分内部 package name、CLI 名称和历史文档仍可能出现 Multica，这是迁移过程中的遗留命名。
+- 项目尚未生产可用。
+- “先审批，再执行”是 AI-ME 的核心安全边界：对外发送、重要数据修改、代码合并、生产动作和用户承诺都不应绕过审批链路。
 
-## License
+## 开源协议
 
-See [LICENSE](LICENSE).
+见 [LICENSE](LICENSE)。
