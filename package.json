@@ -12,6 +12,9 @@
     "typecheck": "turbo typecheck",
     "test": "turbo test",
     "lint": "turbo lint",
+    "aime:seed": "node scripts/aime-demo.mjs seed",
+    "aime:smoke": "node scripts/aime-demo.mjs smoke",
+    "aime:demo": "node scripts/aime-demo.mjs seed-and-smoke",
     "clean": "turbo clean && rm -rf node_modules",
     "ui:add": "cd packages/ui && npx shadcn@latest add",
     "generate:reserved-slugs": "node scripts/generate-reserved-slugs.mjs"

@@ -110,6 +110,18 @@ make test
 make check
 ```
 
+## AI-ME 本地演示
+
+如果你想快速看到 AI-ME 驾驶舱、审批中心、例外收件箱、记忆与 AI 员工调度的真实数据，可以先写入一组本地演示数据：
+
+```bash
+pnpm aime:demo
+```
+
+这个命令会创建或刷新 `ai-me-demo` 工作区，并执行烟测校验。脚本默认只允许写入本地 PostgreSQL，不会上传或写入任何 LLM API key。
+
+更多说明见 [docs/ai-me-demo.md](docs/ai-me-demo.md)。
+
 ## 配置与敏感信息
 
 本地配置从 `.env.example` 复制。
