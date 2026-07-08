@@ -51,6 +51,7 @@ import { ResolvedThreadBar } from "./resolved-thread-bar";
 import { collectThreadReplies } from "./thread-utils";
 import { AgentLiveCard } from "./agent-live-card";
 import { ExecutionLogSection } from "./execution-log-section";
+import { AIMeWorkTrace } from "./ai-me-work-trace";
 import { useQuery } from "@tanstack/react-query";
 import { useAuthStore } from "@multica/core/auth";
 import { useThinkAIMe } from "@multica/core/aime";
@@ -622,18 +623,23 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
 
   // Token usage
   const { data: usage } = useQuery(issueUsageOptions(id));
-  const { data: aiAssignmentApprovals } = useQuery({
+  const aiIssueApprovalsQuery = useQuery({
     ...approvalListOptions(wsId, {
       issue_id: id,
-      action_type: "assign_worker",
-      limit: 5,
+      limit: 20,
     }),
     enabled: !!issue,
   });
+  const aiIssueApprovals = aiIssueApprovalsQuery.data?.approvals ?? [];
   const aiAssignmentApproval = useMemo(() => {
-    const approvals = aiAssignmentApprovals?.approvals ?? [];
-    return approvals.find((approval) => !!approval.created_task_id) ?? approvals[0] ?? null;
-  }, [aiAssignmentApprovals?.approvals]);
+    return (
+      aiIssueApprovals.find(
+        (approval) => approval.action_type === "assign_worker" && !!approval.created_task_id,
+      ) ??
+      aiIssueApprovals.find((approval) => approval.action_type === "assign_worker") ??
+      null
+    );
+  }, [aiIssueApprovals]);
 
   // Sub-issue queries
   const parentIssueId = issue?.parent_issue_id;
@@ -872,6 +878,14 @@ export function IssueDetail({ issueId, onDelete, onDone, defaultSidebarOpen = tr
       {/* Execution log — active runs + collapsed past runs. Self-contained;
           owns its own collapse state and WS subscriptions. Hides itself
           when there are no runs to show. */}
+      <AIMeWorkTrace
+        issueId={id}
+        approvals={aiIssueApprovals}
+        approvalsLoading={aiIssueApprovalsQuery.isLoading}
+        approvalsError={aiIssueApprovalsQuery.error}
+        timeline={timeline}
+        onOpenApproval={(approvalId) => router.push(paths.approvals(approvalId))}
+      />
       <AIMeAssignmentStatus issueId={id} approval={aiAssignmentApproval} />
       <ExecutionLogSection issueId={id} />
 

@@ -211,6 +211,7 @@ const mockApiObj = vi.hoisted(() => ({
   removeCommentReaction: vi.fn(),
   listMembers: vi.fn().mockResolvedValue([{ user_id: "user-1", name: "Test User", email: "test@test.com", role: "admin" }]),
   listAgents: vi.fn().mockResolvedValue([]),
+  listAIApprovals: vi.fn().mockResolvedValue({ approvals: [], total: 0 }),
 }));
 
 vi.mock("@multica/core/api", () => ({
@@ -406,6 +407,7 @@ describe("IssueDetail (shared)", () => {
       { user_id: "user-1", name: "Test User", email: "test@test.com", role: "admin" },
     ]);
     mockApiObj.listAgents.mockResolvedValue([]);
+    mockApiObj.listAIApprovals.mockResolvedValue({ approvals: [], total: 0 });
     mockThinkAIMe.isPending = false;
     mockThinkAIMe.mutateAsync.mockResolvedValue({
       approval_id: "approval-1",

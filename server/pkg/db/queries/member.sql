@@ -11,6 +11,12 @@ WHERE id = $1;
 SELECT * FROM member
 WHERE user_id = $1 AND workspace_id = $2;
 
+-- name: GetWorkspaceOwnerMember :one
+SELECT * FROM member
+WHERE workspace_id = $1 AND role = 'owner'
+ORDER BY created_at ASC
+LIMIT 1;
+
 -- name: CreateMember :one
 INSERT INTO member (workspace_id, user_id, role)
 VALUES ($1, $2, $3)

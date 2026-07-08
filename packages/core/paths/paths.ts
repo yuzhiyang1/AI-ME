@@ -40,8 +40,9 @@ function workspaceScoped(slug: string) {
     approvals: (approvalId = "") =>
       approvalId ? `${ws}/approvals?approval=${encode(approvalId)}` : `${ws}/approvals`,
     agents: () => `${ws}/agents`,
+    tools: () => `${ws}/tools`,
     agentDetail: (id: string) => `${ws}/agents/${encode(id)}`,
-    inbox: (target?: InboxPathTarget) => buildInboxPath(`${ws}/inbox`, target),
+    inbox: (target: InboxPathTarget = {}) => buildInboxPath(`${ws}/inbox`, target),
     myIssues: () => `${ws}/my-issues`,
     runtimes: () => `${ws}/runtimes`,
     runtimeDetail: (id: string) => `${ws}/runtimes/${encode(id)}`,

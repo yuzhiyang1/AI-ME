@@ -1,0 +1,1 @@
+export { ToolsPermissionsPage } from "./components";

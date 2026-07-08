@@ -18,8 +18,9 @@ const CHAT_EXPANDED_KEY = "multica:chat:expanded";
 const FOCUS_MODE_KEY = "multica:chat:focusMode";
 /**
  * Open/closed preference, persisted globally (not per-workspace) — most users
- * have one habitual chat-panel preference across workspaces. Missing key =
- * new user (or cleared storage); default to OPEN so the chat is discoverable.
+ * have one habitual chat-panel preference across workspaces. Missing key means
+ * a new user or cleared storage; default to CLOSED so operational pages remain
+ * work-first and the chat window does not cover detail panels.
  * Once the user toggles even once, their explicit choice is respected on
  * every subsequent reload.
  */
@@ -125,10 +126,10 @@ export function createChatStore(options: ChatStoreOptions) {
   };
 
   // Resolve initial isOpen from storage. The three-state read (null /
-  // "true" / "false") is what enables the "new user → open" default while
-  // still honouring an explicit "I closed it" choice on every reload.
+  // "true" / "false") keeps new users work-first while still honouring an
+  // explicit "I opened it" or "I closed it" choice on every reload.
   const storedOpen = storage.getItem(OPEN_KEY);
-  const initialIsOpen = storedOpen === null ? true : storedOpen === "true";
+  const initialIsOpen = storedOpen === "true";
 
   const store = create<ChatState>((set, get) => ({
     isOpen: initialIsOpen,

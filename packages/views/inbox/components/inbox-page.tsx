@@ -883,6 +883,8 @@ function modeLabel(mode: string) {
   switch (mode) {
     case "llm":
       return "LLM";
+    case "disabled":
+      return "已关闭";
     case "fallback":
       return "兜底判断";
     case "provider_error":

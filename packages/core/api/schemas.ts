@@ -4,6 +4,7 @@ import type {
   AIApprovalStats,
   AIMeCockpitSummary,
   AIMeThinkResponse,
+  FeishuIntegrationStatus,
   KnowledgeDocument,
   ListAIApprovalsResponse,
   ListKnowledgeDocumentsResponse,
@@ -505,6 +506,42 @@ export const EMPTY_AI_APPROVAL_STATS: AIApprovalStats = {
   failed: 0,
 };
 
+export const FeishuIntegrationStatusSchema = z.object({
+  provider: z.string().default("feishu"),
+  event_mode: z.string().default("webhook"),
+  incoming_configured: z.boolean().default(false),
+  outgoing_configured: z.boolean().default(false),
+  webhook_configured: z.boolean().default(false),
+  websocket_configured: z.boolean().default(false),
+  workspace_configured: z.boolean().default(false),
+  workspace_matches: z.boolean().default(false),
+  owner_configured: z.boolean().default(false),
+  allowed_chat_configured: z.boolean().default(false),
+  group_message_policy: z.string().default("mention"),
+  callback_path: z.string().default("/api/integrations/feishu/webhook"),
+  required_events: z.array(z.string()).default([]),
+  required_scopes: z.array(z.string()).default([]),
+  warnings: z.array(z.string()).default([]),
+}).loose();
+
+export const EMPTY_FEISHU_INTEGRATION_STATUS: FeishuIntegrationStatus = {
+  provider: "feishu",
+  event_mode: "webhook",
+  incoming_configured: false,
+  outgoing_configured: false,
+  webhook_configured: false,
+  websocket_configured: false,
+  workspace_configured: false,
+  workspace_matches: false,
+  owner_configured: false,
+  allowed_chat_configured: false,
+  group_message_policy: "mention",
+  callback_path: "/api/integrations/feishu/webhook",
+  required_events: [],
+  required_scopes: [],
+  warnings: [],
+};
+
 export const AIMeCockpitSummarySchema = z.object({
   active_tasks: z.number().default(0),
   queued_tasks: z.number().default(0),
@@ -614,6 +651,20 @@ const AIMeContextSummarySchema = z.object({
   memories: z.array(AIMeMemoryContextSchema).nullish().transform((items) => items ?? []),
 }).loose();
 
+const AIMePolicyContextSchema = z.object({
+  enabled: z.boolean().default(true),
+  autonomy_level: z.string().default("balanced"),
+  approval_mode: z.string().default("risky"),
+  timezone: z.string().default("Asia/Shanghai"),
+  working_hours: z.object({
+    start: z.string().default("09:00"),
+    end: z.string().default("18:00"),
+  }).default({ start: "09:00", end: "18:00" }),
+  in_working_hours: z.boolean().default(true),
+  model_provider: z.string().default("deepseek"),
+  model_name: z.string().default("deepseek-chat"),
+}).loose();
+
 export const AIMeThinkResponseSchema = z.object({
   id: z.string(),
   mode: z.string(),
@@ -635,6 +686,16 @@ export const AIMeThinkResponseSchema = z.object({
     issues: [],
     agents: [],
     memories: [],
+  }),
+  policy: AIMePolicyContextSchema.default({
+    enabled: true,
+    autonomy_level: "balanced",
+    approval_mode: "risky",
+    timezone: "Asia/Shanghai",
+    working_hours: { start: "09:00", end: "18:00" },
+    in_working_hours: true,
+    model_provider: "deepseek",
+    model_name: "deepseek-chat",
   }),
   configuration_required: z.boolean().default(false),
   error: z.string().optional(),
@@ -662,6 +723,16 @@ export const EMPTY_AIME_THINK_RESPONSE: AIMeThinkResponse = {
     issues: [],
     agents: [],
     memories: [],
+  },
+  policy: {
+    enabled: true,
+    autonomy_level: "balanced",
+    approval_mode: "risky",
+    timezone: "Asia/Shanghai",
+    working_hours: { start: "09:00", end: "18:00" },
+    in_working_hours: true,
+    model_provider: "deepseek",
+    model_name: "deepseek-chat",
   },
   configuration_required: false,
   created_at: "",

@@ -14,6 +14,16 @@ WHERE id = $1;
 SELECT * FROM inbox_item
 WHERE id = $1 AND workspace_id = $2;
 
+-- name: FindInboxItemByExternalMessage :one
+SELECT * FROM inbox_item
+WHERE workspace_id = sqlc.arg('workspace_id')::uuid
+  AND recipient_type = sqlc.arg('recipient_type')::text
+  AND recipient_id = sqlc.arg('recipient_id')::uuid
+  AND details->>'source_type' = sqlc.arg('source_type')::text
+  AND details->>'message_id' = sqlc.arg('message_id')::text
+ORDER BY created_at DESC
+LIMIT 1;
+
 -- name: CreateInboxItem :one
 INSERT INTO inbox_item (
     workspace_id, recipient_type, recipient_id,

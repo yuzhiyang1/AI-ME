@@ -144,6 +144,9 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		AppSecret: os.Getenv("FEISHU_APP_SECRET"),
 		BaseURL:   os.Getenv("FEISHU_OPENAPI_BASE_URL"),
 	})
+	if handler.FeishuWebSocketIntakeEnabled() {
+		go h.StartFeishuWebSocketIntake(context.Background())
+	}
 	if opts.DaemonWakeup != nil {
 		h.TaskService.Wakeup = opts.DaemonWakeup
 	}
@@ -353,6 +356,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 			// AI-Me command center
 			r.Get("/api/ai-me/cockpit/summary", h.GetAIMeCockpitSummary)
 			r.Post("/api/ai-me/think", h.ThinkAIMe)
+			r.Get("/api/integrations/feishu/status", h.GetFeishuIntegrationStatus)
 			r.Route("/api/ai-me/approvals", func(r chi.Router) {
 				r.Get("/", h.ListAIApprovals)
 				r.Post("/", h.CreateAIApproval)

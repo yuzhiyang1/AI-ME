@@ -6,6 +6,7 @@ import {
   Monitor,
   BookOpenText,
   Settings,
+  Wrench,
   X,
   Plus,
   type LucideIcon,
@@ -40,6 +41,7 @@ const TAB_ICONS: Record<string, LucideIcon> = {
   Monitor,
   BookOpenText,
   Settings,
+  Wrench,
 };
 
 function SortableTabItem({ tab, isActive, isOnly }: { tab: Tab; isActive: boolean; isOnly: boolean }) {

@@ -24,6 +24,7 @@ import {
   BookOpenText,
   Settings,
   Building2,
+  Wrench,
   type LucideIcon,
 } from "lucide-react";
 import { Command as CommandPrimitive } from "cmdk";
@@ -103,6 +104,7 @@ type NavKey =
   | "memory"
   | "approvals"
   | "agents"
+  | "tools"
   | "runtimes"
   | "skills"
   | "settings";
@@ -141,6 +143,7 @@ export function SearchCommand() {
     { key: "memory", label: t(($) => $.pages.memory), icon: Brain, keywords: ["memory", "knowledge", "记忆", "知识"] },
     { key: "approvals", label: t(($) => $.pages.approvals), icon: ShieldCheck, keywords: ["approval", "approve", "risk", "审批", "批准", "风险"] },
     { key: "agents", label: t(($) => $.pages.agents), icon: Bot, keywords: ["agents", "bots", "ai"] },
+    { key: "tools", label: t(($) => $.pages.tools), icon: Wrench, keywords: ["tools", "permissions", "policy", "工具", "权限", "策略"] },
     { key: "runtimes", label: t(($) => $.pages.runtimes), icon: Monitor, keywords: ["runtimes", "environments"] },
     { key: "skills", label: t(($) => $.pages.skills), icon: BookOpenText, keywords: ["skills", "library"] },
     { key: "settings", label: t(($) => $.pages.settings), icon: Settings, keywords: ["settings", "config", "preferences", "设置"] },

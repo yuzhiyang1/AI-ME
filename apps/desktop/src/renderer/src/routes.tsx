@@ -20,6 +20,7 @@ import { SkillsPage } from "@multica/views/skills";
 import { AIMeDashboardPage } from "@multica/views/aime";
 import { ApprovalCenterPage } from "@multica/views/approvals";
 import { MemoryPage } from "@multica/views/memory";
+import { ToolsPermissionsPage } from "@multica/views/tools-permissions";
 import { DesktopRuntimesPage } from "./components/desktop-runtimes-page";
 import { AgentsPage } from "@multica/views/agents";
 import { InboxPage } from "@multica/views/inbox";
@@ -143,6 +144,7 @@ export const appRoutes: RouteObject[] = [
           },
           { path: "memory", element: <MemoryPage />, handle: { title: "Memory" } },
           { path: "approvals", element: <ApprovalCenterPage />, handle: { title: "Approvals" } },
+          { path: "tools", element: <ToolsPermissionsPage />, handle: { title: "Tools" } },
           { path: "skills", element: <SkillsPage />, handle: { title: "Skills" } },
           {
             path: "skills/:id",

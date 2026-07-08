@@ -100,6 +100,24 @@ export interface UpdateMemberRequest {
   role: MemberRole;
 }
 
+export interface FeishuIntegrationStatus {
+  provider: "feishu" | string;
+  event_mode: "webhook" | "websocket" | string;
+  incoming_configured: boolean;
+  outgoing_configured: boolean;
+  webhook_configured: boolean;
+  websocket_configured: boolean;
+  workspace_configured: boolean;
+  workspace_matches: boolean;
+  owner_configured: boolean;
+  allowed_chat_configured: boolean;
+  group_message_policy: string;
+  callback_path: string;
+  required_events: string[];
+  required_scopes: string[];
+  warnings: string[];
+}
+
 // Personal Access Tokens
 export interface PersonalAccessToken {
   id: string;

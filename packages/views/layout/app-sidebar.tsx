@@ -34,6 +34,7 @@ import {
   ShieldCheck,
   X,
   Zap,
+  Wrench,
 } from "lucide-react";
 import { WorkspaceAvatar } from "../workspace/workspace-avatar";
 import { ActorAvatar } from "@multica/ui/components/common/actor-avatar";
@@ -112,6 +113,7 @@ type NavKey =
   | "memory"
   | "approvals"
   | "agents"
+  | "tools"
   | "runtimes"
   | "skills"
   | "settings";
@@ -127,6 +129,7 @@ type NavLabelKey =
   | "memory"
   | "approvals"
   | "agents"
+  | "tools"
   | "runtimes"
   | "skills"
   | "settings";
@@ -144,6 +147,7 @@ const workspaceNav: { key: NavKey; labelKey: NavLabelKey; icon: typeof Inbox }[]
   { key: "memory", labelKey: "memory", icon: Brain },
   { key: "approvals", labelKey: "approvals", icon: ShieldCheck },
   { key: "agents", labelKey: "agents", icon: Bot },
+  { key: "tools", labelKey: "tools", icon: Wrench },
 ];
 
 const configureNav: { key: NavKey; labelKey: NavLabelKey; icon: typeof Inbox }[] = [

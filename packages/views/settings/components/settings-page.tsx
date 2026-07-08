@@ -10,6 +10,7 @@ import {
   FolderGit2,
   FlaskConical,
   Bell,
+  Bot,
 } from "lucide-react";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@multica/ui/components/ui/tabs";
 import { useCurrentWorkspace } from "@multica/core/paths";
@@ -22,8 +23,10 @@ import { MembersTab } from "./members-tab";
 import { RepositoriesTab } from "./repositories-tab";
 import { LabsTab } from "./labs-tab";
 import { NotificationsTab } from "./notifications-tab";
+import { AIMeSettingsTab } from "./aime-settings-tab";
 import { useT } from "../../i18n";
 
+const AIME_TAB_VALUE = "aime";
 const ACCOUNT_TAB_KEYS = ["profile", "preferences", "notifications", "tokens"] as const;
 const ACCOUNT_TAB_ICONS = {
   profile: User,
@@ -46,7 +49,7 @@ const WORKSPACE_TAB_ICONS = {
   members: Users,
 } as const;
 
-const DEFAULT_TAB = "profile";
+const DEFAULT_TAB = AIME_TAB_VALUE;
 const TAB_QUERY_KEY = "tab";
 
 export interface ExtraSettingsTab {
@@ -73,6 +76,7 @@ export function SettingsPage({ extraAccountTabs }: SettingsPageProps = {}) {
     () =>
       new Set<string>([
         ...ACCOUNT_TAB_KEYS,
+        AIME_TAB_VALUE,
         ...Object.values(WORKSPACE_TAB_VALUES),
         ...(extraAccountTabs?.map((tab) => tab.value) ?? []),
       ]),
@@ -102,6 +106,15 @@ export function SettingsPage({ extraAccountTabs }: SettingsPageProps = {}) {
       <div className="shrink-0 md:w-52 border-b md:border-b-0 md:border-r md:overflow-y-auto p-3 md:p-4">
         <h1 className="text-sm font-semibold mb-4 px-2">{t(($) => $.page.title)}</h1>
         <TabsList variant="line" className="flex-col items-stretch w-full">
+          {/* AI-Me group */}
+          <span className="px-2 pb-1 pt-2 text-xs font-medium text-muted-foreground">
+            {t(($) => $.page.ai_me)}
+          </span>
+          <TabsTrigger value={AIME_TAB_VALUE}>
+            <Bot className="h-4 w-4" />
+            {t(($) => $.page.tabs.aime)}
+          </TabsTrigger>
+
           {/* My Account group */}
           <span className="px-2 pb-1 pt-2 text-xs font-medium text-muted-foreground">
             {t(($) => $.page.my_account)}
@@ -141,6 +154,7 @@ export function SettingsPage({ extraAccountTabs }: SettingsPageProps = {}) {
       {/* Right content */}
       <div className="flex-1 min-w-0 md:overflow-y-auto">
         <div className="w-full max-w-3xl mx-auto p-4 md:p-6">
+          <TabsContent value={AIME_TAB_VALUE}><AIMeSettingsTab /></TabsContent>
           <TabsContent value="profile"><AccountTab /></TabsContent>
           <TabsContent value="preferences"><PreferencesTab /></TabsContent>
           <TabsContent value="notifications"><NotificationsTab /></TabsContent>

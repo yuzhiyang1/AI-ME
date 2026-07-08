@@ -15,9 +15,11 @@
   },
   "page": {
     "title": "Settings",
+    "ai_me": "AI-Me",
     "my_account": "My Account",
     "workspace_fallback": "Workspace",
     "tabs": {
+      "aime": "AI-Me Settings",
       "profile": "Profile",
       "preferences": "Preferences",
       "notifications": "Notifications",
@@ -26,6 +28,132 @@
       "repositories": "Repositories",
       "labs": "Labs",
       "members": "Members"
+    }
+  },
+  "aime": {
+    "title": "AI-Me Settings",
+    "description": "Control how AI-Me dispatches workers, requests approval, uses models, and retains work data.",
+    "save": "Save settings",
+    "saving": "Saving...",
+    "manage_hint": "Only admins and owners can update AI-Me settings.",
+    "toast_saved": "AI-Me settings saved",
+    "toast_failed": "Failed to save AI-Me settings",
+    "status": {
+      "enabled": "Enabled",
+      "disabled": "Disabled"
+    },
+    "metrics": {
+      "employees": "Online workers",
+      "employees_hint": "Dispatchable / total workers",
+      "working": "Working now",
+      "working_hint": "Currently in working state",
+      "model": "Current model",
+      "model_hint": "Prefers the actual worker model",
+      "approval": "Approval policy",
+      "approval_hint": "AI replies and high-risk actions"
+    },
+    "sections": {
+      "work_policy": "Work Policy",
+      "work_policy_description": "Define whether AI-Me can work proactively and when decisions must come back to you.",
+      "model": "Model Configuration",
+      "model_description": "The model used by AI-Me itself. Codex, Claude Code, and other workers remain configured on the workers page.",
+      "data": "Data & Memory",
+      "data_description": "Control retention for work records, memory, and knowledge. Do not store sensitive keys here."
+    },
+    "fields": {
+      "enabled": {
+        "label": "Enable AI-Me",
+        "description": "When disabled, AI-Me stops proactively dispatching workers while history stays available."
+      },
+      "autonomy": {
+        "label": "Autonomy level",
+        "description": "Decides how far AI-Me may advance work automatically."
+      },
+      "approval": {
+        "label": "Approval mode",
+        "description": "Controls whether AI replies, external sends, and high-risk actions require confirmation."
+      },
+      "digest": {
+        "label": "Digest cadence",
+        "description": "Controls notification rhythm for exceptions, progress, and risks."
+      },
+      "timezone": {
+        "label": "Timezone",
+        "description": "Used for working hours, daily digests, and metric rollups."
+      },
+      "work_start": {
+        "label": "Work starts",
+        "description": "Default time when AI-Me may start proactive work."
+      },
+      "work_end": {
+        "label": "Work ends",
+        "description": "Default time when AI-Me stops proactive work."
+      },
+      "model_provider": {
+        "label": "Model provider",
+        "description": "Preferred LLM service for AI-Me's own brain."
+      },
+      "model_name": {
+        "label": "Model name",
+        "description": "For example deepseek-chat, gpt-4.1, or claude-sonnet."
+      },
+      "memory_retention": {
+        "label": "Memory retention days",
+        "description": "Ordinary memories older than this can be cleaned up; pinned memories remain."
+      },
+      "data_retention": {
+        "label": "Work data retention days",
+        "description": "Default retention for work traces, approvals, and execution logs."
+      }
+    },
+    "autonomy_levels": {
+      "assistive": {
+        "label": "Assistive"
+      },
+      "balanced": {
+        "label": "Balanced"
+      },
+      "autonomous": {
+        "label": "Autonomous"
+      }
+    },
+    "approval_modes": {
+      "always": {
+        "label": "Always approve"
+      },
+      "risky": {
+        "label": "High-risk only"
+      },
+      "never": {
+        "label": "No approval"
+      }
+    },
+    "digest_cadences": {
+      "realtime": {
+        "label": "Realtime"
+      },
+      "daily": {
+        "label": "Daily digest"
+      },
+      "muted": {
+        "label": "Muted"
+      }
+    },
+    "model_providers": {
+      "deepseek": "DeepSeek",
+      "openai": "OpenAI",
+      "anthropic": "Anthropic",
+      "custom": "Custom"
+    },
+    "facts": {
+      "storage": {
+        "label": "Configuration storage",
+        "value": "Currently stored at workspace settings.ai_me and persisted with PostgreSQL workspace data."
+      },
+      "notifications": {
+        "label": "Notification preferences",
+        "value": "Exception and worker activity notifications continue to be controlled by Notification settings."
+      }
     }
   },
   "account": {

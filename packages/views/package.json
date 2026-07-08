@@ -29,6 +29,7 @@
     "./approvals": "./approvals/index.ts",
     "./agents": "./agents/index.ts",
     "./memory": "./memory/index.ts",
+    "./tools-permissions": "./tools-permissions/index.ts",
     "./inbox": "./inbox/index.ts",
     "./runtimes": "./runtimes/index.ts",
     "./workspace/workspace-avatar": "./workspace/workspace-avatar.tsx",

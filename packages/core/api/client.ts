@@ -53,6 +53,7 @@ import type {
   AIMeCockpitSummary,
   AIMeThinkRequest,
   AIMeThinkResponse,
+  FeishuIntegrationStatus,
   ChatSession,
   ChatMessage,
   ChatPendingTask,
@@ -127,6 +128,8 @@ import {
   EMPTY_AIME_THINK_RESPONSE,
   EMPTY_AI_APPROVAL,
   EMPTY_AI_APPROVAL_STATS,
+  EMPTY_FEISHU_INTEGRATION_STATUS,
+  FeishuIntegrationStatusSchema,
   EMPTY_KNOWLEDGE_DOCUMENT,
   EMPTY_LIST_AI_APPROVALS_RESPONSE,
   PendingChatTasksResponseSchema,
@@ -476,6 +479,13 @@ export class ApiClient {
     const raw = await this.fetch<unknown>("/api/ai-me/approvals/stats");
     return parseWithFallback(raw, AIApprovalStatsSchema, EMPTY_AI_APPROVAL_STATS, {
       endpoint: "GET /api/ai-me/approvals/stats",
+    });
+  }
+
+  async getFeishuIntegrationStatus(): Promise<FeishuIntegrationStatus> {
+    const raw = await this.fetch<unknown>("/api/integrations/feishu/status");
+    return parseWithFallback(raw, FeishuIntegrationStatusSchema, EMPTY_FEISHU_INTEGRATION_STATUS, {
+      endpoint: "GET /api/integrations/feishu/status",
     });
   }
 

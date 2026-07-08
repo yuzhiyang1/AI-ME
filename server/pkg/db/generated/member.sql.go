@@ -86,6 +86,26 @@ func (q *Queries) GetMemberByUserAndWorkspace(ctx context.Context, arg GetMember
 	return i, err
 }
 
+const getWorkspaceOwnerMember = `-- name: GetWorkspaceOwnerMember :one
+SELECT id, workspace_id, user_id, role, created_at FROM member
+WHERE workspace_id = $1 AND role = 'owner'
+ORDER BY created_at ASC
+LIMIT 1
+`
+
+func (q *Queries) GetWorkspaceOwnerMember(ctx context.Context, workspaceID pgtype.UUID) (Member, error) {
+	row := q.db.QueryRow(ctx, getWorkspaceOwnerMember, workspaceID)
+	var i Member
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.UserID,
+		&i.Role,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const listMembers = `-- name: ListMembers :many
 SELECT id, workspace_id, user_id, role, created_at FROM member
 WHERE workspace_id = $1

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/multica-ai/multica/server/internal/middleware"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -66,6 +67,84 @@ func TestParseAIMeDecisionNormalizesUnsafeValues(t *testing.T) {
 	}
 	if got.Actions[0].Priority != "medium" {
 		t.Fatalf("priority = %q", got.Actions[0].Priority)
+	}
+}
+
+func TestAIMeWorkspacePolicyForcesApprovalOutsideWorkingHours(t *testing.T) {
+	settings := aimeWorkspaceSettingsFromJSON([]byte(`{
+		"ai_me": {
+			"enabled": true,
+			"autonomy_level": "autonomous",
+			"approval_mode": "never",
+			"timezone": "Asia/Shanghai",
+			"working_hours": { "start": "09:00", "end": "18:00" },
+			"model_provider": "deepseek",
+			"model_name": "deepseek-chat"
+		}
+	}`))
+	policy := buildAIMePolicyContext(settings, time.Date(2026, 7, 8, 20, 0, 0, 0, time.FixedZone("CST", 8*60*60)))
+	resp := AIMeThinkResponse{
+		RiskLevel:    "low",
+		NeedApproval: false,
+		Actions: []AIMeSuggestedAction{{
+			Type:             "assign_worker",
+			Title:            "分配给 Codex",
+			Description:      "低风险内部派工。",
+			RequiresApproval: false,
+		}},
+	}
+
+	applyAIMeWorkspacePolicy(&resp, policy)
+
+	if !resp.NeedApproval || !resp.Actions[0].RequiresApproval {
+		t.Fatalf("expected outside-hours dispatch to require approval: %#v", resp)
+	}
+}
+
+func TestAIMeWorkspacePolicyClearsSafeModelApprovalWhenApprovalNever(t *testing.T) {
+	settings := defaultAIMeWorkspaceSettings()
+	settings.AutonomyLevel = "autonomous"
+	settings.ApprovalMode = "never"
+	policy := buildAIMePolicyContext(settings, time.Date(2026, 7, 8, 10, 0, 0, 0, time.FixedZone("CST", 8*60*60)))
+	resp := AIMeThinkResponse{
+		RiskLevel:    "low",
+		NeedApproval: true,
+		Actions: []AIMeSuggestedAction{{
+			Type:             "assign_worker",
+			Title:            "分配给 Codex",
+			Description:      "低风险内部派工。",
+			RequiresApproval: true,
+		}},
+	}
+
+	applyAIMeWorkspacePolicy(&resp, policy)
+
+	if resp.NeedApproval || resp.Actions[0].RequiresApproval {
+		t.Fatalf("expected safe autonomous action to skip approval: %#v", resp)
+	}
+}
+
+func TestAIMeWorkspacePolicyKeepsExternalReplyApprovalEvenWhenApprovalNever(t *testing.T) {
+	settings := defaultAIMeWorkspaceSettings()
+	settings.AutonomyLevel = "autonomous"
+	settings.ApprovalMode = "never"
+	policy := buildAIMePolicyContext(settings, time.Date(2026, 7, 8, 10, 0, 0, 0, time.FixedZone("CST", 8*60*60)))
+	resp := AIMeThinkResponse{
+		RiskLevel:    "low",
+		NeedApproval: false,
+		ReplyDraft:   "您好，问题已经收到。",
+		Actions: []AIMeSuggestedAction{{
+			Type:             "send_external_message",
+			Title:            "回复飞书消息",
+			Description:      "外部可见消息。",
+			RequiresApproval: false,
+		}},
+	}
+
+	applyAIMeWorkspacePolicy(&resp, policy)
+
+	if !resp.NeedApproval || !resp.Actions[0].RequiresApproval {
+		t.Fatalf("expected external reply to keep approval: %#v", resp)
 	}
 }
 
@@ -203,6 +282,176 @@ func TestBuildAIMeApprovalRequestDowngradesNeverMemoryExternalReply(t *testing.T
 	}
 	if payload["text"] != nil {
 		t.Fatalf("draft payload should not include executable send text: %#v", payload)
+	}
+}
+
+func TestThinkAIMeDisabledSkipsModelCall(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+	ctx := context.Background()
+	var oldSettings []byte
+	if err := testPool.QueryRow(ctx, `SELECT settings FROM workspace WHERE id = $1`, testWorkspaceID).Scan(&oldSettings); err != nil {
+		t.Fatalf("load workspace settings: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = testPool.Exec(ctx, `UPDATE workspace SET settings = $1 WHERE id = $2`, oldSettings, testWorkspaceID)
+	})
+	if _, err := testPool.Exec(ctx, `
+		UPDATE workspace
+		SET settings = '{"ai_me":{"enabled":false,"autonomy_level":"balanced","approval_mode":"risky","timezone":"Asia/Shanghai","working_hours":{"start":"09:00","end":"18:00"},"model_provider":"deepseek","model_name":"deepseek-chat"}}'::jsonb
+		WHERE id = $1
+	`, testWorkspaceID); err != nil {
+		t.Fatalf("update workspace settings: %v", err)
+	}
+
+	called := false
+	origModel := testHandler.AIModel
+	testHandler.AIModel = fakeAIMeModelClient{
+		content: `{"summary":"should not run"}`,
+		onComplete: func(_, _ string) {
+			called = true
+		},
+	}
+	t.Cleanup(func() { testHandler.AIModel = origModel })
+
+	member, err := testHandler.getWorkspaceMember(ctx, testUserID, testWorkspaceID)
+	if err != nil {
+		t.Fatalf("load member: %v", err)
+	}
+	thinkReq := newRequest("POST", "/api/ai-me/think?workspace_id="+testWorkspaceID, AIMeThinkRequest{
+		Input:      "请判断是否需要派工",
+		Intent:     "assign",
+		SourceType: "manual",
+	})
+	thinkReq = thinkReq.WithContext(middleware.SetMemberContext(thinkReq.Context(), testWorkspaceID, member))
+
+	w := httptest.NewRecorder()
+	testHandler.ThinkAIMe(w, thinkReq)
+	if w.Code != http.StatusOK {
+		t.Fatalf("ThinkAIMe: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if called {
+		t.Fatal("expected disabled AI-Me to skip model call")
+	}
+	var resp AIMeThinkResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Mode != "disabled" || resp.NeedApproval {
+		t.Fatalf("disabled response = %#v", resp)
+	}
+}
+
+func TestThinkAIMeAutonomousNeverAutoQueuesAssignWorker(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+	ctx := context.Background()
+	var oldSettings []byte
+	if err := testPool.QueryRow(ctx, `SELECT settings FROM workspace WHERE id = $1`, testWorkspaceID).Scan(&oldSettings); err != nil {
+		t.Fatalf("load workspace settings: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = testPool.Exec(ctx, `UPDATE workspace SET settings = $1 WHERE id = $2`, oldSettings, testWorkspaceID)
+	})
+	if _, err := testPool.Exec(ctx, `
+		UPDATE workspace
+		SET settings = '{"ai_me":{"enabled":true,"autonomy_level":"autonomous","approval_mode":"never","timezone":"Asia/Shanghai","working_hours":{"start":"00:00","end":"00:00"},"model_provider":"deepseek","model_name":"deepseek-chat"}}'::jsonb
+		WHERE id = $1
+	`, testWorkspaceID); err != nil {
+		t.Fatalf("update workspace settings: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	createIssueReq := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
+		"title":    "AI-Me autonomous auto assign integration test",
+		"status":   "todo",
+		"priority": "medium",
+	})
+	testHandler.CreateIssue(w, createIssueReq)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateIssue: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var issue IssueResponse
+	if err := json.NewDecoder(w.Body).Decode(&issue); err != nil {
+		t.Fatalf("decode issue: %v", err)
+	}
+	var agentID string
+	if err := testPool.QueryRow(ctx, `
+		SELECT id FROM agent
+		WHERE workspace_id = $1 AND name = 'Handler Test Agent'
+		ORDER BY created_at ASC
+		LIMIT 1
+	`, testWorkspaceID).Scan(&agentID); err != nil {
+		t.Fatalf("load handler test agent: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = testPool.Exec(ctx, `DELETE FROM ai_me_approval WHERE issue_id = $1`, issue.ID)
+		_, _ = testPool.Exec(ctx, `DELETE FROM activity_log WHERE issue_id = $1`, issue.ID)
+		_, _ = testPool.Exec(ctx, `DELETE FROM agent_task_queue WHERE issue_id = $1`, issue.ID)
+		_, _ = testPool.Exec(ctx, `DELETE FROM issue WHERE id = $1`, issue.ID)
+	})
+
+	origModel := testHandler.AIModel
+	testHandler.AIModel = fakeAIMeModelClient{content: `{
+		"summary":"低风险内部派工，可自动执行",
+		"risk_level":"low",
+		"confidence":0.93,
+		"need_approval":false,
+		"reasoning_summary":"工作区允许低风险内部派工自动执行。",
+		"actions":[{"type":"assign_worker","title":"分配给测试员工","description":"让员工处理该 issue","issue_id":"` + issue.ID + `","target_agent_id":"` + agentID + `","target_agent_name":"Handler Test Agent","priority":"medium","requires_approval":false}],
+		"evidence":[{"type":"issue","label":"测试 issue","ref_id":"` + issue.ID + `"}]
+	}`}
+	t.Cleanup(func() { testHandler.AIModel = origModel })
+
+	member, err := testHandler.getWorkspaceMember(ctx, testUserID, testWorkspaceID)
+	if err != nil {
+		t.Fatalf("load member: %v", err)
+	}
+	thinkReq := newRequest("POST", "/api/ai-me/think?workspace_id="+testWorkspaceID, AIMeThinkRequest{
+		Input:       "请把这个低风险 issue 分配给员工",
+		Intent:      "assign",
+		SourceType:  "issue",
+		SourceRefID: issue.ID,
+		IssueID:     issue.ID,
+	})
+	thinkReq = thinkReq.WithContext(middleware.SetMemberContext(thinkReq.Context(), testWorkspaceID, member))
+
+	w = httptest.NewRecorder()
+	testHandler.ThinkAIMe(w, thinkReq)
+	if w.Code != http.StatusOK {
+		t.Fatalf("ThinkAIMe: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp AIMeThinkResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.NeedApproval || resp.ApprovalID == "" {
+		t.Fatalf("expected auto execution audit without pending approval, got %#v", resp)
+	}
+
+	var approvalStatus, executionStatus, createdTaskID string
+	if err := testPool.QueryRow(ctx, `
+		SELECT status, execution_status, created_task_id::text
+		FROM ai_me_approval
+		WHERE id = $1
+	`, resp.ApprovalID).Scan(&approvalStatus, &executionStatus, &createdTaskID); err != nil {
+		t.Fatalf("load auto approval: %v", err)
+	}
+	if approvalStatus != "approved" || executionStatus != "succeeded" || createdTaskID == "" {
+		t.Fatalf("auto approval status/execution/task = %s/%s/%s", approvalStatus, executionStatus, createdTaskID)
+	}
+	var assigneeType, assigneeID string
+	if err := testPool.QueryRow(ctx, `
+		SELECT assignee_type, assignee_id
+		FROM issue
+		WHERE id = $1
+	`, issue.ID).Scan(&assigneeType, &assigneeID); err != nil {
+		t.Fatalf("load assigned issue: %v", err)
+	}
+	if assigneeType != "agent" || assigneeID != agentID {
+		t.Fatalf("assignee = %s:%s, want agent:%s", assigneeType, assigneeID, agentID)
 	}
 }
 
@@ -1085,5 +1334,41 @@ func TestAIModelClientDeepSeekRequestShape(t *testing.T) {
 	}
 	if gotPayload["thinking"].(map[string]any)["type"] != "disabled" {
 		t.Fatalf("thinking = %#v", gotPayload["thinking"])
+	}
+}
+
+func TestAIModelClientUsesWorkspaceModelOverride(t *testing.T) {
+	var gotPayload map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotPayload); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"summary\":\"ok\"}"}}]}`))
+	}))
+	t.Cleanup(server.Close)
+
+	client := NewAIModelClient(Config{
+		AIModelProvider: "deepseek",
+		AIModelBaseURL:  server.URL,
+		AIModelAPIKey:   "sk-test",
+		AIModelModel:    "server-default-model",
+	})
+	configurable, ok := client.(AIModelClientWithOptions)
+	if !ok {
+		t.Fatalf("client should support AIModelClientWithOptions")
+	}
+	content, err := configurable.CompleteWithOptions(context.Background(), "system", "user", AIModelOptions{Model: "workspace-model"})
+	if err != nil {
+		t.Fatalf("CompleteWithOptions() error = %v", err)
+	}
+	if content != `{"summary":"ok"}` {
+		t.Fatalf("content = %q", content)
+	}
+	if gotPayload["model"] != "workspace-model" {
+		t.Fatalf("model payload = %#v", gotPayload["model"])
+	}
+	if configurable.EffectiveModel(AIModelOptions{Model: "workspace-model"}) != "workspace-model" {
+		t.Fatalf("workspace model override was not effective")
 	}
 }

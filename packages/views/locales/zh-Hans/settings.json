@@ -15,9 +15,11 @@
   },
   "page": {
     "title": "设置",
+    "ai_me": "AI-Me",
     "my_account": "我的账号",
     "workspace_fallback": "工作区",
     "tabs": {
+      "aime": "AI-Me 设置",
       "profile": "个人资料",
       "preferences": "偏好设置",
       "notifications": "通知",
@@ -26,6 +28,132 @@
       "repositories": "代码仓库",
       "labs": "实验室",
       "members": "成员"
+    }
+  },
+  "aime": {
+    "title": "AI-Me 设置",
+    "description": "控制 AI-Me 如何调度员工、请求审批、使用模型和保留工作数据。",
+    "save": "保存设置",
+    "saving": "保存中...",
+    "manage_hint": "只有管理员和所有者可以修改 AI-Me 设置。",
+    "toast_saved": "已保存 AI-Me 设置",
+    "toast_failed": "保存 AI-Me 设置失败",
+    "status": {
+      "enabled": "已启用",
+      "disabled": "已停用"
+    },
+    "metrics": {
+      "employees": "在线员工",
+      "employees_hint": "可调度 / 总员工",
+      "working": "正在执行",
+      "working_hint": "当前处于工作状态",
+      "model": "当前模型",
+      "model_hint": "优先显示员工实际模型",
+      "approval": "审批策略",
+      "approval_hint": "AI 回复和高风险动作"
+    },
+    "sections": {
+      "work_policy": "工作策略",
+      "work_policy_description": "定义 AI-Me 是否可以主动工作，以及什么时候必须把决定交给你。",
+      "model": "模型配置",
+      "model_description": "AI-Me 自己的大脑配置。员工仍在员工页配置 Codex、Claude Code 等执行环境。",
+      "data": "数据与记忆",
+      "data_description": "控制工作记录、记忆和知识的保留策略。敏感密钥不要写入这里。"
+    },
+    "fields": {
+      "enabled": {
+        "label": "启用 AI-Me",
+        "description": "关闭后 AI-Me 不再主动调度员工，但历史记录仍会保留。"
+      },
+      "autonomy": {
+        "label": "自治等级",
+        "description": "决定 AI-Me 可以自动推进到什么程度。"
+      },
+      "approval": {
+        "label": "审批模式",
+        "description": "控制 AI 回复、外部发送和高风险动作是否需要你确认。"
+      },
+      "digest": {
+        "label": "汇总频率",
+        "description": "控制 AI-Me 对例外、进展和风险的通知节奏。"
+      },
+      "timezone": {
+        "label": "时区",
+        "description": "用于工作时间、日报和统计归档。"
+      },
+      "work_start": {
+        "label": "工作开始时间",
+        "description": "AI-Me 可主动推进的默认起始时间。"
+      },
+      "work_end": {
+        "label": "工作结束时间",
+        "description": "AI-Me 可主动推进的默认结束时间。"
+      },
+      "model_provider": {
+        "label": "模型供应商",
+        "description": "AI-Me 大脑优先使用的 LLM 服务。"
+      },
+      "model_name": {
+        "label": "模型名称",
+        "description": "例如 deepseek-chat、gpt-4.1 或 claude-sonnet。"
+      },
+      "memory_retention": {
+        "label": "记忆保留天数",
+        "description": "超过天数的普通记忆可被清理，固定记忆除外。"
+      },
+      "data_retention": {
+        "label": "工作数据保留天数",
+        "description": "工作项轨迹、审批记录和执行日志的默认保留时间。"
+      }
+    },
+    "autonomy_levels": {
+      "assistive": {
+        "label": "辅助模式"
+      },
+      "balanced": {
+        "label": "平衡模式"
+      },
+      "autonomous": {
+        "label": "自动推进"
+      }
+    },
+    "approval_modes": {
+      "always": {
+        "label": "总是审批"
+      },
+      "risky": {
+        "label": "高风险审批"
+      },
+      "never": {
+        "label": "无需审批"
+      }
+    },
+    "digest_cadences": {
+      "realtime": {
+        "label": "实时通知"
+      },
+      "daily": {
+        "label": "每日汇总"
+      },
+      "muted": {
+        "label": "静默"
+      }
+    },
+    "model_providers": {
+      "deepseek": "DeepSeek",
+      "openai": "OpenAI",
+      "anthropic": "Anthropic",
+      "custom": "自定义"
+    },
+    "facts": {
+      "storage": {
+        "label": "配置存储",
+        "value": "当前写入工作区 settings.ai_me，随 PostgreSQL 工作区数据持久化。"
+      },
+      "notifications": {
+        "label": "通知偏好",
+        "value": "例外和员工活动通知继续使用通知设置模块统一控制。"
+      }
     }
   },
   "account": {

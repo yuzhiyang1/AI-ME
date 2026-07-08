@@ -13,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgtype"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
+	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
 const aiMeMaxContextItems = 12
@@ -24,6 +25,16 @@ type AIModelClient interface {
 	Provider() string
 	Model() string
 	Complete(ctx context.Context, systemPrompt, userPrompt string) (string, error)
+}
+
+type AIModelOptions struct {
+	Model string
+}
+
+type AIModelClientWithOptions interface {
+	ConfiguredWithOptions(options AIModelOptions) bool
+	EffectiveModel(options AIModelOptions) string
+	CompleteWithOptions(ctx context.Context, systemPrompt, userPrompt string, options AIModelOptions) (string, error)
 }
 
 type openAICompatibleAIModelClient struct {
@@ -73,6 +84,10 @@ func (c *openAICompatibleAIModelClient) Configured() bool {
 	return c.apiKey != "" && c.model != "" && c.baseURL != ""
 }
 
+func (c *openAICompatibleAIModelClient) ConfiguredWithOptions(options AIModelOptions) bool {
+	return c.apiKey != "" && c.EffectiveModel(options) != "" && c.baseURL != ""
+}
+
 func (c *openAICompatibleAIModelClient) Provider() string {
 	return c.provider
 }
@@ -81,12 +96,24 @@ func (c *openAICompatibleAIModelClient) Model() string {
 	return c.model
 }
 
+func (c *openAICompatibleAIModelClient) EffectiveModel(options AIModelOptions) string {
+	if model := strings.TrimSpace(options.Model); model != "" {
+		return model
+	}
+	return c.model
+}
+
 func (c *openAICompatibleAIModelClient) Complete(ctx context.Context, systemPrompt, userPrompt string) (string, error) {
-	if !c.Configured() {
+	return c.CompleteWithOptions(ctx, systemPrompt, userPrompt, AIModelOptions{})
+}
+
+func (c *openAICompatibleAIModelClient) CompleteWithOptions(ctx context.Context, systemPrompt, userPrompt string, options AIModelOptions) (string, error) {
+	if !c.ConfiguredWithOptions(options) {
 		return "", errors.New("AI-Me LLM is not configured")
 	}
+	model := c.EffectiveModel(options)
 	payload := map[string]any{
-		"model": c.model,
+		"model": model,
 		"messages": []map[string]string{
 			{"role": "system", "content": systemPrompt},
 			{"role": "user", "content": userPrompt},
@@ -169,6 +196,7 @@ type AIMeThinkResponse struct {
 	Actions               []AIMeSuggestedAction `json:"actions"`
 	Evidence              []AIMeEvidence        `json:"evidence"`
 	Context               AIMeContextSummary    `json:"context"`
+	Policy                AIMePolicyContext     `json:"policy"`
 	ConfigurationRequired bool                  `json:"configuration_required"`
 	Error                 string                `json:"error,omitempty"`
 	CreatedAt             string                `json:"created_at"`
@@ -317,33 +345,46 @@ func (h *Handler) ThinkAIMe(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "input is required")
 		return
 	}
+	workspace, err := h.Queries.GetWorkspace(r.Context(), parseUUID(workspaceID))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load AI-Me settings")
+		return
+	}
+	settings := aimeWorkspaceSettingsFromJSON(workspace.Settings)
+	policy := buildAIMePolicyContext(settings, time.Now())
 	ctx, err := h.buildAIMeContext(r.Context(), workspaceID, userID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to build AI-Me context")
 		return
 	}
 
-	if h.AIModel == nil || !h.AIModel.Configured() {
-		resp := h.unconfiguredAIMeResponse(ctx)
+	if !settings.Enabled {
+		resp := h.disabledAIMeResponse(ctx, policy)
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
 
-	systemPrompt := buildAIMeSystemPrompt()
-	userPrompt, err := buildAIMeUserPrompt(userID, req, ctx)
+	if !aimeModelConfiguredForSettings(h.AIModel, settings) {
+		resp := h.unconfiguredAIMeResponse(ctx, policy)
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+
+	systemPrompt := buildAIMeSystemPrompt(policy)
+	userPrompt, err := buildAIMeUserPrompt(userID, req, ctx, policy)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to build AI-Me prompt")
 		return
 	}
-	raw, err := h.AIModel.Complete(r.Context(), systemPrompt, userPrompt)
+	raw, model, err := completeAIMeModel(r.Context(), h.AIModel, systemPrompt, userPrompt, settings)
 	if err != nil {
-		resp := h.fallbackAIMeResponse(ctx, "provider_error", "AI-Me 调用 LLM Provider 时失败。", err.Error())
+		resp := h.fallbackAIMeResponse(ctx, policy, "provider_error", "AI-Me 调用 LLM Provider 时失败。", err.Error())
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
 	decision, ok := parseAIMeDecision(raw)
 	if !ok {
-		resp := h.fallbackAIMeResponse(ctx, "fallback", "AI-Me 已收到模型回复，但回复不是完整 JSON。", raw)
+		resp := h.fallbackAIMeResponse(ctx, policy, "fallback", "AI-Me 已收到模型回复，但回复不是完整 JSON。", raw)
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
@@ -351,7 +392,7 @@ func (h *Handler) ThinkAIMe(w http.ResponseWriter, r *http.Request) {
 		ID:               randomID(),
 		Mode:             "llm",
 		Provider:         h.AIModel.Provider(),
-		Model:            h.AIModel.Model(),
+		Model:            model,
 		Configured:       true,
 		Summary:          decision.Summary,
 		RiskLevel:        normalizeRisk(decision.RiskLevel),
@@ -362,9 +403,11 @@ func (h *Handler) ThinkAIMe(w http.ResponseWriter, r *http.Request) {
 		Actions:          normalizeAIMeActions(decision.Actions),
 		Evidence:         normalizeAIMeEvidence(decision.Evidence),
 		Context:          ctx,
+		Policy:           policy,
 		CreatedAt:        time.Now().UTC().Format(time.RFC3339),
 	}
 	enforceAIMeMemoryApprovalPolicy(&resp)
+	applyAIMeWorkspacePolicy(&resp, policy)
 	if resp.Summary == "" {
 		resp.Summary = "AI-Me 已完成判断。"
 	}
@@ -386,6 +429,21 @@ func (h *Handler) ThinkAIMe(w http.ResponseWriter, r *http.Request) {
 		approval, err := h.createAIMeApproval(r.Context(), workspaceID, userID, params, approvalReq.Evidence)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to create AI-Me approval")
+			return
+		}
+		resp.ApprovalID = uuidToString(approval.ID)
+		resp.ApprovalIDs = []string{resp.ApprovalID}
+	} else if approvalReq, shouldAutoExecute := buildAIMeAutoExecutionRequest(req, resp); shouldAutoExecute {
+		workspaceUUID := parseUUID(workspaceID)
+		userUUID := parseUUID(userID)
+		params, err := createAIMeApprovalParams(workspaceUUID, userUUID, approvalReq)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to prepare AI-Me auto execution")
+			return
+		}
+		approval, _, err := h.createAndAutoApproveAIMeApproval(r.Context(), workspaceID, userID, params, approvalReq.Evidence)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to auto execute AI-Me action")
 			return
 		}
 		resp.ApprovalID = uuidToString(approval.ID)
@@ -610,11 +668,43 @@ func resolveAIMeResponseIssueID(req AIMeThinkRequest, resp AIMeThinkResponse) st
 	return normalizeAIMeIssueID(req.IssueID)
 }
 
-func (h *Handler) unconfiguredAIMeResponse(ctx AIMeContextSummary) AIMeThinkResponse {
+func (h *Handler) disabledAIMeResponse(ctx AIMeContextSummary, policy AIMePolicyContext) AIMeThinkResponse {
 	provider, model := "", ""
 	if h.AIModel != nil {
 		provider = h.AIModel.Provider()
 		model = h.AIModel.Model()
+	}
+	return AIMeThinkResponse{
+		ID:               randomID(),
+		Mode:             "disabled",
+		Provider:         provider,
+		Model:            model,
+		Configured:       true,
+		Summary:          "AI-Me 当前已关闭，不会调度员工或生成审批建议。",
+		RiskLevel:        "low",
+		Confidence:       1,
+		NeedApproval:     false,
+		ReasoningSummary: "工作区设置已关闭 AI-Me；历史记录仍然可查看。",
+		Actions: []AIMeSuggestedAction{{
+			Type:             "no_action",
+			Title:            "AI-Me 已关闭",
+			Description:      "开启 AI-Me 后才会继续判断、派工和生成审批建议。",
+			RequiresApproval: false,
+		}},
+		Context:   ctx,
+		Policy:    policy,
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+}
+
+func (h *Handler) unconfiguredAIMeResponse(ctx AIMeContextSummary, policy AIMePolicyContext) AIMeThinkResponse {
+	provider, model := "", ""
+	if h.AIModel != nil {
+		provider = h.AIModel.Provider()
+		model = h.AIModel.Model()
+		if configurable, ok := h.AIModel.(AIModelClientWithOptions); ok {
+			model = configurable.EffectiveModel(AIModelOptions{Model: policy.ModelName})
+		}
 	}
 	return AIMeThinkResponse{
 		ID:                    randomID(),
@@ -635,15 +725,19 @@ func (h *Handler) unconfiguredAIMeResponse(ctx AIMeContextSummary) AIMeThinkResp
 			RequiresApproval: true,
 		}},
 		Context:   ctx,
+		Policy:    policy,
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 }
 
-func (h *Handler) fallbackAIMeResponse(ctx AIMeContextSummary, mode, summary, detail string) AIMeThinkResponse {
+func (h *Handler) fallbackAIMeResponse(ctx AIMeContextSummary, policy AIMePolicyContext, mode, summary, detail string) AIMeThinkResponse {
 	provider, model := "", ""
 	if h.AIModel != nil {
 		provider = h.AIModel.Provider()
 		model = h.AIModel.Model()
+		if configurable, ok := h.AIModel.(AIModelClientWithOptions); ok {
+			model = configurable.EffectiveModel(AIModelOptions{Model: policy.ModelName})
+		}
 	}
 	return AIMeThinkResponse{
 		ID:               randomID(),
@@ -664,13 +758,14 @@ func (h *Handler) fallbackAIMeResponse(ctx AIMeContextSummary, mode, summary, de
 			RequiresApproval: true,
 		}},
 		Context:   ctx,
+		Policy:    policy,
 		Error:     truncateText(detail, 800),
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
 }
 
-func buildAIMeSystemPrompt() string {
-	return `你是 AI-Me 的指挥中枢，不是 Codex 或 Claude Code 员工。你的工作是判断、拆解和建议调度，不直接执行。
+func buildAIMeSystemPrompt(policy AIMePolicyContext) string {
+	return fmt.Sprintf(`你是 AI-Me 的指挥中枢，不是 Codex 或 Claude Code 员工。你的工作是判断、拆解和建议调度，不直接执行。
 
 必须只输出一个 JSON object，不要输出 Markdown、解释文字或代码块。JSON shape：
 {
@@ -694,10 +789,18 @@ func buildAIMeSystemPrompt() string {
   ],
   "evidence": [
     { "type": "issue | agent | user_input | workspace | memory | document", "label": "证据标题", "ref_id": "可选", "quote": "可选短摘录" }
-  ]
+ ]
 }
 
 规则：
+- 当前工作区策略：autonomy_level=%s，approval_mode=%s，in_working_hours=%v，model_provider=%s，model_name=%s。
+- autonomy_level=assistive 时，只能给建议，不能把可执行动作标记为无需审批。
+- autonomy_level=balanced 时，可以推进低风险内部动作，但高风险、外部可见或工作时间外动作必须审批。
+- autonomy_level=autonomous 且 approval_mode=never 时，低风险内部动作可以无需审批；硬风险动作仍必须审批。
+- approval_mode=always 时，所有可执行动作必须 requires_approval=true。
+- approval_mode=risky 时，高风险和硬风险动作必须 requires_approval=true。
+- approval_mode=never 只免除低风险内部动作审批，不能免除外部发送、权限、删除、退款、生产数据修改等硬风险审批。
+- in_working_hours=false 时，不要建议立即调度员工；如确需派工，requires_approval=true。
 - 可以使用 context.memories 中的已确认长期记忆，但只能把相关记忆作为证据，不要编造不存在的记忆。
 - 记忆的 external_use_policy=never 时，不得把该记忆内容写进对外回复。
 - 记忆的 external_use_policy=with_approval 时，任何使用该记忆生成的对外回复都必须 need_approval=true，并在 evidence 中引用对应 memory id。
@@ -705,12 +808,19 @@ func buildAIMeSystemPrompt() string {
 - 只推荐现有 agents 中的员工，不要编造员工。
 - 如果 type=assign_worker，必须填 target_agent_id，且只能使用 context.agents 中已经存在的 id。
 - 如果信息不足，优先 ask_user，而不是假设事实。
-- reasoning_summary 只写可给用户看的摘要，不写逐步思维链。`
+- reasoning_summary 只写可给用户看的摘要，不写逐步思维链。`,
+		policy.AutonomyLevel,
+		policy.ApprovalMode,
+		policy.InWorkingHours,
+		policy.ModelProvider,
+		policy.ModelName,
+	)
 }
 
-func buildAIMeUserPrompt(userID string, req AIMeThinkRequest, ctx AIMeContextSummary) (string, error) {
+func buildAIMeUserPrompt(userID string, req AIMeThinkRequest, ctx AIMeContextSummary, policy AIMePolicyContext) (string, error) {
 	payload := map[string]any{
 		"user_id": userID,
+		"policy":  policy,
 		"request": map[string]any{
 			"input":            truncateText(req.Input, 4000),
 			"intent":           req.Intent,
@@ -888,6 +998,123 @@ func buildAIMeApprovalRequest(req AIMeThinkRequest, resp AIMeThinkResponse) (Cre
 		AIReasoningSummary: firstNonEmpty(resp.ReasoningSummary, summary),
 		Evidence:           buildAIMeApprovalEvidence(req, resp, issueID),
 	}, true
+}
+
+func buildAIMeAutoExecutionRequest(req AIMeThinkRequest, resp AIMeThinkResponse) (CreateAIApprovalRequest, bool) {
+	if resp.NeedApproval {
+		return CreateAIApprovalRequest{}, false
+	}
+	for _, action := range resp.Actions {
+		actionType := mapAIMeActionToApprovalType(action.Type, resolveAIMeIssueID(req, action))
+		switch actionType {
+		case "assign_worker", "post_internal_comment":
+			autoResp := resp
+			autoAction := action
+			autoAction.RequiresApproval = true
+			autoResp.NeedApproval = true
+			autoResp.Actions = []AIMeSuggestedAction{autoAction}
+			return buildAIMeApprovalRequest(req, autoResp)
+		}
+	}
+	return CreateAIApprovalRequest{}, false
+}
+
+func (h *Handler) createAndAutoApproveAIMeApproval(ctx context.Context, workspaceID, userID string, params db.CreateAIApprovalParams, evidence []CreateAIApprovalEvidenceRequest) (db.AiMeApproval, approvedAIActionExecution, error) {
+	tx, err := h.TxStarter.Begin(ctx)
+	if err != nil {
+		return db.AiMeApproval{}, approvedAIActionExecution{}, err
+	}
+	defer tx.Rollback(ctx)
+	qtx := h.Queries.WithTx(tx)
+	approval, err := qtx.CreateAIApproval(ctx, params)
+	if err != nil {
+		return db.AiMeApproval{}, approvedAIActionExecution{}, err
+	}
+	for _, evidenceReq := range evidence {
+		if err := createAIApprovalEvidence(ctx, qtx, params.WorkspaceID, approval.ID, evidenceReq); err != nil {
+			return db.AiMeApproval{}, approvedAIActionExecution{}, err
+		}
+	}
+	createdPayload := map[string]any{
+		"source":        "ai_me_think",
+		"source_ref_id": textToPtr(params.SourceRefID),
+		"auto_execute":  true,
+	}
+	if _, err := createAIApprovalEvent(ctx, qtx, approval, "ai_me", params.RequesterUserID, "created", "", approval.Status, createdPayload); err != nil {
+		return db.AiMeApproval{}, approvedAIActionExecution{}, err
+	}
+	if _, _, err := recordAIApprovalActivity(ctx, qtx, approval, params.RequesterUserID, "ai_me_approval_created", createdPayload); err != nil {
+		return db.AiMeApproval{}, approvedAIActionExecution{}, err
+	}
+	execution := h.executeApprovedAIActionInSavepoint(ctx, tx, approval, params.WorkspaceID, params.RequesterUserID, approvalEffectivePayload(approval, nil))
+	updated, err := qtx.ApproveAIApproval(ctx, db.ApproveAIApprovalParams{
+		ApprovedBy:       params.RequesterUserID,
+		ApprovalNote:     optionalTextFromString("AI-Me 根据工作区设置自动执行。"),
+		ExecutionStatus:  execution.Status,
+		ExecutionError:   optionalTextFromString(execution.ExecutionError),
+		CreatedIssueID:   execution.CreatedIssueID,
+		CreatedTaskID:    execution.CreatedTaskID,
+		CreatedCommentID: execution.CreatedCommentID,
+		ID:               approval.ID,
+		WorkspaceID:      params.WorkspaceID,
+	})
+	if err != nil {
+		return db.AiMeApproval{}, approvedAIActionExecution{}, err
+	}
+	if _, err := createAIApprovalEvent(ctx, qtx, updated, "ai_me", params.RequesterUserID, "approved", approval.Status, updated.Status, map[string]any{
+		"note":         "AI-Me 根据工作区设置自动执行。",
+		"auto_execute": true,
+	}); err != nil {
+		return db.AiMeApproval{}, approvedAIActionExecution{}, err
+	}
+	if execution.Status == "succeeded" || execution.Status == "failed" {
+		eventType := "execution_succeeded"
+		if execution.Status == "failed" {
+			eventType = "execution_failed"
+		}
+		payload := approvalExecutionEventPayload(updated, execution)
+		payload["auto_execute"] = true
+		if _, err := createAIApprovalEvent(ctx, qtx, updated, "ai_me", params.RequesterUserID, eventType, updated.Status, updated.Status, payload); err != nil {
+			return db.AiMeApproval{}, approvedAIActionExecution{}, err
+		}
+		if err := createAIApprovalEvidence(ctx, qtx, updated.WorkspaceID, updated.ID, approvalExecutionEvidenceRequest(updated, execution, payload)); err != nil {
+			return db.AiMeApproval{}, approvedAIActionExecution{}, err
+		}
+	}
+	approvalActivity, hasApprovalActivity, err := recordAIApprovalActivity(ctx, qtx, updated, params.RequesterUserID, "ai_me_approval_approved", approvalExecutionEventPayload(updated, execution))
+	if err != nil {
+		return db.AiMeApproval{}, approvedAIActionExecution{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return db.AiMeApproval{}, approvedAIActionExecution{}, err
+	}
+	if execution.UpdatedIssue != nil {
+		h.publishApprovalIssueUpdated(ctx, *execution.UpdatedIssue, execution.PreviousIssue, workspaceID, userID)
+	}
+	if h.TaskService != nil && len(execution.CancelledTasks) > 0 {
+		h.TaskService.BroadcastCancelledTasks(ctx, execution.CancelledTasks)
+	}
+	if execution.QueuedTask != nil {
+		h.publishApprovalTaskQueued(ctx, *execution.QueuedTask, workspaceID)
+	}
+	if execution.CreatedComment != nil && execution.CommentIssue != nil {
+		h.publishApprovalCommentCreated(*execution.CreatedComment, *execution.CommentIssue, workspaceID, userID)
+	}
+	for _, activity := range execution.Activities {
+		h.publishApprovalActivityCreated(activity, workspaceID, userID)
+	}
+	if hasApprovalActivity {
+		h.publishApprovalActivityCreated(approvalActivity, workspaceID, userID)
+	}
+	resp := aiApprovalToResponse(updated)
+	h.publish(protocol.EventApprovalApproved, workspaceID, "ai_me", userID, map[string]any{"approval": resp})
+	if execution.Status == "succeeded" {
+		h.publish(protocol.EventApprovalExecutionSucceeded, workspaceID, "ai_me", userID, map[string]any{"approval": resp})
+	}
+	if execution.Status == "failed" {
+		h.publish(protocol.EventApprovalExecutionFailed, workspaceID, "ai_me", userID, map[string]any{"approval": resp})
+	}
+	return updated, execution, nil
 }
 
 func selectAIMeApprovalAction(req AIMeThinkRequest, resp AIMeThinkResponse) (AIMeSuggestedAction, bool) {

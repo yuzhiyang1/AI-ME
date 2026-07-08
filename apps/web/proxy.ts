@@ -15,6 +15,7 @@ const LEGACY_ROUTE_SEGMENTS = new Set([
   "autopilots",
   "memory",
   "approvals",
+  "tools",
   "runtimes",
   "skills",
   "settings",

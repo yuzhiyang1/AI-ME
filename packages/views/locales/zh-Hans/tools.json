@@ -1,0 +1,139 @@
+{
+  "page": {
+    "title": "工具与权限",
+    "subtitle": "查看 AI-Me 和 AI 员工能调用什么、哪些动作需要审批、哪些动作暂时禁止。",
+    "policy_hint": "v0.1 策略总览"
+  },
+  "metrics": {
+    "enabled": "已启用",
+    "approval": "需审批",
+    "blocked": "已禁止",
+    "connected": "已接入"
+  },
+  "categories": {
+    "all": "全部",
+    "communication": "通信工具",
+    "development": "开发工具",
+    "data": "数据工具",
+    "publishing": "发布工具",
+    "system": "系统工具"
+  },
+  "availability": {
+    "enabled": "已启用",
+    "available": "可用",
+    "not_configured": "未配置",
+    "disabled": "已禁用"
+  },
+  "approval": {
+    "auto": "自动",
+    "requires_approval": "需要审批",
+    "always_requires_approval": "始终审批",
+    "blocked": "禁止"
+  },
+  "policies": {
+    "workspace_read": {
+      "name": "读取工作项与上下文",
+      "description": "AI-Me 和员工可以读取 issue、评论、活动与必要的工作区上下文。",
+      "scope": "当前工作区",
+      "callers": "AI-Me、Codex、Claude Code",
+      "source": "Issue / 评论 / 活动",
+      "audit": "读取类动作通过活动、审批证据和员工运行记录追溯。"
+    },
+    "assign_worker": {
+      "name": "分配 AI 员工",
+      "description": "把 issue 交给 Codex、Claude Code 或其他员工，并写入 agent task queue。",
+      "scope": "可分配的工作区员工",
+      "callers": "AI-Me",
+      "source": "{{count}} 个智能体",
+      "audit": "审批通过后会记录执行结果。",
+      "audit_pending": "{{count}} 个审批等待处理"
+    },
+    "runtime_execution": {
+      "name": "调用本地/云端运行时",
+      "description": "员工通过已注册 runtime 执行代码阅读、修改、测试和任务回报。",
+      "scope": "Runtime owner 与工作区权限",
+      "source": "{{online}}/{{total}} 在线",
+      "audit": "运行过程进入执行日志和员工活动。"
+    },
+    "post_internal_comment": {
+      "name": "发布内部评论",
+      "description": "把 AI-Me 起草的内部说明写入 issue 评论，作为团队内可见记录。",
+      "scope": "关联 issue",
+      "callers": "AI-Me",
+      "source": "评论",
+      "audit": "审批中心保留原始 payload、最终 payload 和评论 ID。"
+    },
+    "feishu_messages": {
+      "name": "飞书消息",
+      "description": "接收飞书消息进入 AI-Me，并在审批后由机器人回复原消息。",
+      "scope_allowed_chat": "指定飞书会话",
+      "scope_workspace": "当前工作区飞书入口",
+      "callers": "AI-Me",
+      "source": "{{mode}}",
+      "source_not_connected": "未接入",
+      "audit": "入站消息进入例外收件箱；对外回复始终需要审批。",
+      "audit_warning": "配置告警：{{warning}}"
+    },
+    "external_message": {
+      "name": "发送飞书/邮件等外部消息",
+      "description": "对外表达、客户承诺和外部回复必须先进入审批中心。",
+      "scope": "外部联系人与集成渠道",
+      "callers": "AI-Me",
+      "source": "审批中心",
+      "audit": "对外发送会记录 channel、message ID 和执行失败原因。"
+    },
+    "skills_context": {
+      "name": "使用 skill 上下文",
+      "description": "员工按已绑定 skill 获取 SOP 和操作方法；skill 管理仍按创建者/管理员权限控制。",
+      "scope": "绑定了 skill 的员工",
+      "callers": "AI 员工",
+      "source": "{{count}} 个 skill",
+      "audit": "skill 变更由 skill 页面和员工配置记录。"
+    },
+    "memory_external_use": {
+      "name": "对外使用记忆",
+      "description": "with_approval 记忆可用于内部草稿，但最终对外发送必须审批。",
+      "scope": "允许外部使用的记忆",
+      "callers": "AI-Me",
+      "source": "记忆策略",
+      "audit": "审批证据应引用被使用的 memory ID。"
+    },
+    "merge_pull_request": {
+      "name": "合并 PR",
+      "description": "v0.1 只保留策略占位，不直接执行 GitHub merge。",
+      "scope": "GitHub / GitLab",
+      "callers": "AI-Me",
+      "source": "未接入",
+      "audit": "后续接入前必须先定义权限策略和审计记录。"
+    },
+    "production_deploy": {
+      "name": "生产部署",
+      "description": "生产部署属于不可逆高风险动作，v0.1 不开放自动执行。",
+      "scope": "生产环境",
+      "callers": "AI-Me",
+      "source": "未接入",
+      "audit": "即使后续接入，也必须始终要求审批。"
+    }
+  },
+  "detail": {
+    "empty": "选择一个工具查看权限策略。",
+    "category": "分类",
+    "scope": "范围",
+    "callers": "调用方",
+    "approval": "审批策略",
+    "source": "数据来源",
+    "last_used": "最近调用",
+    "never": "暂无最近调用",
+    "audit": "审计说明"
+  },
+  "search_placeholder": "搜索工具、权限或调用方...",
+  "empty_search": {
+    "title": "没有匹配的工具",
+    "description": "可以换一个分类或关键词。"
+  },
+  "error": {
+    "title": "工具与权限加载失败",
+    "description": "部分工作区资源暂时无法读取。",
+    "retry": "重试"
+  }
+}

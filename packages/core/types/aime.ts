@@ -7,6 +7,7 @@ export type AIMeThinkIntent =
 
 export type AIMeThinkMode =
   | "llm"
+  | "disabled"
   | "unconfigured"
   | "provider_error"
   | "fallback";
@@ -102,6 +103,22 @@ export interface AIMeContextSummary {
   memories: AIMeMemoryContext[];
 }
 
+export interface AIMePolicyWorkingHours {
+  start: string;
+  end: string;
+}
+
+export interface AIMePolicyContext {
+  enabled: boolean;
+  autonomy_level: string;
+  approval_mode: string;
+  timezone: string;
+  working_hours: AIMePolicyWorkingHours;
+  in_working_hours: boolean;
+  model_provider: string;
+  model_name: string;
+}
+
 export interface AIMeCockpitSummary {
   active_tasks: number;
   queued_tasks: number;
@@ -139,6 +156,7 @@ export interface AIMeThinkResponse {
   actions: AIMeSuggestedAction[];
   evidence: AIMeEvidence[];
   context: AIMeContextSummary;
+  policy: AIMePolicyContext;
   configuration_required: boolean;
   error?: string;
   created_at: string;
