@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircle,
@@ -25,7 +25,6 @@ import {
   useObserveAIApproval,
   useRejectAIApproval,
   useTakeOverAIApproval,
-  useUpdateAIApproval,
 } from "@multica/core/approvals";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { issueKeys } from "@multica/core/issues/queries";
@@ -89,6 +88,21 @@ const EXECUTABLE_ACTION_TYPES = new Set<string>([
   "post_internal_comment",
   "no_action",
 ]);
+
+const EDITABLE_APPROVAL_ACTION_TYPES = new Set<string>([
+  "draft_reply",
+  "send_external_message",
+  "post_internal_comment",
+]);
+
+const EDITABLE_PAYLOAD_TEXT_KEYS = [
+  "text",
+  "content",
+  "reply_text",
+  "reply_draft",
+  "draft",
+  "body",
+];
 
 export function ApprovalCenterPage() {
   const wsId = useWorkspaceId();
@@ -323,22 +337,22 @@ function ApprovalQueue({
 }
 
 function ApprovalDetail({ approval, loading }: { approval: AIApproval | null; loading: boolean }) {
-  const [payloadText, setPayloadText] = useState("{}");
-  const [payloadError, setPayloadError] = useState("");
-  const updateApproval = useUpdateAIApproval();
+  const [isEditingPayload, setIsEditingPayload] = useState(false);
+  const [editedPayloadText, setEditedPayloadText] = useState("");
   const approveApproval = useApproveAIApproval();
   const rejectApproval = useRejectAIApproval();
   const observeApproval = useObserveAIApproval();
   const takeOverApproval = useTakeOverAIApproval();
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!approval) {
-      setPayloadText("{}");
+      setIsEditingPayload(false);
+      setEditedPayloadText("");
       return;
     }
-    setPayloadText(formatJSON(approval.final_payload));
-    setPayloadError("");
-  }, [approval?.id, approval?.final_payload]);
+    setIsEditingPayload(false);
+    setEditedPayloadText(getEditableApprovalText(approval));
+  }, [approval?.id]);
 
   if (loading && !approval) {
     return (
@@ -364,53 +378,39 @@ function ApprovalDetail({ approval, loading }: { approval: AIApproval | null; lo
   const canTransition = approval.status === "pending" || approval.status === "observing";
   const canExecuteAction = EXECUTABLE_ACTION_TYPES.has(approval.action_type);
   const canApprove = canTransition && canExecuteAction;
+  const canEditPayload = canApprove && isEditableApproval(approval);
+  const editablePayloadKey = getEditableApprovalPayloadKey(approval);
+  const currentEditableText = getEditableApprovalText(approval);
+  const editedFinalPayload = buildEditedApprovalPayload(approval, editedPayloadText);
   const busy =
-    updateApproval.isPending ||
     approveApproval.isPending ||
     rejectApproval.isPending ||
     observeApproval.isPending ||
     takeOverApproval.isPending;
-
-  const parsePayload = () => {
-    try {
-      setPayloadError("");
-      return JSON.parse(payloadText) as unknown;
-    } catch {
-      setPayloadError("final_payload 不是合法 JSON");
-      return null;
-    }
-  };
-
-  const savePayload = async () => {
-    const parsed = parsePayload();
-    if (parsed === null) return;
-    try {
-      await updateApproval.mutateAsync({
-        id: approval.id,
-        final_payload: parsed,
-      });
-      toast.success("已保存最终 payload");
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "保存失败");
-    }
-  };
 
   const approve = async (edited: boolean) => {
     if (!canExecuteAction) {
       toast.error("这个动作会在 Phase 2 接入执行器");
       return;
     }
-    const parsed = parsePayload();
-    if (parsed === null) return;
+    if (edited && !canEditPayload) {
+      toast.error("这个动作暂不支持编辑后批准");
+      return;
+    }
+    if (edited && !editedPayloadText.trim()) {
+      toast.error("回复正文不能为空");
+      return;
+    }
     try {
       await approveApproval.mutateAsync({
         id: approval.id,
         data: {
           note: edited ? "编辑后批准" : "批准",
-          final_payload: parsed,
+          final_payload: edited ? editedFinalPayload : (approval.final_payload ?? {}),
         },
       });
       toast.success("审批已通过");
+      setIsEditingPayload(false);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "审批失败");
     }
@@ -488,27 +488,49 @@ function ApprovalDetail({ approval, loading }: { approval: AIApproval | null; lo
         <ApprovalFailureNotice approval={approval} />
         <ApprovalExecutionPanel approval={approval} />
 
-        <section className="grid gap-4 lg:grid-cols-2">
-          <PayloadBlock title="原始 payload" value={approval.original_payload} readOnly />
-          <div className="rounded-xl border border-[var(--aime-border)] p-4">
-            <div className="flex items-center justify-between gap-3">
-              <h3 className="text-sm font-semibold">最终 payload</h3>
-              {payloadError && (
-                <span className="text-xs text-[var(--aime-danger)]">{payloadError}</span>
+        {isEditableApproval(approval) && (
+          <section className="rounded-xl border border-[var(--aime-border)] bg-[var(--aime-surface)] p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-semibold">
+                  {isEditingPayload ? "编辑后发送内容" : "拟发送内容"}
+                </h3>
+                <p className="mt-1 text-xs leading-5 text-[var(--aime-text-tertiary)]">
+                  将写入 final_payload.{editablePayloadKey}，其他字段保持不变。
+                </p>
+              </div>
+              {isEditingPayload && (
+                <span className="rounded-md bg-[var(--aime-brand-50)] px-2 py-1 text-xs font-medium text-[var(--aime-brand-700)]">
+                  待你确认
+                </span>
               )}
             </div>
-            <Textarea
-              value={payloadText}
-              onChange={(event) => setPayloadText(event.target.value)}
-              className="mt-3 min-h-52 resize-y rounded-lg border-[var(--aime-border-strong)] bg-[var(--aime-surface)] font-mono text-xs leading-5"
-              spellCheck={false}
-            />
-            <div className="mt-3 flex justify-end">
-              <Button type="button" variant="outline" size="sm" disabled={!canTransition || busy} onClick={savePayload}>
-                保存修改
-              </Button>
-            </div>
-          </div>
+            {isEditingPayload ? (
+              <Textarea
+                aria-label="编辑后发送内容"
+                value={editedPayloadText}
+                onChange={(event) => setEditedPayloadText(event.target.value)}
+                className="mt-3 min-h-40 resize-y rounded-lg border-[var(--aime-border-strong)] bg-[var(--aime-surface)] text-sm leading-6"
+              />
+            ) : (
+              <div className="mt-3 whitespace-pre-wrap rounded-lg border border-[var(--aime-border)] bg-[var(--aime-surface-subtle)] p-3 text-sm leading-6 text-[var(--aime-text-secondary)]">
+                {currentEditableText || "AI-Me 未生成可编辑正文。"}
+              </div>
+            )}
+          </section>
+        )}
+
+        <section className="grid gap-4 lg:grid-cols-2">
+          <PayloadBlock
+            title="原始 payload"
+            value={approval.original_payload}
+            note="原始 payload 只读，用于审计和回溯。"
+          />
+          <PayloadBlock
+            title={isEditingPayload ? "最终 payload（将随审批提交）" : "最终 payload"}
+            value={isEditingPayload ? editedFinalPayload : approval.final_payload}
+            note="审批通过后以后端收到的最终 payload 为准。"
+          />
         </section>
 
         <section className="rounded-xl border border-[var(--aime-border)] p-4">
@@ -538,17 +560,32 @@ function ApprovalDetail({ approval, loading }: { approval: AIApproval | null; lo
             <Eye className="size-3.5" />
             继续观察
           </Button>
-          <Button type="button" variant="outline" disabled={!canApprove || busy} onClick={() => approve(true)}>
-            编辑后批准
-          </Button>
+          {canEditPayload && !isEditingPayload && (
+            <Button type="button" variant="outline" disabled={busy} onClick={() => setIsEditingPayload(true)}>
+              编辑后批准
+            </Button>
+          )}
+          {isEditingPayload && (
+            <Button
+              type="button"
+              variant="outline"
+              disabled={busy}
+              onClick={() => {
+                setEditedPayloadText(currentEditableText);
+                setIsEditingPayload(false);
+              }}
+            >
+              取消编辑
+            </Button>
+          )}
           <Button
             type="button"
-            disabled={!canApprove || busy}
-            onClick={() => approve(false)}
+            disabled={!canApprove || busy || (isEditingPayload && !editedPayloadText.trim())}
+            onClick={() => approve(isEditingPayload)}
             className="bg-[var(--aime-brand-500)] text-white hover:bg-[var(--aime-brand-600)]"
           >
             {approveApproval.isPending ? <Loader2 className="size-3.5 animate-spin" /> : <CheckCircle2 className="size-3.5" />}
-            {primaryActionLabel(approval.action_type)}
+            {isEditingPayload ? "保存并批准" : primaryActionLabel(approval.action_type)}
           </Button>
         </div>
       </div>
@@ -866,16 +903,16 @@ function ApprovalRiskPanel({ approval, loading }: { approval: AIApproval | null;
   );
 }
 
-function PayloadBlock({ title, value, readOnly }: { title: string; value: unknown; readOnly?: boolean }) {
+function PayloadBlock({ title, value, note }: { title: string; value: unknown; note?: string }) {
   return (
     <div className="rounded-xl border border-[var(--aime-border)] p-4">
       <h3 className="text-sm font-semibold">{title}</h3>
       <pre className="mt-3 max-h-64 overflow-auto rounded-lg border border-[var(--aime-border)] bg-[var(--aime-surface-subtle)] p-3 font-mono text-xs leading-5 text-[var(--aime-text-secondary)]">
         {formatJSON(value)}
       </pre>
-      {readOnly && (
+      {note && (
         <p className="mt-2 text-xs text-[var(--aime-text-tertiary)]">
-          原始 payload 只读，审批时以最终 payload 为准。
+          {note}
         </p>
       )}
     </div>
@@ -1250,6 +1287,39 @@ function formatJSON(value: unknown) {
   } catch {
     return "{}";
   }
+}
+
+function isEditableApproval(approval: AIApproval) {
+  return EDITABLE_APPROVAL_ACTION_TYPES.has(approval.action_type);
+}
+
+function getEditableApprovalText(approval: AIApproval) {
+  return getApprovalPayloadText(approval, EDITABLE_PAYLOAD_TEXT_KEYS);
+}
+
+function getEditableApprovalPayloadKey(approval: AIApproval) {
+  for (const payload of [approval.final_payload, approval.original_payload]) {
+    if (!isRecord(payload)) continue;
+    for (const key of EDITABLE_PAYLOAD_TEXT_KEYS) {
+      if (typeof payload[key] === "string") return key;
+    }
+  }
+  if (approval.action_type === "post_internal_comment") return "content";
+  if (approval.action_type === "draft_reply") return "reply_draft";
+  return "text";
+}
+
+function buildEditedApprovalPayload(approval: AIApproval, text: string) {
+  const base = getPayloadRecord(approval.final_payload) ?? getPayloadRecord(approval.original_payload) ?? {};
+  return {
+    ...base,
+    [getEditableApprovalPayloadKey(approval)]: text,
+  };
+}
+
+function getPayloadRecord(value: unknown) {
+  if (!isRecord(value)) return null;
+  return value;
 }
 
 function getApprovalPayloadText(approval: AIApproval, keys: string[]) {
