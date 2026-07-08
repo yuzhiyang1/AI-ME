@@ -12,6 +12,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/feishu"
 	"github.com/multica-ai/multica/server/internal/middleware"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
+	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
 func TestAIMeOrchestrationE2EIssueApprovalReplyTraceAndMemory(t *testing.T) {
@@ -53,13 +54,13 @@ func TestAIMeOrchestrationE2EIssueApprovalReplyTraceAndMemory(t *testing.T) {
 		t.Fatalf("decode issue: %v", err)
 	}
 
-	var agentID string
+	var agentID, runtimeID string
 	if err := testPool.QueryRow(ctx, `
-		SELECT id FROM agent
+		SELECT id, runtime_id FROM agent
 		WHERE workspace_id = $1 AND name = 'Handler Test Agent'
 		ORDER BY created_at ASC
 		LIMIT 1
-	`, testWorkspaceID).Scan(&agentID); err != nil {
+	`, testWorkspaceID).Scan(&agentID, &runtimeID); err != nil {
 		t.Fatalf("load handler test agent: %v", err)
 	}
 
@@ -126,6 +127,33 @@ func TestAIMeOrchestrationE2EIssueApprovalReplyTraceAndMemory(t *testing.T) {
 	}
 	assertAIApprovalEventForTest(t, assignResp.ApprovalID, "execution_succeeded")
 	assertIssueActivityForTest(t, issue.ID, "assignee_changed", assignResp.ApprovalID)
+
+	claimed := claimTaskForRuntimeForTest(t, runtimeID, "aime-e2e-daemon")
+	if claimed.ID != *assignApproval.CreatedTaskID || claimed.AgentID != agentID || claimed.IssueID != issue.ID {
+		t.Fatalf("claimed task = %#v, want task %s agent %s issue %s", claimed, *assignApproval.CreatedTaskID, agentID, issue.ID)
+	}
+	if claimed.Status != "dispatched" {
+		t.Fatalf("claimed task status = %q, want dispatched", claimed.Status)
+	}
+	started := startTaskForTest(t, claimed.ID)
+	if started.Status != "running" {
+		t.Fatalf("started task status = %q, want running", started.Status)
+	}
+	reportTaskMessagesForTest(t, claimed.ID, []TaskMessageRequest{
+		{Seq: 1, Type: "text", Content: "正在核查退款订单和支付回调日志。"},
+		{Seq: 2, Type: "tool", Tool: "grep", Input: map[string]any{"query": "refund status"}, Output: "found refund pending state"},
+	})
+	messages := listTaskMessagesAsUserForTest(t, member, claimed.ID)
+	if len(messages) != 2 || messages[0].Content != "正在核查退款订单和支付回调日志。" {
+		t.Fatalf("task messages = %#v", messages)
+	}
+	const agentOutput = "已核查退款链路：退款请求仍在排队中，建议客服先告知用户已收到并继续跟进。"
+	completed := completeTaskForTest(t, claimed.ID, agentOutput)
+	if completed.Status != "completed" || completed.CompletedAt == nil {
+		t.Fatalf("completed task = %#v, want completed with completed_at", completed)
+	}
+	assertAgentCommentForTest(t, issue.ID, agentID, agentOutput)
+	assertTimelineCommentForTest(t, issue.ID, agentOutput)
 
 	feishuBaseURL, replyText := startFakeFeishuServerForTest(t)
 	origFeishu := testHandler.Feishu
@@ -209,6 +237,102 @@ func approveAIApprovalForTest(t *testing.T, member db.Member, approvalID string,
 	return resp
 }
 
+func claimTaskForRuntimeForTest(t *testing.T, runtimeID, daemonID string) AgentTaskResponse {
+	t.Helper()
+	req := withURLParam(
+		newDaemonTokenRequest("POST", "/api/daemon/runtimes/"+runtimeID+"/tasks/claim", nil, testWorkspaceID, daemonID),
+		"runtimeId",
+		runtimeID,
+	)
+	w := httptest.NewRecorder()
+	testHandler.ClaimTaskByRuntime(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("ClaimTaskByRuntime: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Task *AgentTaskResponse `json:"task"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode claimed task: %v", err)
+	}
+	if resp.Task == nil {
+		t.Fatalf("expected claimed task, got nil: %s", w.Body.String())
+	}
+	return *resp.Task
+}
+
+func startTaskForTest(t *testing.T, taskID string) AgentTaskResponse {
+	t.Helper()
+	req := withURLParam(
+		newDaemonTokenRequest("POST", "/api/daemon/tasks/"+taskID+"/start", nil, testWorkspaceID, "aime-e2e-daemon"),
+		"taskId",
+		taskID,
+	)
+	w := httptest.NewRecorder()
+	testHandler.StartTask(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("StartTask: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp AgentTaskResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode started task: %v", err)
+	}
+	return resp
+}
+
+func reportTaskMessagesForTest(t *testing.T, taskID string, messages []TaskMessageRequest) {
+	t.Helper()
+	req := withURLParam(
+		newDaemonTokenRequest("POST", "/api/daemon/tasks/"+taskID+"/messages", TaskMessageBatchRequest{Messages: messages}, testWorkspaceID, "aime-e2e-daemon"),
+		"taskId",
+		taskID,
+	)
+	w := httptest.NewRecorder()
+	testHandler.ReportTaskMessages(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("ReportTaskMessages: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func listTaskMessagesAsUserForTest(t *testing.T, member db.Member, taskID string) []protocol.TaskMessagePayload {
+	t.Helper()
+	req := withURLParam(newRequest("GET", "/api/tasks/"+taskID+"/messages?workspace_id="+testWorkspaceID, nil), "taskId", taskID)
+	req = req.WithContext(middleware.SetMemberContext(req.Context(), testWorkspaceID, member))
+	w := httptest.NewRecorder()
+	testHandler.ListTaskMessagesByUser(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("ListTaskMessagesByUser: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp []protocol.TaskMessagePayload
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode task messages: %v", err)
+	}
+	return resp
+}
+
+func completeTaskForTest(t *testing.T, taskID, output string) AgentTaskResponse {
+	t.Helper()
+	req := withURLParam(
+		newDaemonTokenRequest("POST", "/api/daemon/tasks/"+taskID+"/complete", map[string]any{
+			"output":     output,
+			"session_id": "aime-e2e-session",
+			"work_dir":   "D:/tmp/aime-e2e",
+		}, testWorkspaceID, "aime-e2e-daemon"),
+		"taskId",
+		taskID,
+	)
+	w := httptest.NewRecorder()
+	testHandler.CompleteTask(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("CompleteTask: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp AgentTaskResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode completed task: %v", err)
+	}
+	return resp
+}
+
 func startFakeFeishuServerForTest(t *testing.T) (string, func() string) {
 	t.Helper()
 	var mu sync.Mutex
@@ -277,6 +401,38 @@ func assertIssueActivityForTest(t *testing.T, issueID, action, approvalID string
 	if count == 0 {
 		t.Fatalf("expected activity %s for issue %s approval %s", action, issueID, approvalID)
 	}
+}
+
+func assertAgentCommentForTest(t *testing.T, issueID, agentID, content string) {
+	t.Helper()
+	var count int
+	if err := testPool.QueryRow(context.Background(), `
+		SELECT count(*)
+		FROM comment
+		WHERE issue_id = $1
+		  AND author_type = 'agent'
+		  AND author_id = $2
+		  AND content = $3
+	`, issueID, agentID, content).Scan(&count); err != nil {
+		t.Fatalf("count agent comment: %v", err)
+	}
+	if count == 0 {
+		t.Fatalf("expected agent comment for issue %s agent %s", issueID, agentID)
+	}
+}
+
+func assertTimelineCommentForTest(t *testing.T, issueID, content string) {
+	t.Helper()
+	entries, status := fetchTimeline(t, issueID)
+	if status != http.StatusOK {
+		t.Fatalf("ListTimeline: expected 200, got %d", status)
+	}
+	for _, entry := range entries {
+		if entry.Type == "comment" && entry.Content != nil && *entry.Content == content {
+			return
+		}
+	}
+	t.Fatalf("expected timeline comment %q, got %#v", content, entries)
 }
 
 func assertMemoryUsageForTest(t *testing.T, memoryID, issueID string) {
