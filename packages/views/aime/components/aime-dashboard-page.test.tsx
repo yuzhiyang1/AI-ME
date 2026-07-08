@@ -211,7 +211,12 @@ describe("AIMeDashboardPage work detail drawer", () => {
         title: "客户退款消息",
         body: "客户追问退款进度。",
         severity: "action_required",
-        details: { thread_id: "thread-1", source: "feishu" },
+        details: {
+          approval_id: "approval-inbox-1",
+          thread_id: "thread-1",
+          source: "feishu",
+          reply_preview: "您好，退款问题我已经收到。",
+        },
       }),
     ]);
     mockApi.getAgentTaskSnapshot.mockResolvedValue([
@@ -280,8 +285,14 @@ describe("AIMeDashboardPage work detail drawer", () => {
     openDetailNear("客户退款消息");
     expect(screen.getByText("原始事件")).toBeInTheDocument();
     expect(screen.getByText("新评论")).toBeInTheDocument();
+    expect(screen.getByText("关联审批")).toBeInTheDocument();
+    expect(screen.getAllByText("approval-inbox-1").length).toBeGreaterThan(0);
     expect(screen.getByText("thread_id")).toBeInTheDocument();
     expect(screen.getByText("thread-1")).toBeInTheDocument();
+    expect(within(screen.getByRole("dialog")).getByRole("link", { name: /去审批/ })).toHaveAttribute(
+      "href",
+      "/test/approvals/approval-inbox-1",
+    );
   });
 });
 

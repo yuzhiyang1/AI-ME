@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { I18nProvider } from "@multica/core/i18n/react";
 import type { InboxItem } from "@multica/core/types";
@@ -210,5 +210,33 @@ describe("InboxPage URL selection", () => {
     expect(
       await screen.findByRole("heading", { name: "Legacy standalone exception" }),
     ).toBeInTheDocument();
+  });
+
+  it("opens the linked AI approval from approval-backed inbox items", async () => {
+    renderInboxPage(
+      [
+        makeInboxItem({
+          id: "approval-inbox",
+          issue_id: null,
+          type: "review_requested",
+          title: "是否发送飞书回复",
+          body: "批准后将回复发送到飞书原消息。",
+          severity: "action_required",
+          details: {
+            approval_id: "approval-1",
+            channel: "feishu",
+            reply_preview: "您好，退款问题我已经收到。",
+          },
+        }),
+      ],
+      "inbox=approval-inbox",
+    );
+
+    expect(await screen.findByText("AI-Me 已生成审批事项")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /去审批中心/ }));
+
+    expect(mockNavigation.push).toHaveBeenCalledWith(
+      "/test/approvals?approval=approval-1",
+    );
   });
 });

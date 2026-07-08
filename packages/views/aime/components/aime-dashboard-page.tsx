@@ -61,6 +61,7 @@ import { cn } from "@multica/ui/lib/utils";
 import { toast } from "sonner";
 import { AgentTaskRunList, type AgentTaskRunCopy } from "../../common/agent-task-runs";
 import { PageHeader } from "../../layout/page-header";
+import { getInboxApprovalId } from "../../inbox/components/inbox-display";
 import { AppLink } from "../../navigation";
 import {
   buildCockpitQueues,
@@ -292,6 +293,7 @@ export function AIMeDashboardPage() {
             items={cockpitQueues.inbox}
             isLoading={cockpitLoading}
             inboxPath={paths.inbox()}
+            approvalPath={(id) => paths.approvals(id)}
             inboxItemPath={(item) => paths.inbox({ inboxItemId: item.id })}
             issuePath={(id) => paths.issueDetail(id)}
             onOpenDetail={(item) => setDetailSelection({ kind: "inbox", item })}
@@ -623,10 +625,12 @@ function DetailSummary({ selection }: { selection: WorkDetailSelection }) {
 
   if (selection.kind === "inbox") {
     const item = selection.item.item;
+    const approvalId = getInboxApprovalId(item);
     return (
       <div className="space-y-2 rounded-xl border border-[var(--aime-border)] bg-[var(--aime-surface-subtle)] px-3 py-3">
         <DetailFact label="原始事件" value={inboxTypeLabel(item.type)} />
         <DetailFact label="状态" value={item.read ? "已读" : "未读"} />
+        {approvalId && <DetailFact label="关联审批" value={approvalId} />}
         <DetailFact label="时间" value={formatDashboardAge(item.created_at)} />
         <p className="pt-1 text-xs leading-5 text-[var(--aime-text-secondary)]">
           {item.body || "这个例外没有附加正文，建议进入原事件查看完整上下文。"}
@@ -754,6 +758,9 @@ function detailDescription(selection: WorkDetailSelection): string {
     case "decision":
       return selection.item.approval.summary || selection.item.approval.action_description || "等待你确认下一步。";
     case "inbox":
+      if (getInboxApprovalId(selection.item.item)) {
+        return selection.item.item.body || "AI-Me 已生成审批事项，等待你确认是否继续。";
+      }
       return selection.item.item.body || selection.item.issue?.title || "来自例外收件箱的待处理事件。";
     case "active":
       return `${selection.item.agent?.name ?? "AI 员工"} 正在处理这个工作项。`;
@@ -772,8 +779,11 @@ function detailPrimaryAction(
   switch (selection.kind) {
     case "decision":
       return { label: "去审批", href: paths.approvalPath(selection.item.approval.id) };
-    case "inbox":
+    case "inbox": {
+      const approvalId = getInboxApprovalId(selection.item.item);
+      if (approvalId) return { label: "去审批", href: paths.approvalPath(approvalId) };
       return { label: "查看原事件", href: paths.inboxItemPath(selection.item.item) };
+    }
     case "active":
       return selection.item.issue
         ? { label: "查看 issue", href: paths.issuePath(selection.item.issue.id) }
@@ -1005,6 +1015,7 @@ function InboxExceptionPanel({
   items,
   isLoading,
   inboxPath,
+  approvalPath,
   inboxItemPath,
   issuePath,
   onOpenDetail,
@@ -1012,6 +1023,7 @@ function InboxExceptionPanel({
   items: CockpitInboxItem[];
   isLoading: boolean;
   inboxPath: string;
+  approvalPath: (id: string) => string;
   inboxItemPath: (item: CockpitInboxItem["item"]) => string;
   issuePath: (id: string) => string;
   onOpenDetail: (item: CockpitInboxItem) => void;
@@ -1036,6 +1048,9 @@ function InboxExceptionPanel({
         <div className="space-y-2">
           {items.slice(0, 5).map((entry) => {
             const { item, issue } = entry;
+            const approvalId = getInboxApprovalId(item);
+            const primaryHref = approvalId ? approvalPath(approvalId) : inboxItemPath(item);
+            const primaryLabel = approvalId ? "去审批" : "查看原事件";
             return (
               <article
                 key={item.id}
@@ -1058,7 +1073,7 @@ function InboxExceptionPanel({
                 </div>
                 <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[var(--aime-border)] pt-2.5">
                   <span className="text-[11px] text-[var(--aime-text-tertiary)]">
-                    原始事件：{inboxTypeLabel(item.type)}
+                    {approvalId ? "已生成审批" : `原始事件：${inboxTypeLabel(item.type)}`}
                   </span>
                   <div className="flex flex-wrap items-center gap-2">
                     <button
@@ -1077,10 +1092,10 @@ function InboxExceptionPanel({
                       </AppLink>
                     )}
                     <AppLink
-                      href={inboxItemPath(item)}
+                      href={primaryHref}
                       className="inline-flex h-8 items-center rounded-lg border border-[var(--aime-brand-500)] bg-[var(--aime-brand-500)] px-3 text-xs font-medium text-white hover:bg-[var(--aime-brand-600)]"
                     >
-                      查看原事件
+                      {primaryLabel}
                       <ArrowRight className="ml-1.5 size-3.5" />
                     </AppLink>
                   </div>

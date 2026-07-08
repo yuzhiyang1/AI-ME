@@ -65,6 +65,7 @@ import { InboxListItem, useTimeAgo } from "./inbox-list-item";
 import { useTypeLabels } from "./inbox-detail-label";
 import {
   buildInboxAIMeInput,
+  getInboxApprovalId,
   getInboxAIMeIntent,
   getInboxDisplayTitle,
 } from "./inbox-display";
@@ -605,11 +606,58 @@ function AIMeInboxActionPanel({
   onRun: () => void;
   onOpenApprovalCenter: (approvalId?: string) => void;
 }) {
+  const linkedApprovalId = getInboxApprovalId(item);
   const approvalIds = getAIMeApprovalIds(result);
   const approvalCount = approvalIds.length;
   const primaryApprovalId = approvalIds[0];
   const actions = result?.actions ?? [];
   const evidence = result?.evidence ?? [];
+
+  if (linkedApprovalId) {
+    const channel = item.details?.channel?.trim();
+    const replyPreview = item.details?.reply_preview?.trim();
+    return (
+      <section className="rounded-xl border border-[var(--aime-border)] bg-[var(--aime-surface)] p-4 shadow-[var(--aime-shadow-xs)]">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <ShieldCheck className="size-4 text-[var(--aime-brand-600)]" />
+              <h3 className="text-sm font-semibold text-[var(--aime-text)]">
+                AI-Me 已生成审批事项
+              </h3>
+              <Badge variant="outline" className="border-[var(--aime-border)] text-[var(--aime-text-tertiary)]">
+                {typeLabel}
+              </Badge>
+            </div>
+            <p className="mt-1 text-xs leading-5 text-[var(--aime-text-tertiary)]">
+              这条例外已经进入审批中心；批准后才会执行对外发送。
+            </p>
+          </div>
+          <Button
+            type="button"
+            size="sm"
+            onClick={() => onOpenApprovalCenter(linkedApprovalId)}
+            className="border-[var(--aime-brand-500)] bg-[var(--aime-brand-500)] text-white hover:bg-[var(--aime-brand-600)]"
+          >
+            <ExternalLink className="size-3.5" />
+            去审批中心
+          </Button>
+        </div>
+        {(channel || replyPreview) && (
+          <div className="mt-4 rounded-lg bg-[var(--aime-surface-subtle)] px-3 py-2">
+            <p className="text-xs font-medium text-[var(--aime-text-tertiary)]">
+              {channel ? `外部渠道 · ${channel}` : "回复草稿"}
+            </p>
+            {replyPreview && (
+              <p className="mt-1 line-clamp-3 whitespace-pre-wrap text-sm leading-6 text-[var(--aime-text-secondary)]">
+                {replyPreview}
+              </p>
+            )}
+          </div>
+        )}
+      </section>
+    );
+  }
 
   return (
     <section className="rounded-xl border border-[var(--aime-border)] bg-[var(--aime-surface)] p-4 shadow-[var(--aime-shadow-xs)]">

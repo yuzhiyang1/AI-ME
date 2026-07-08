@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { InboxItem } from "@multica/core/types";
 import {
   buildInboxAIMeInput,
+  getInboxApprovalId,
   getInboxAIMeIntent,
   getInboxDisplayTitle,
   getQuickCreateFailureDetail,
@@ -78,6 +79,13 @@ describe("inbox display helpers", () => {
     expect(getQuickCreateFailureDetail(failedItem)).toBe(
       "CLI failed with exit status 1",
     );
+  });
+
+  it("extracts linked approval ids from structured inbox details", () => {
+    expect(
+      getInboxApprovalId(item({ details: { approval_id: " approval-1 " } })),
+    ).toBe("approval-1");
+    expect(getInboxApprovalId(item({ details: null }))).toBe("");
   });
 
   it("maps inbox exceptions to the most useful AI-Me intent", () => {

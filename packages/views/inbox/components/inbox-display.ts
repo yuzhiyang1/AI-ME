@@ -48,6 +48,10 @@ export function getQuickCreateFailureDetail(item: InboxItem): string {
   return singleLine(details.error) || singleLine(item.body);
 }
 
+export function getInboxApprovalId(item: Pick<InboxItem, "details">): string {
+  return singleLine(item.details?.approval_id);
+}
+
 export function getInboxAIMeIntent(item: InboxItem): AIMeThinkIntent {
   switch (item.type) {
     case "new_comment":
