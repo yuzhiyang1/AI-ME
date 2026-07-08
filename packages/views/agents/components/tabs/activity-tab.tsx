@@ -2,26 +2,11 @@
 
 import type { ReactNode } from "react";
 import { useMemo, useState } from "react";
-import {
-  ArrowUpRight,
-  CircleHelp,
-  Hash,
-  MessageSquare,
-  Workflow,
-  X,
-} from "lucide-react";
-import { toast } from "sonner";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@multica/ui/components/ui/tooltip";
 import { useQueries, useQuery } from "@tanstack/react-query";
 import type {
   Agent,
   AgentTask,
   Issue,
-  TaskFailureReason,
 } from "@multica/core/types";
 import {
   type AgentActivity,
@@ -34,11 +19,10 @@ import { api } from "@multica/core/api";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { useWorkspacePaths } from "@multica/core/paths";
 import { issueDetailOptions } from "@multica/core/issues/queries";
-import { timeAgo } from "@multica/core/utils";
-import { AppLink } from "../../../navigation";
-import { TranscriptButton } from "../../../common/task-transcript";
-import { taskStatusConfig } from "../../config";
-import { failureReasonLabel } from "./task-failure";
+import {
+  AgentTaskRunList,
+  type AgentTaskRunCopy,
+} from "../../../common/agent-task-runs";
 import { Sparkline } from "../sparkline";
 import { useT } from "../../../i18n";
 
@@ -326,243 +310,37 @@ function TaskList({
   timeMode: "active" | "completed";
   agent: Agent;
 }) {
-  return (
-    <div className="space-y-1.5">
-      {tasks.map((task) => (
-        <TaskRow
-          key={task.id}
-          task={task}
-          issueMap={issueMap}
-          timeMode={timeMode}
-          agent={agent}
-        />
-      ))}
-    </div>
-  );
-}
-
-function TaskRow({
-  task,
-  issueMap,
-  timeMode,
-  agent,
-}: {
-  task: AgentTask;
-  issueMap: Map<string, Issue>;
-  timeMode: "active" | "completed";
-  agent: Agent;
-}) {
   const { t } = useT("agents");
   const paths = useWorkspacePaths();
-  const [cancelling, setCancelling] = useState(false);
-  const cfg = taskStatusConfig[task.status] ?? taskStatusConfig.queued!;
-  const Icon = cfg.icon;
-  const hasIssue = task.issue_id !== "";
-  const issue = hasIssue ? issueMap.get(task.issue_id) : undefined;
-  const isRunning = task.status === "running";
-  // Queued tasks have no messages yet — hiding the transcript button avoids
-  // a guaranteed "No execution data recorded." dialog open.
-  const showTranscript = task.status !== "queued";
-  // Cancel only makes sense for the three active states. Terminal rows
-  // (completed / failed / cancelled) hide the button entirely.
-  const showCancel =
-    timeMode === "active" &&
-    (task.status === "queued" ||
-      task.status === "dispatched" ||
-      task.status === "running");
-
-  const handleCancel = async () => {
-    if (cancelling) return;
-    setCancelling(true);
-    try {
-      await api.cancelTaskById(task.id);
-      // No manual invalidate needed — the task:cancelled WS event flows
-      // through useRealtimeSync's `task:` prefix path which already
-      // invalidates snapshot + per-agent + per-issue task lists.
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : t(($) => $.tab_body.activity.cancel_failed_toast));
-      setCancelling(false);
-    }
-  };
-
-  const isTerminalStatus =
-    task.status === "completed" ||
-    task.status === "failed" ||
-    task.status === "cancelled";
-  const sourceFallback = !hasIssue
-    ? task.kind === "quick_create"
-      ? isTerminalStatus
-        ? t(($) => $.tab_body.activity.source_quick_create)
-        : t(($) => $.tab_body.activity.source_creating_issue)
-      : task.chat_session_id
-        ? t(($) => $.tab_body.activity.source_chat_session)
-        : task.autopilot_run_id
-          ? t(($) => $.tab_body.activity.source_autopilot_run)
-          : t(($) => $.tab_body.activity.source_untracked)
-    : null;
-
-  const SourceIcon = hasIssue
-    ? Hash
-    : task.chat_session_id
-      ? MessageSquare
-      : task.autopilot_run_id
-        ? Workflow
-        : CircleHelp;
-  const sourceLabel = hasIssue
-    ? t(($) => $.tab_body.activity.source_issue)
-    : task.chat_session_id
-      ? t(($) => $.tab_body.activity.source_chat)
-      : task.autopilot_run_id
-        ? t(($) => $.tab_body.activity.source_autopilot)
-        : t(($) => $.tab_body.activity.source_untracked);
-
-  const timeText =
-    timeMode === "active"
-      ? activeTaskTimeText(task, t)
-      : task.completed_at
-        ? timeAgo(task.completed_at)
-        : "—";
-
-  // Failure reason. The back-end emits "" on non-failed tasks (omitempty
-  // strips it on the wire) so the truthy guard is the right shape; the
-  // cast is safe because the back-end only emits one of the enum values.
-  const failureLabel =
-    task.status === "failed" && task.failure_reason
-      ? failureReasonLabel[task.failure_reason as TaskFailureReason]
-      : null;
-
-  // Only show duration for terminal rows. An active row's duration is
-  // inferred from the timeText already ("Started 2m ago") and adding a
-  // second time bubble next to it just clutters the line.
-  let durationText: string | null = null;
-  if (timeMode === "completed" && task.started_at && task.completed_at) {
-    const dur =
-      new Date(task.completed_at).getTime() -
-      new Date(task.started_at).getTime();
-    if (dur > 0) durationText = formatDurationMs(dur);
-  }
-
-  const rowClass = `group flex items-center gap-3 rounded-md border px-3 py-2.5 ${
-    isRunning ? "border-brand/40 bg-brand/5" : ""
-  }`;
+  const copy = useMemo(() => agentActivityRunCopy(t), [t]);
 
   return (
-    <div className={rowClass}>
-      <Icon
-        className={`h-4 w-4 shrink-0 ${cfg.color} ${
-          isRunning ? "animate-spin" : ""
-        }`}
-      />
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-1.5">
-          <SourceIcon
-            className="h-3 w-3 shrink-0 text-muted-foreground/70"
-            aria-label={sourceLabel}
-          />
-          {issue && (
-            <span className="shrink-0 font-mono text-xs text-muted-foreground">
-              {issue.identifier}
-            </span>
-          )}
-          {task.trigger_summary ? (
-            // Hover surfaces "why this task ran" — the snapshot lets the
-            // agent-side row stay anchored on issue.title (the
-            // identification axis here) while still letting the user
-            // dwell to see the trigger context. Same pattern as
-            // GitHub Actions surfacing the commit message on hover.
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <span className="truncate text-sm">
-                    {issue?.title ??
-                      (hasIssue
-                        ? t(($) => $.tab_body.activity.issue_short_fallback, { prefix: task.issue_id.slice(0, 8) })
-                        : (sourceFallback ?? t(($) => $.tab_body.activity.source_untracked)))}
-                  </span>
-                }
-              />
-              <TooltipContent className="max-w-md">
-                <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground/80">
-                  {t(($) => $.tab_body.activity.triggered_by)}
-                </div>
-                <div className="mt-0.5 whitespace-pre-wrap text-xs">
-                  {task.trigger_summary}
-                </div>
-              </TooltipContent>
-            </Tooltip>
-          ) : (
-            <span className="truncate text-sm">
-              {issue?.title ??
-                (hasIssue
-                  ? t(($) => $.tab_body.activity.issue_short_fallback, { prefix: task.issue_id.slice(0, 8) })
-                  : (sourceFallback ?? t(($) => $.tab_body.activity.source_untracked)))}
-            </span>
-          )}
-        </div>
-        <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
-          <span>{timeText}</span>
-          {durationText && (
-            <>
-              <Sep />
-              <span>{durationText}</span>
-            </>
-          )}
-          {failureLabel && (
-            <>
-              <Sep />
-              <span className="text-destructive">{failureLabel}</span>
-            </>
-          )}
-        </div>
-      </div>
-
-      {/* Hover-only actions. The row is intentionally non-clickable so
-          neither destination is privileged — issue detail and transcript
-          are equally valid follow-ups. focus-within keeps the slot
-          reachable for keyboard users. */}
-      <div className="ml-2 flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity duration-100 group-hover:opacity-100 group-focus-within:opacity-100">
-        {hasIssue && (
-          <Tooltip>
-            <TooltipTrigger
-              render={<AppLink href={paths.issueDetail(task.issue_id)} />}
-              aria-label={t(($) => $.tab_body.activity.open_issue_aria)}
-              className="flex items-center justify-center rounded p-1 text-muted-foreground hover:text-foreground hover:bg-accent/50 transition-colors"
-            >
-              <ArrowUpRight className="h-3.5 w-3.5" />
-            </TooltipTrigger>
-            <TooltipContent>{t(($) => $.tab_body.activity.open_issue_tooltip)}</TooltipContent>
-          </Tooltip>
-        )}
-        {showTranscript && (
-          <TranscriptButton
-            task={task}
-            agentName={agent.name}
-            isLive={isRunning}
-            title={t(($) => $.tab_body.activity.transcript_tooltip)}
-          />
-        )}
-        {showCancel && (
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <button
-                  type="button"
-                  onClick={handleCancel}
-                  disabled={cancelling}
-                  aria-label={t(($) => $.tab_body.activity.cancel_task_aria)}
-                />
-              }
-              className="flex items-center justify-center rounded p-1 text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              <X className="h-3.5 w-3.5" />
-            </TooltipTrigger>
-            <TooltipContent>
-              {cancelling ? t(($) => $.tab_body.activity.cancelling_tooltip) : t(($) => $.tab_body.activity.cancel_task_tooltip)}
-            </TooltipContent>
-          </Tooltip>
-        )}
-      </div>
-    </div>
+    <AgentTaskRunList
+      tasks={tasks}
+      allowCancel={timeMode === "active"}
+      allowRetry={false}
+      className="space-y-1.5"
+      collapsePast={false}
+      copy={copy}
+      getAgentName={() => agent.name}
+      getTaskHref={(task) =>
+        task.issue_id ? paths.issueDetail(task.issue_id) : undefined
+      }
+      getTriggerText={(task, fallback) =>
+        agentActivityTaskTitle(task, issueMap, t) ?? fallback
+      }
+      onCancelTask={(task) => api.cancelTaskById(task.id)}
+      renderTaskPrefix={(task) => {
+        const issue = task.issue_id ? issueMap.get(task.issue_id) : null;
+        if (!issue) return null;
+        return (
+          <span className="mr-1 font-mono text-[11px] text-muted-foreground/80">
+            {issue.identifier}
+          </span>
+        );
+      }}
+      showAvatar={false}
+    />
   );
 }
 
@@ -601,14 +379,58 @@ function Sep() {
 
 type AgentsT = ReturnType<typeof useT<"agents">>["t"];
 
-function activeTaskTimeText(task: AgentTask, t: AgentsT): string {
-  if (task.status === "running" && task.started_at) {
-    return t(($) => $.tab_body.activity.started_prefix, { when: timeAgo(task.started_at) });
+function agentActivityRunCopy(t: AgentsT): Partial<AgentTaskRunCopy> {
+  return {
+    openTaskAria: t(($) => $.tab_body.activity.open_issue_aria),
+    openTaskTooltip: t(($) => $.tab_body.activity.open_issue_tooltip),
+    transcriptTooltip: t(($) => $.tab_body.activity.transcript_tooltip),
+    cancelTaskAria: t(($) => $.tab_body.activity.cancel_task_aria),
+    cancelTaskTooltip: t(($) => $.tab_body.activity.cancel_task_tooltip),
+    cancelFailed: t(($) => $.tab_body.activity.cancel_failed_toast),
+    status: {
+      queued: t(($) => $.worker_page.task_status.queued),
+      dispatched: t(($) => $.worker_page.task_status.dispatched),
+      running: t(($) => $.worker_page.task_status.running),
+      completed: t(($) => $.worker_page.task_status.completed),
+      failed: t(($) => $.worker_page.task_status.failed),
+      cancelled: t(($) => $.worker_page.task_status.cancelled),
+    },
+  };
+}
+
+function agentActivityTaskTitle(
+  task: AgentTask,
+  issueMap: Map<string, Issue>,
+  t: AgentsT,
+): string {
+  const hasIssue = task.issue_id !== "";
+  const issue = hasIssue ? issueMap.get(task.issue_id) : undefined;
+  if (issue?.title) return issue.title;
+  if (hasIssue) {
+    return t(($) => $.tab_body.activity.issue_short_fallback, {
+      prefix: task.issue_id.slice(0, 8),
+    });
   }
-  if (task.status === "dispatched" && task.dispatched_at) {
-    return t(($) => $.tab_body.activity.dispatched_prefix, { when: timeAgo(task.dispatched_at) });
+  return agentActivitySourceFallback(task, t);
+}
+
+function agentActivitySourceFallback(task: AgentTask, t: AgentsT): string {
+  if (task.kind === "quick_create") {
+    return isTerminalTask(task)
+      ? t(($) => $.tab_body.activity.source_quick_create)
+      : t(($) => $.tab_body.activity.source_creating_issue);
   }
-  return t(($) => $.tab_body.activity.queued_prefix, { when: timeAgo(task.created_at) });
+  if (task.chat_session_id) return t(($) => $.tab_body.activity.source_chat_session);
+  if (task.autopilot_run_id) return t(($) => $.tab_body.activity.source_autopilot_run);
+  return t(($) => $.tab_body.activity.source_untracked);
+}
+
+function isTerminalTask(task: AgentTask): boolean {
+  return (
+    task.status === "completed" ||
+    task.status === "failed" ||
+    task.status === "cancelled"
+  );
 }
 
 /**

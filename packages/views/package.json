@@ -12,6 +12,7 @@
     "./navigation": "./navigation/index.ts",
     "./common/actor-avatar": "./common/actor-avatar.tsx",
     "./common/markdown": "./common/markdown.tsx",
+    "./common/agent-task-runs": "./common/agent-task-runs/index.ts",
     "./editor": "./editor/index.ts",
     "./issues/components": "./issues/components/index.ts",
     "./issues/hooks": "./issues/hooks/index.ts",

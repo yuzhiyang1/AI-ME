@@ -20,7 +20,9 @@ import {
   ShieldAlert,
   Sparkles,
   UserCheck,
+  X,
 } from "lucide-react";
+import { api } from "@multica/core/api";
 import { agentTaskSnapshotOptions } from "@multica/core/agents";
 import { aimeCockpitSummaryOptions, useThinkAIMe } from "@multica/core/aime";
 import { approvalListOptions } from "@multica/core/approvals";
@@ -28,9 +30,11 @@ import { inboxListOptions, deduplicateInboxItems } from "@multica/core/inbox/que
 import { memoryListOptions } from "@multica/core/memory";
 import { agentListOptions } from "@multica/core/workspace";
 import { issueListOptions } from "@multica/core/issues";
+import { issueKeys } from "@multica/core/issues/queries";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { useWorkspacePaths } from "@multica/core/paths";
 import type {
+  AgentTask,
   AIMeMemoryContext,
   AIMeSuggestedAction,
   AIMeThinkIntent,
@@ -42,6 +46,12 @@ import { Alert, AlertDescription, AlertTitle } from "@multica/ui/components/ui/a
 import { Badge } from "@multica/ui/components/ui/badge";
 import { Button } from "@multica/ui/components/ui/button";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+} from "@multica/ui/components/ui/dialog";
+import {
   NativeSelect,
   NativeSelectOption,
 } from "@multica/ui/components/ui/native-select";
@@ -49,6 +59,7 @@ import { Skeleton } from "@multica/ui/components/ui/skeleton";
 import { Textarea } from "@multica/ui/components/ui/textarea";
 import { cn } from "@multica/ui/lib/utils";
 import { toast } from "sonner";
+import { AgentTaskRunList, type AgentTaskRunCopy } from "../../common/agent-task-runs";
 import { PageHeader } from "../../layout/page-header";
 import { AppLink } from "../../navigation";
 import {
@@ -79,12 +90,49 @@ const STARTERS = [
 const EMPTY_AGENTS: Agent[] = [];
 const EMPTY_ISSUES: Issue[] = [];
 
+type WorkDetailSelection =
+  | { kind: "decision"; item: CockpitDecisionItem }
+  | { kind: "active"; item: CockpitWorkItem }
+  | { kind: "inbox"; item: CockpitInboxItem };
+
+const AIME_TASK_RUN_COPY: Partial<AgentTaskRunCopy> = {
+  showPast: (count) => `展开历史运行（${count}）`,
+  hidePast: (count) => `收起历史运行（${count}）`,
+  transcriptTooltip: "查看运行记录",
+  cancelTaskAria: "取消员工任务",
+  cancelTaskTooltip: "取消任务",
+  cancelFailed: "取消任务失败",
+  retryTaskAria: "重新执行员工任务",
+  retryTaskTooltip: "重新执行",
+  retryFailed: "重新执行失败",
+  emptyTitle: "暂无员工运行",
+  emptyDescription: "这个工作项还没有关联员工执行记录。",
+  status: {
+    queued: "排队中",
+    dispatched: "已派发",
+    running: "执行中",
+    completed: "已完成",
+    failed: "失败",
+    cancelled: "已取消",
+  },
+  trigger: {
+    retryAttemptPrefix: (attempt) => `重试 #${attempt} · `,
+    retryPrefix: "重试 · ",
+    retryAttempt: (attempt) => `重试 #${attempt}`,
+    retry: "重试",
+    autopilot: "自动驾驶触发",
+    comment: "评论触发",
+    initial: "初始派工",
+  },
+};
+
 export function AIMeDashboardPage() {
   const wsId = useWorkspaceId();
   const paths = useWorkspacePaths();
   const [input, setInput] = useState("");
   const [intent, setIntent] = useState<AIMeThinkIntent>("triage");
   const [lastResult, setLastResult] = useState<AIMeThinkResponse | null>(null);
+  const [detailSelection, setDetailSelection] = useState<WorkDetailSelection | null>(null);
   const think = useThinkAIMe();
 
   const agentsQuery = useQuery(agentListOptions(wsId));
@@ -231,12 +279,14 @@ export function AIMeDashboardPage() {
             error={cockpitError}
             approvalPath={(id) => paths.approvals(id)}
             issuePath={(id) => paths.issueDetail(id)}
+            onOpenDetail={(item) => setDetailSelection({ kind: "decision", item })}
             className="xl:row-span-2"
           />
           <ActiveWorkPanel
             items={cockpitQueues.activeWork}
             isLoading={cockpitLoading}
             agentsPath={paths.agents()}
+            onOpenDetail={(item) => setDetailSelection({ kind: "active", item })}
           />
           <InboxExceptionPanel
             items={cockpitQueues.inbox}
@@ -244,6 +294,7 @@ export function AIMeDashboardPage() {
             inboxPath={paths.inbox()}
             inboxItemPath={(item) => paths.inbox({ inboxItemId: item.id })}
             issuePath={(id) => paths.issueDetail(id)}
+            onOpenDetail={(item) => setDetailSelection({ kind: "inbox", item })}
           />
           <MemoryCandidatePanel
             items={cockpitQueues.memoryCandidates}
@@ -345,8 +396,396 @@ export function AIMeDashboardPage() {
           />
         </section>
       </main>
+      <WorkDetailDrawer
+        selection={detailSelection}
+        open={detailSelection !== null}
+        onOpenChange={(open) => {
+          if (!open) setDetailSelection(null);
+        }}
+        approvalPath={(id) => paths.approvals(id)}
+        issuePath={(id) => paths.issueDetail(id)}
+        inboxItemPath={(item) => paths.inbox({ inboxItemId: item.id })}
+        agentsPath={paths.agents()}
+      />
     </div>
   );
+}
+
+function WorkDetailDrawer({
+  selection,
+  open,
+  onOpenChange,
+  approvalPath,
+  issuePath,
+  inboxItemPath,
+  agentsPath,
+}: {
+  selection: WorkDetailSelection | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  approvalPath: (id: string) => string;
+  issuePath: (id: string) => string;
+  inboxItemPath: (item: CockpitInboxItem["item"]) => string;
+  agentsPath: string;
+}) {
+  const issue = selection ? detailIssue(selection) : null;
+  const selectedTask = selection?.kind === "active" ? selection.item.task : null;
+  const issueId = issue?.id ?? "";
+  const tasksQuery = useQuery({
+    queryKey: issueKeys.tasks(issueId),
+    queryFn: () => api.listTasksByIssue(issueId),
+    enabled: open && issueId.length > 0,
+    staleTime: 30_000,
+    refetchOnWindowFocus: true,
+  });
+  const fallbackTasks = selectedTask ? [selectedTask] : [];
+  const tasks = issueId
+    ? tasksQuery.data && tasksQuery.data.length > 0
+      ? tasksQuery.data
+      : fallbackTasks
+    : fallbackTasks;
+
+  if (!selection) return null;
+
+  const title = detailTitle(selection);
+  const description = detailDescription(selection);
+  const primaryAction = detailPrimaryAction(selection, {
+    approvalPath,
+    issuePath,
+    inboxItemPath,
+    agentsPath,
+  });
+  const taskIssueId = issue?.id || selectedTask?.issue_id || undefined;
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent
+        showCloseButton={false}
+        className="!fixed !bottom-4 !left-auto !right-4 !top-4 !z-50 !h-auto !max-h-none !w-[min(420px,calc(100vw-2rem))] !max-w-none !translate-x-0 !translate-y-0 overflow-hidden rounded-2xl border border-[var(--aime-border)] bg-[var(--aime-surface)] p-0 text-[var(--aime-text)] shadow-xl"
+      >
+        <DialogTitle className="sr-only">AI-Me 工作详情</DialogTitle>
+        <DialogDescription className="sr-only">
+          查看工作项上下文、证据、审批状态和员工运行记录。
+        </DialogDescription>
+
+        <div className="flex h-full min-h-0 flex-col">
+          <div className="shrink-0 border-b border-[var(--aime-border)] p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="mb-2 flex flex-wrap items-center gap-2">
+                  <DetailKindBadge selection={selection} />
+                  {issue && (
+                    <span className="font-mono text-[11px] text-[var(--aime-text-tertiary)]">
+                      {issue.identifier}
+                    </span>
+                  )}
+                </div>
+                <h2 className="line-clamp-2 text-base font-semibold leading-6">
+                  {title}
+                </h2>
+                <p className="mt-1 line-clamp-2 text-xs leading-5 text-[var(--aime-text-tertiary)]">
+                  {description}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => onOpenChange(false)}
+                aria-label="关闭工作详情"
+                className="flex size-8 shrink-0 items-center justify-center rounded-lg text-[var(--aime-text-tertiary)] transition-colors hover:bg-[var(--aime-surface-muted)] hover:text-[var(--aime-text)]"
+              >
+                <X className="size-4" />
+              </button>
+            </div>
+          </div>
+
+          <div className="min-h-0 flex-1 space-y-4 overflow-auto p-4">
+            <DetailSection
+              icon={<ShieldAlert className="size-3.5" />}
+              title="当前判断"
+            >
+              <DetailSummary selection={selection} />
+            </DetailSection>
+
+            <DetailSection
+              icon={<Bot className="size-3.5" />}
+              title="员工运行"
+              action={issue ? (
+                <AppLink
+                  href={issuePath(issue.id)}
+                  className="text-xs font-medium text-[var(--aime-brand-600)] hover:underline"
+                >
+                  查看 issue
+                </AppLink>
+              ) : null}
+            >
+              {tasksQuery.isLoading && tasks.length === 0 ? (
+                <div className="space-y-2">
+                  <Skeleton className="h-9 rounded-lg" />
+                  <Skeleton className="h-9 rounded-lg" />
+                </div>
+              ) : tasksQuery.error ? (
+                <InlineError message={firstErrorMessage(tasksQuery.error)} />
+              ) : (
+                <AgentTaskRunList
+                  tasks={tasks}
+                  issueId={taskIssueId}
+                  copy={AIME_TASK_RUN_COPY}
+                  initialShowPast
+                  showEmpty
+                  className="space-y-0.5 rounded-xl border border-[var(--aime-border)] bg-[var(--aime-surface-subtle)] p-2"
+                  getAgentName={(task) => detailAgentName(selection, task)}
+                />
+              )}
+            </DetailSection>
+
+            <DetailSection
+              icon={<ListChecks className="size-3.5" />}
+              title="证据与来源"
+            >
+              <DetailEvidence selection={selection} />
+            </DetailSection>
+          </div>
+
+          <div className="shrink-0 border-t border-[var(--aime-border)] p-3">
+            <div className="flex items-center justify-end gap-2">
+              {issue && (
+                <AppLink
+                  href={issuePath(issue.id)}
+                  className="inline-flex h-9 items-center rounded-lg border border-[var(--aime-border)] bg-[var(--aime-surface)] px-3 text-xs font-medium text-[var(--aime-text-secondary)] hover:bg-[var(--aime-surface-muted)]"
+                >
+                  查看 issue
+                </AppLink>
+              )}
+              <AppLink
+                href={primaryAction.href}
+                className="inline-flex h-9 items-center rounded-lg border border-[var(--aime-brand-500)] bg-[var(--aime-brand-500)] px-3 text-xs font-medium text-white hover:bg-[var(--aime-brand-600)]"
+              >
+                {primaryAction.label}
+                <ArrowRight className="ml-1.5 size-3.5" />
+              </AppLink>
+            </div>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function DetailKindBadge({ selection }: { selection: WorkDetailSelection }) {
+  if (selection.kind === "decision") {
+    return <RiskBadge risk={selection.item.approval.risk_level} />;
+  }
+  if (selection.kind === "inbox") {
+    return <SeverityBadge severity={selection.item.item.severity} />;
+  }
+  return <TaskStatusPill status={selection.item.task.status} />;
+}
+
+function DetailSection({
+  title,
+  icon,
+  action,
+  children,
+}: {
+  title: string;
+  icon: ReactNode;
+  action?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <section>
+      <div className="mb-2 flex items-center justify-between gap-3">
+        <h3 className="flex items-center gap-2 text-xs font-semibold text-[var(--aime-text-tertiary)]">
+          {icon}
+          {title}
+        </h3>
+        {action}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function DetailSummary({ selection }: { selection: WorkDetailSelection }) {
+  if (selection.kind === "decision") {
+    const approval = selection.item.approval;
+    return (
+      <div className="space-y-2 rounded-xl border border-[var(--aime-border)] bg-[var(--aime-surface-subtle)] px-3 py-3">
+        <DetailFact label="建议动作" value={approval.action_title || actionLabel(approval.action_type)} />
+        <DetailFact label="置信度" value={`${Math.round(approval.confidence * 100)}%`} />
+        <DetailFact label="可逆性" value={reversibilityLabel(approval.reversibility)} />
+        <p className="pt-1 text-xs leading-5 text-[var(--aime-text-secondary)]">
+          {approval.ai_reasoning_summary || approval.summary || approval.action_description || "等待审批详情补充判断过程。"}
+        </p>
+      </div>
+    );
+  }
+
+  if (selection.kind === "inbox") {
+    const item = selection.item.item;
+    return (
+      <div className="space-y-2 rounded-xl border border-[var(--aime-border)] bg-[var(--aime-surface-subtle)] px-3 py-3">
+        <DetailFact label="原始事件" value={inboxTypeLabel(item.type)} />
+        <DetailFact label="状态" value={item.read ? "已读" : "未读"} />
+        <DetailFact label="时间" value={formatDashboardAge(item.created_at)} />
+        <p className="pt-1 text-xs leading-5 text-[var(--aime-text-secondary)]">
+          {item.body || "这个例外没有附加正文，建议进入原事件查看完整上下文。"}
+        </p>
+      </div>
+    );
+  }
+
+  const { task, agent, issue } = selection.item;
+  return (
+    <div className="space-y-2 rounded-xl border border-[var(--aime-border)] bg-[var(--aime-surface-subtle)] px-3 py-3">
+      <DetailFact label="执行员工" value={agent?.name ?? "未知员工"} />
+      <DetailFact label="当前状态" value={taskStatusLabel(task.status)} />
+      <DetailFact label="关联工作" value={issue ? `${issue.identifier} ${issue.title}` : describeDashboardTask(task, issue)} />
+      <p className="pt-1 text-xs leading-5 text-[var(--aime-text-secondary)]">
+        {task.trigger_summary || task.work_dir || "员工已经接到任务，运行记录会在执行开始后持续补充。"}
+      </p>
+    </div>
+  );
+}
+
+function DetailFact({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-3 text-xs">
+      <span className="text-[var(--aime-text-tertiary)]">{label}</span>
+      <span className="min-w-0 truncate font-medium text-[var(--aime-text)]">{value}</span>
+    </div>
+  );
+}
+
+function DetailEvidence({ selection }: { selection: WorkDetailSelection }) {
+  if (selection.kind === "decision") {
+    const evidence = selection.item.approval.evidence ?? [];
+    if (evidence.length === 0) {
+      return <EmptyDetailText>审批详情暂未返回证据条目。</EmptyDetailText>;
+    }
+    return (
+      <div className="space-y-2">
+        {evidence.slice(0, 5).map((item) => (
+          <div key={item.id} className="rounded-xl border border-[var(--aime-border)] px-3 py-2">
+            <div className="flex items-center justify-between gap-3">
+              <p className="truncate text-sm font-medium">{item.label}</p>
+              <span className="shrink-0 rounded-md bg-[var(--aime-surface-muted)] px-1.5 py-0.5 text-[11px] text-[var(--aime-text-tertiary)]">
+                {item.evidence_type}
+              </span>
+            </div>
+            {item.quote && (
+              <p className="mt-1 line-clamp-2 text-xs leading-5 text-[var(--aime-text-tertiary)]">
+                {item.quote}
+              </p>
+            )}
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  if (selection.kind === "inbox") {
+    const item = selection.item.item;
+    const details = Object.entries(item.details ?? {});
+    if (details.length === 0) {
+      return <EmptyDetailText>原事件没有结构化证据字段。</EmptyDetailText>;
+    }
+    return (
+      <div className="space-y-2 rounded-xl border border-[var(--aime-border)] px-3 py-3">
+        {details.slice(0, 6).map(([key, value]) => (
+          <DetailFact key={key} label={key} value={String(value)} />
+        ))}
+      </div>
+    );
+  }
+
+  const task = selection.item.task;
+  return (
+    <div className="space-y-2 rounded-xl border border-[var(--aime-border)] px-3 py-3 text-xs leading-5 text-[var(--aime-text-secondary)]">
+      <DetailFact label="任务 ID" value={task.id} />
+      {task.runtime_id && <DetailFact label="Runtime" value={task.runtime_id} />}
+      {task.work_dir && <DetailFact label="工作目录" value={task.work_dir} />}
+      {task.error && (
+        <p className="rounded-lg bg-[var(--aime-danger-bg)] px-2 py-2 text-[var(--aime-danger)]">
+          {task.error}
+        </p>
+      )}
+      {!task.work_dir && !task.error && (
+        <p className="text-[var(--aime-text-tertiary)]">
+          详细执行证据会从运行记录进入 transcript 查看。
+        </p>
+      )}
+    </div>
+  );
+}
+
+function EmptyDetailText({ children }: { children: ReactNode }) {
+  return (
+    <p className="rounded-xl border border-dashed border-[var(--aime-border)] px-3 py-4 text-xs leading-5 text-[var(--aime-text-tertiary)]">
+      {children}
+    </p>
+  );
+}
+
+function detailIssue(selection: WorkDetailSelection): Issue | null {
+  switch (selection.kind) {
+    case "decision":
+      return selection.item.issue;
+    case "inbox":
+      return selection.item.issue;
+    case "active":
+      return selection.item.issue;
+  }
+}
+
+function detailTitle(selection: WorkDetailSelection): string {
+  switch (selection.kind) {
+    case "decision":
+      return selection.item.approval.title;
+    case "inbox":
+      return selection.item.item.title;
+    case "active":
+      return describeDashboardTask(selection.item.task, selection.item.issue);
+  }
+}
+
+function detailDescription(selection: WorkDetailSelection): string {
+  switch (selection.kind) {
+    case "decision":
+      return selection.item.approval.summary || selection.item.approval.action_description || "等待你确认下一步。";
+    case "inbox":
+      return selection.item.item.body || selection.item.issue?.title || "来自例外收件箱的待处理事件。";
+    case "active":
+      return `${selection.item.agent?.name ?? "AI 员工"} 正在处理这个工作项。`;
+  }
+}
+
+function detailPrimaryAction(
+  selection: WorkDetailSelection,
+  paths: {
+    approvalPath: (id: string) => string;
+    issuePath: (id: string) => string;
+    inboxItemPath: (item: CockpitInboxItem["item"]) => string;
+    agentsPath: string;
+  },
+): { label: string; href: string } {
+  switch (selection.kind) {
+    case "decision":
+      return { label: "去审批", href: paths.approvalPath(selection.item.approval.id) };
+    case "inbox":
+      return { label: "查看原事件", href: paths.inboxItemPath(selection.item.item) };
+    case "active":
+      return selection.item.issue
+        ? { label: "查看 issue", href: paths.issuePath(selection.item.issue.id) }
+        : { label: "员工页", href: paths.agentsPath };
+  }
+}
+
+function detailAgentName(selection: WorkDetailSelection, task: AgentTask): string {
+  if (selection.kind === "active" && selection.item.agent?.id === task.agent_id) {
+    return selection.item.agent.name;
+  }
+  return "";
 }
 
 function StatusPill({ configured }: { configured?: boolean }) {
@@ -380,6 +819,7 @@ function DecisionQueuePanel({
   error,
   approvalPath,
   issuePath,
+  onOpenDetail,
   className,
 }: {
   items: CockpitDecisionItem[];
@@ -387,6 +827,7 @@ function DecisionQueuePanel({
   error: string;
   approvalPath: (id: string) => string;
   issuePath: (id: string) => string;
+  onOpenDetail: (item: CockpitDecisionItem) => void;
   className?: string;
 }) {
   return (
@@ -410,67 +851,77 @@ function DecisionQueuePanel({
         />
       ) : (
         <div className="space-y-3">
-          {items.slice(0, 6).map(({ approval, issue }) => (
-            <article
-              key={approval.id}
-              className="rounded-xl border border-[var(--aime-border)] bg-[var(--aime-surface-subtle)] px-3 py-3"
-            >
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <RiskBadge risk={approval.risk_level} />
-                    <span className="rounded-md bg-[var(--aime-surface-muted)] px-1.5 py-0.5 text-[11px] text-[var(--aime-text-tertiary)]">
-                      {actionLabel(approval.action_type)}
-                    </span>
-                    {issue && (
-                      <span className="font-mono text-[11px] text-[var(--aime-text-tertiary)]">
-                        {issue.identifier}
+          {items.slice(0, 6).map((item) => {
+            const { approval, issue } = item;
+            return (
+              <article
+                key={approval.id}
+                className="rounded-xl border border-[var(--aime-border)] bg-[var(--aime-surface-subtle)] px-3 py-3"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <RiskBadge risk={approval.risk_level} />
+                      <span className="rounded-md bg-[var(--aime-surface-muted)] px-1.5 py-0.5 text-[11px] text-[var(--aime-text-tertiary)]">
+                        {actionLabel(approval.action_type)}
                       </span>
-                    )}
+                      {issue && (
+                        <span className="font-mono text-[11px] text-[var(--aime-text-tertiary)]">
+                          {issue.identifier}
+                        </span>
+                      )}
+                    </div>
+                    <p className="mt-2 line-clamp-1 text-sm font-semibold text-[var(--aime-text)]">
+                      {approval.title}
+                    </p>
+                    <p className="mt-1 line-clamp-2 text-xs leading-5 text-[var(--aime-text-secondary)]">
+                      {approval.summary || approval.action_description || "等待你确认下一步处理方式。"}
+                    </p>
+                    <p className="mt-2 line-clamp-1 text-[11px] text-[var(--aime-text-tertiary)]">
+                      建议：{approval.action_title || actionLabel(approval.action_type)}
+                    </p>
                   </div>
-                  <p className="mt-2 line-clamp-1 text-sm font-semibold text-[var(--aime-text)]">
-                    {approval.title}
-                  </p>
-                  <p className="mt-1 line-clamp-2 text-xs leading-5 text-[var(--aime-text-secondary)]">
-                    {approval.summary || approval.action_description || "等待你确认下一步处理方式。"}
-                  </p>
-                  <p className="mt-2 line-clamp-1 text-[11px] text-[var(--aime-text-tertiary)]">
-                    建议：{approval.action_title || actionLabel(approval.action_type)}
-                  </p>
+                  <div className="shrink-0 text-right">
+                    <p className="font-mono text-sm font-semibold tabular-nums text-[var(--aime-text)]">
+                      {Math.round(approval.confidence * 100)}%
+                    </p>
+                    <p className="mt-1 text-[11px] text-[var(--aime-text-tertiary)]">
+                      {formatDashboardAge(approval.created_at)}
+                    </p>
+                  </div>
                 </div>
-                <div className="shrink-0 text-right">
-                  <p className="font-mono text-sm font-semibold tabular-nums text-[var(--aime-text)]">
-                    {Math.round(approval.confidence * 100)}%
-                  </p>
-                  <p className="mt-1 text-[11px] text-[var(--aime-text-tertiary)]">
-                    {formatDashboardAge(approval.created_at)}
-                  </p>
-                </div>
-              </div>
-              <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[var(--aime-border)] pt-3">
-                <span className="text-[11px] text-[var(--aime-text-tertiary)]">
-                  {approval.evidence?.length ? `${approval.evidence.length} 条证据` : "证据在审批详情中查看"}
-                </span>
-                <div className="flex flex-wrap items-center gap-2">
-                  {issue && (
-                    <AppLink
-                      href={issuePath(issue.id)}
+                <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[var(--aime-border)] pt-3">
+                  <span className="text-[11px] text-[var(--aime-text-tertiary)]">
+                    {approval.evidence?.length ? `${approval.evidence.length} 条证据` : "证据在审批详情中查看"}
+                  </span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => onOpenDetail(item)}
                       className="inline-flex h-8 items-center rounded-lg border border-[var(--aime-border)] bg-[var(--aime-surface)] px-3 text-xs font-medium text-[var(--aime-text-secondary)] hover:bg-[var(--aime-surface-muted)]"
                     >
-                      查看 issue
+                      查看详情
+                    </button>
+                    {issue && (
+                      <AppLink
+                        href={issuePath(issue.id)}
+                        className="inline-flex h-8 items-center rounded-lg border border-[var(--aime-border)] bg-[var(--aime-surface)] px-3 text-xs font-medium text-[var(--aime-text-secondary)] hover:bg-[var(--aime-surface-muted)]"
+                      >
+                        查看 issue
+                      </AppLink>
+                    )}
+                    <AppLink
+                      href={approvalPath(approval.id)}
+                      className="inline-flex h-8 items-center rounded-lg border border-[var(--aime-brand-500)] bg-[var(--aime-brand-500)] px-3 text-xs font-medium text-white hover:bg-[var(--aime-brand-600)]"
+                    >
+                      去审批
+                      <ArrowRight className="ml-1.5 size-3.5" />
                     </AppLink>
-                  )}
-                  <AppLink
-                    href={approvalPath(approval.id)}
-                    className="inline-flex h-8 items-center rounded-lg border border-[var(--aime-brand-500)] bg-[var(--aime-brand-500)] px-3 text-xs font-medium text-white hover:bg-[var(--aime-brand-600)]"
-                  >
-                    去审批
-                    <ArrowRight className="ml-1.5 size-3.5" />
-                  </AppLink>
+                  </div>
                 </div>
-              </div>
-            </article>
-          ))}
+              </article>
+            );
+          })}
         </div>
       )}
     </PanelShell>
@@ -481,10 +932,12 @@ function ActiveWorkPanel({
   items,
   isLoading,
   agentsPath,
+  onOpenDetail,
 }: {
   items: CockpitWorkItem[];
   isLoading: boolean;
   agentsPath: string;
+  onOpenDetail: (item: CockpitWorkItem) => void;
 }) {
   return (
     <PanelShell
@@ -504,7 +957,8 @@ function ActiveWorkPanel({
         />
       ) : (
         <div className="space-y-3">
-          {items.slice(0, 4).map(({ task, agent, issue }) => {
+          {items.slice(0, 4).map((item) => {
+            const { task, agent, issue } = item;
             const progress = taskProgressPercent(task.status);
             return (
               <div key={task.id} className="rounded-xl border border-[var(--aime-border)] px-3 py-3">
@@ -526,8 +980,17 @@ function ActiveWorkPanel({
                   />
                 </div>
                 <div className="mt-2 flex items-center justify-between gap-3 text-[11px] text-[var(--aime-text-tertiary)]">
-                  <span>{task.work_dir || task.trigger_summary || "等待运行日志"}</span>
+                  <span className="min-w-0 truncate">{task.work_dir || task.trigger_summary || "等待运行日志"}</span>
                   <span className="shrink-0">{formatDashboardAge(task.started_at ?? task.dispatched_at ?? task.created_at)}</span>
+                </div>
+                <div className="mt-3 flex justify-end border-t border-[var(--aime-border)] pt-3">
+                  <button
+                    type="button"
+                    onClick={() => onOpenDetail(item)}
+                    className="inline-flex h-8 items-center rounded-lg border border-[var(--aime-border)] bg-[var(--aime-surface)] px-3 text-xs font-medium text-[var(--aime-text-secondary)] hover:bg-[var(--aime-surface-muted)]"
+                  >
+                    查看详情
+                  </button>
                 </div>
               </div>
             );
@@ -544,12 +1007,14 @@ function InboxExceptionPanel({
   inboxPath,
   inboxItemPath,
   issuePath,
+  onOpenDetail,
 }: {
   items: CockpitInboxItem[];
   isLoading: boolean;
   inboxPath: string;
   inboxItemPath: (item: CockpitInboxItem["item"]) => string;
   issuePath: (id: string) => string;
+  onOpenDetail: (item: CockpitInboxItem) => void;
 }) {
   return (
     <PanelShell
@@ -569,50 +1034,60 @@ function InboxExceptionPanel({
         />
       ) : (
         <div className="space-y-2">
-          {items.slice(0, 5).map(({ item, issue }) => (
-            <article
-              key={item.id}
-              className="rounded-xl border border-[var(--aime-border)] px-3 py-2.5"
-            >
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    {!item.read && <span className="size-1.5 shrink-0 rounded-full bg-[var(--aime-brand-500)]" />}
-                    <p className="truncate text-sm font-semibold">{item.title}</p>
+          {items.slice(0, 5).map((entry) => {
+            const { item, issue } = entry;
+            return (
+              <article
+                key={item.id}
+                className="rounded-xl border border-[var(--aime-border)] px-3 py-2.5"
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      {!item.read && <span className="size-1.5 shrink-0 rounded-full bg-[var(--aime-brand-500)]" />}
+                      <p className="truncate text-sm font-semibold">{item.title}</p>
+                    </div>
+                    <p className="mt-1 line-clamp-1 text-xs text-[var(--aime-text-secondary)]">
+                      {item.body || issue?.title || "等待查看详情。"}
+                    </p>
+                    <p className="mt-1 text-[11px] text-[var(--aime-text-tertiary)]">
+                      {issue?.identifier ?? severityLabel(item.severity)} · {formatDashboardAge(item.created_at)}
+                    </p>
                   </div>
-                  <p className="mt-1 line-clamp-1 text-xs text-[var(--aime-text-secondary)]">
-                    {item.body || issue?.title || "等待查看详情。"}
-                  </p>
-                  <p className="mt-1 text-[11px] text-[var(--aime-text-tertiary)]">
-                    {issue?.identifier ?? severityLabel(item.severity)} · {formatDashboardAge(item.created_at)}
-                  </p>
+                  <SeverityBadge severity={item.severity} />
                 </div>
-                <SeverityBadge severity={item.severity} />
-              </div>
-              <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[var(--aime-border)] pt-2.5">
-                <span className="text-[11px] text-[var(--aime-text-tertiary)]">
-                  原始事件：{inboxTypeLabel(item.type)}
-                </span>
-                <div className="flex flex-wrap items-center gap-2">
-                  {issue && (
-                    <AppLink
-                      href={issuePath(issue.id)}
+                <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[var(--aime-border)] pt-2.5">
+                  <span className="text-[11px] text-[var(--aime-text-tertiary)]">
+                    原始事件：{inboxTypeLabel(item.type)}
+                  </span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => onOpenDetail(entry)}
                       className="inline-flex h-8 items-center rounded-lg border border-[var(--aime-border)] bg-[var(--aime-surface)] px-3 text-xs font-medium text-[var(--aime-text-secondary)] hover:bg-[var(--aime-surface-muted)]"
                     >
-                      查看 issue
+                      查看详情
+                    </button>
+                    {issue && (
+                      <AppLink
+                        href={issuePath(issue.id)}
+                        className="inline-flex h-8 items-center rounded-lg border border-[var(--aime-border)] bg-[var(--aime-surface)] px-3 text-xs font-medium text-[var(--aime-text-secondary)] hover:bg-[var(--aime-surface-muted)]"
+                      >
+                        查看 issue
+                      </AppLink>
+                    )}
+                    <AppLink
+                      href={inboxItemPath(item)}
+                      className="inline-flex h-8 items-center rounded-lg border border-[var(--aime-brand-500)] bg-[var(--aime-brand-500)] px-3 text-xs font-medium text-white hover:bg-[var(--aime-brand-600)]"
+                    >
+                      查看原事件
+                      <ArrowRight className="ml-1.5 size-3.5" />
                     </AppLink>
-                  )}
-                  <AppLink
-                    href={inboxItemPath(item)}
-                    className="inline-flex h-8 items-center rounded-lg border border-[var(--aime-brand-500)] bg-[var(--aime-brand-500)] px-3 text-xs font-medium text-white hover:bg-[var(--aime-brand-600)]"
-                  >
-                    查看原事件
-                    <ArrowRight className="ml-1.5 size-3.5" />
-                  </AppLink>
+                  </div>
                 </div>
-              </div>
-            </article>
-          ))}
+              </article>
+            );
+          })}
         </div>
       )}
     </PanelShell>
@@ -1251,6 +1726,19 @@ function inboxTypeLabel(type: string): string {
       return "分配给你";
     default:
       return type || "未知事件";
+  }
+}
+
+function reversibilityLabel(value: string): string {
+  switch (value) {
+    case "reversible":
+      return "可撤销";
+    case "partially_reversible":
+      return "部分可撤销";
+    case "irreversible":
+      return "不可撤销";
+    default:
+      return "未知";
   }
 }
 
