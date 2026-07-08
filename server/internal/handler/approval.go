@@ -466,12 +466,78 @@ func (h *Handler) createAIMeApproval(ctx context.Context, workspaceID, userID st
 	if err := recordAIApprovalActivity(ctx, qtx, approval, params.RequesterUserID, "ai_me_approval_created", eventPayload); err != nil {
 		return db.AiMeApproval{}, err
 	}
+	var inboxItem *db.InboxItem
+	if item, ok, err := createAIApprovalInboxItem(ctx, qtx, approval); err != nil {
+		return db.AiMeApproval{}, err
+	} else if ok {
+		inboxItem = &item
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return db.AiMeApproval{}, err
 	}
 	resp := aiApprovalToResponse(approval)
 	h.publish(protocol.EventApprovalCreated, workspaceID, "member", userID, map[string]any{"approval": resp})
+	if inboxItem != nil {
+		h.publish(protocol.EventInboxNew, workspaceID, "member", userID, map[string]any{"item": inboxToResponse(*inboxItem)})
+	}
 	return approval, nil
+}
+
+func createAIApprovalInboxItem(ctx context.Context, q *db.Queries, approval db.AiMeApproval) (db.InboxItem, bool, error) {
+	if approval.Status != "pending" || approval.ActionType != "send_external_message" || !approval.RequesterUserID.Valid {
+		return db.InboxItem{}, false, nil
+	}
+	title := strings.TrimSpace(approval.ActionTitle)
+	if title == "" {
+		title = strings.TrimSpace(approval.Title)
+	}
+	if title == "" {
+		title = "AI-Me 外部回复待审批"
+	}
+	body := strings.TrimSpace(approval.ActionDescription)
+	if body == "" {
+		body = strings.TrimSpace(approval.Summary)
+	}
+	item, err := q.CreateInboxItem(ctx, db.CreateInboxItemParams{
+		WorkspaceID:   approval.WorkspaceID,
+		RecipientType: "member",
+		RecipientID:   approval.RequesterUserID,
+		Type:          "review_requested",
+		Severity:      "action_required",
+		IssueID:       approval.IssueID,
+		Title:         title,
+		Body:          optionalTextFromString(body),
+		Details:       aiApprovalInboxDetails(approval),
+	})
+	if err != nil {
+		return db.InboxItem{}, false, err
+	}
+	return item, true, nil
+}
+
+func aiApprovalInboxDetails(approval db.AiMeApproval) []byte {
+	payload := approvalEffectivePayload(approval, nil)
+	details := map[string]any{
+		"approval_id": uuidToString(approval.ID),
+		"action_type": approval.ActionType,
+		"source_type": approval.SourceType,
+	}
+	if sourceRefID := pgTextValue(approval.SourceRefID); sourceRefID != "" {
+		details["source_ref_id"] = sourceRefID
+	}
+	if channel := approvalPayloadText(payload, "channel"); channel != "" {
+		details["channel"] = channel
+	}
+	if messageID := approvalPayloadText(payload, "message_id", "feishu_message_id", "source_message_id"); messageID != "" {
+		details["message_id"] = messageID
+	}
+	if chatID := approvalPayloadText(payload, "chat_id"); chatID != "" {
+		details["chat_id"] = chatID
+	}
+	if replyPreview := approvalPayloadText(payload, "text", "content", "reply_text", "reply_draft", "draft", "body"); replyPreview != "" {
+		details["reply_preview"] = truncateText(replyPreview, 240)
+	}
+	return jsonBytesOrObject(details)
 }
 
 func (h *Handler) createAIApprovalParams(w http.ResponseWriter, req CreateAIApprovalRequest, workspaceID, userID pgtype.UUID) (db.CreateAIApprovalParams, bool) {

@@ -286,6 +286,107 @@ func TestThinkAIMeCreatesApprovalFromLLMDecision(t *testing.T) {
 	}
 }
 
+func TestCreateAIMeApprovalCreatesInboxItemForExternalReply(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+	ctx := context.Background()
+	confidence, err := numericFromFloat64(0.91)
+	if err != nil {
+		t.Fatalf("confidence: %v", err)
+	}
+	payload := map[string]any{
+		"channel":    "feishu",
+		"message_id": "om_ai_me_inbox_test",
+		"chat_id":    "oc_ai_me_inbox_test",
+		"text":       "您好，退款问题我已经收到，会继续跟进处理。",
+	}
+	approval, err := testHandler.createAIMeApproval(ctx, testWorkspaceID, testUserID, db.CreateAIApprovalParams{
+		WorkspaceID:        parseUUID(testWorkspaceID),
+		RequesterUserID:    parseUUID(testUserID),
+		SourceType:         "feishu",
+		SourceRefID:        optionalTextFromString("om_ai_me_inbox_test"),
+		Title:              "AI-Me 外部回复待审批",
+		Summary:            "AI-Me 已生成飞书回复草稿，等待人工审批。",
+		RiskLevel:          "high",
+		Confidence:         confidence,
+		Reversibility:      "irreversible",
+		ActionType:         "send_external_message",
+		ActionTitle:        "发送飞书回复",
+		ActionDescription:  "批准后将回复发送到飞书原消息。",
+		OriginalPayload:    jsonBytesOrObject(payload),
+		FinalPayload:       jsonBytesOrObject(payload),
+		AiReasoningSummary: "外部可见回复需要人工确认。",
+	}, []CreateAIApprovalEvidenceRequest{{
+		EvidenceType: "feishu",
+		Label:        "飞书原消息",
+		RefID:        "om_ai_me_inbox_test",
+		Quote:        "用户询问退款状态。",
+	}})
+	if err != nil {
+		t.Fatalf("createAIMeApproval: %v", err)
+	}
+	approvalID := uuidToString(approval.ID)
+	t.Cleanup(func() {
+		_, _ = testPool.Exec(ctx, `DELETE FROM inbox_item WHERE details->>'approval_id' = $1`, approvalID)
+		_, _ = testPool.Exec(ctx, `DELETE FROM ai_me_approval WHERE id = $1`, approvalID)
+	})
+
+	var itemCount int
+	if err := testPool.QueryRow(ctx, `
+		SELECT count(*)
+		FROM inbox_item
+		WHERE details->>'approval_id' = $1
+	`, approvalID).Scan(&itemCount); err != nil {
+		t.Fatalf("count approval inbox item: %v", err)
+	}
+	if itemCount != 1 {
+		t.Fatalf("approval inbox item count = %d, want 1", itemCount)
+	}
+
+	var itemID, recipientID, itemType, severity, title, body string
+	var read, archived bool
+	var detailsRaw []byte
+	if err := testPool.QueryRow(ctx, `
+		SELECT id::text, recipient_id::text, type, severity, title, COALESCE(body, ''), read, archived, details
+		FROM inbox_item
+		WHERE details->>'approval_id' = $1
+	`, approvalID).Scan(&itemID, &recipientID, &itemType, &severity, &title, &body, &read, &archived, &detailsRaw); err != nil {
+		t.Fatalf("load approval inbox item: %v", err)
+	}
+	if itemID == "" {
+		t.Fatal("expected inbox item id")
+	}
+	if recipientID != testUserID {
+		t.Fatalf("recipient id = %q, want %q", recipientID, testUserID)
+	}
+	if itemType != "review_requested" || severity != "action_required" {
+		t.Fatalf("inbox item type/severity = %s/%s", itemType, severity)
+	}
+	if title != "发送飞书回复" {
+		t.Fatalf("title = %q", title)
+	}
+	if !strings.Contains(body, "批准后") {
+		t.Fatalf("body = %q", body)
+	}
+	if read || archived {
+		t.Fatalf("read/archived = %v/%v, want false/false", read, archived)
+	}
+	var details map[string]any
+	if err := json.Unmarshal(detailsRaw, &details); err != nil {
+		t.Fatalf("decode details: %v", err)
+	}
+	if details["approval_id"] != approvalID || details["action_type"] != "send_external_message" || details["source_type"] != "feishu" {
+		t.Fatalf("details = %#v", details)
+	}
+	if details["channel"] != "feishu" || details["message_id"] != "om_ai_me_inbox_test" || details["chat_id"] != "oc_ai_me_inbox_test" {
+		t.Fatalf("details = %#v", details)
+	}
+	if details["reply_preview"] == "" {
+		t.Fatalf("missing reply preview: %#v", details)
+	}
+}
+
 func TestThinkAIMeInjectsAllowedMemoriesAndRecordsUsage(t *testing.T) {
 	if testHandler == nil {
 		t.Skip("database not available")
