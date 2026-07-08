@@ -148,6 +148,62 @@ describe("ApprovalCenterPage edit then approve", () => {
       });
     });
   });
+
+  it("shows failed execution result, event payload, and evidence", async () => {
+    const failedApproval = makeApproval({
+      status: "approved",
+      execution_status: "failed",
+      execution_error: "feishu client is not configured",
+      evidence: [
+        {
+          id: "evidence-1",
+          approval_id: "approval-1",
+          workspace_id: "ws-1",
+          evidence_type: "log",
+          label: "执行失败",
+          ref_id: "msg-1",
+          source_url: null,
+          quote: "feishu client is not configured",
+          metadata: {
+            execution_status: "failed",
+            execution_error: "feishu client is not configured",
+            channel: "feishu",
+            message_id: "msg-1",
+          },
+          created_at: "2026-07-08T02:05:00.000Z",
+        },
+      ],
+      events: [
+        {
+          id: "event-1",
+          approval_id: "approval-1",
+          workspace_id: "ws-1",
+          actor_type: "member",
+          actor_id: "member-1",
+          event_type: "execution_failed",
+          from_status: "approved",
+          to_status: "approved",
+          payload: {
+            execution_status: "failed",
+            execution_error: "feishu client is not configured",
+            channel: "feishu",
+            message_id: "msg-1",
+          },
+          created_at: "2026-07-08T02:06:00.000Z",
+        },
+      ],
+    });
+    mockApi.listAIApprovals.mockResolvedValue({ approvals: [failedApproval], total: 1 });
+    mockApi.getAIApproval.mockResolvedValue(failedApproval);
+
+    renderApprovals();
+
+    expect(await screen.findByText("是否对外回复退款问题")).toBeInTheDocument();
+    expect(screen.getAllByText("执行失败").length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/feishu client is not configured/).length).toBeGreaterThan(0);
+    expect(await screen.findByText(/状态：失败/)).toHaveTextContent("渠道：feishu");
+    expect(screen.getByText(/状态：失败/)).toHaveTextContent("消息：msg-1");
+  });
 });
 
 function renderApprovals() {

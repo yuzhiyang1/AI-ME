@@ -683,8 +683,13 @@ function ApprovalExecutionPanel({ approval }: { approval: AIApproval }) {
   const { getAgentName } = useActorName();
   const [retrying, setRetrying] = useState(false);
   const issueId = approval.issue_id;
-  const shouldShow = approval.action_type === "assign_worker" || !!approval.created_task_id;
-  const shouldFetchTasks = !!issueId && shouldShow && approval.status === "approved";
+  const shouldTrackTask = approval.action_type === "assign_worker" || !!approval.created_task_id;
+  const shouldShow =
+    shouldTrackTask ||
+    approval.status === "approved" ||
+    approval.execution_status === "failed" ||
+    approval.execution_status === "succeeded";
+  const shouldFetchTasks = !!issueId && shouldTrackTask && approval.status === "approved";
 
   const tasksQuery = useQuery({
     queryKey: issueKeys.tasks(issueId ?? approval.id),
@@ -720,21 +725,33 @@ function ApprovalExecutionPanel({ approval }: { approval: AIApproval }) {
     <section className="rounded-xl border border-[var(--aime-border)] bg-[var(--aime-surface)] p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h3 className="text-sm font-semibold">派工执行</h3>
+          <h3 className="text-sm font-semibold">执行结果</h3>
           <p className="mt-1 text-xs leading-5 text-[var(--aime-text-tertiary)]">
-            审批通过后，AI-Me 会把工作项交给真实 AI 员工，并在这里追踪员工任务状态。
+            审批通过后，AI-Me 会把真实执行状态、产物 ID 和失败原因写回这里。
           </p>
         </div>
-        {createdTask && <TaskStatusBadge status={createdTask.status} />}
+        {createdTask ? <TaskStatusBadge status={createdTask.status} /> : <ExecutionBadge status={approval.execution_status} />}
       </div>
 
       {approval.status !== "approved" ? (
         <div className="mt-3 rounded-lg border border-dashed border-[var(--aime-border)] bg-[var(--aime-surface-subtle)] px-3 py-4 text-sm text-[var(--aime-text-tertiary)]">
-          当前审批尚未通过。批准后会创建员工任务，并记录任务 ID、状态和失败原因。
+          当前审批尚未通过。批准后会记录执行状态、产物 ID 和失败原因。
         </div>
       ) : approval.execution_status === "failed" ? (
         <div className="mt-3 rounded-lg border border-[var(--aime-danger-bg)] bg-[var(--aime-danger-bg)] px-3 py-3 text-sm leading-6 text-[var(--aime-danger)]">
           审批动作执行失败：{approval.execution_error || "后端未返回失败原因。"}
+        </div>
+      ) : approval.created_comment_id ? (
+        <div className="mt-3 grid gap-3 md:grid-cols-3">
+          <InfoCell label="执行动作" value={actionLabel(approval.action_type)} />
+          <InfoCell label="评论 ID" value={approval.created_comment_id} />
+          <InfoCell label="关联工作项" value={approval.issue_id || "未记录"} />
+        </div>
+      ) : approval.action_type === "send_external_message" && approval.execution_status === "succeeded" ? (
+        <div className="mt-3 grid gap-3 md:grid-cols-3">
+          <InfoCell label="执行动作" value={actionLabel(approval.action_type)} />
+          <InfoCell label="目标渠道" value={getApprovalPayloadText(approval, ["channel", "provider"]) || sourceLabel(approval.source_type)} />
+          <InfoCell label="消息 ID" value={getApprovalPayloadText(approval, ["message_id", "feishu_message_id", "source_message_id"]) || approval.source_ref_id || "未记录"} />
         </div>
       ) : !approval.created_task_id ? (
         <div className="mt-3 rounded-lg border border-dashed border-[var(--aime-border)] bg-[var(--aime-surface-subtle)] px-3 py-4 text-sm text-[var(--aime-text-tertiary)]">
@@ -887,6 +904,11 @@ function ApprovalRiskPanel({ approval, loading }: { approval: AIApproval | null;
                           ? ` · ${statusLabel(event.from_status)} → ${statusLabel(event.to_status)}`
                           : ""}
                       </p>
+                      {eventPayloadSummary(event.payload) && (
+                        <p className="mt-1 line-clamp-3 text-xs leading-5 text-[var(--aime-text-tertiary)]">
+                          {eventPayloadSummary(event.payload)}
+                        </p>
+                      )}
                     </div>
                   </div>
                 ))
@@ -1353,6 +1375,30 @@ function metadataValueLabel(value: unknown) {
   } catch {
     return String(value);
   }
+}
+
+function eventPayloadSummary(value: unknown) {
+  if (!isRecord(value)) return "";
+  const parts: string[] = [];
+  const status = metadataString(value.execution_status);
+  const error = metadataString(value.execution_error);
+  const taskId = metadataString(value.created_task_id);
+  const commentId = metadataString(value.created_comment_id);
+  const messageId = metadataString(value.message_id);
+  const channel = metadataString(value.channel);
+  if (status) parts.push(`状态：${executionLabel(status)}`);
+  if (taskId) parts.push(`任务：${taskId}`);
+  if (commentId) parts.push(`评论：${commentId}`);
+  if (channel) parts.push(`渠道：${channel}`);
+  if (messageId) parts.push(`消息：${messageId}`);
+  if (error) parts.push(`错误：${error}`);
+  return parts.join(" · ");
+}
+
+function metadataString(value: unknown) {
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return "";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

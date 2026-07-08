@@ -899,6 +899,130 @@ func TestApproveAssignWorkerApprovalAssignsIssueAndQueuesTask(t *testing.T) {
 	}
 }
 
+func TestApproveApprovalRecordsExecutionFailure(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+	ctx := context.Background()
+	w := httptest.NewRecorder()
+	createIssueReq := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
+		"title":    "AI-Me failed approval integration test",
+		"status":   "todo",
+		"priority": "medium",
+	})
+	testHandler.CreateIssue(w, createIssueReq)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateIssue: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var issue IssueResponse
+	if err := json.NewDecoder(w.Body).Decode(&issue); err != nil {
+		t.Fatalf("decode issue: %v", err)
+	}
+
+	t.Cleanup(func() {
+		_, _ = testPool.Exec(ctx, `DELETE FROM ai_me_approval WHERE issue_id = $1`, issue.ID)
+		_, _ = testPool.Exec(ctx, `DELETE FROM activity_log WHERE issue_id = $1`, issue.ID)
+		_, _ = testPool.Exec(ctx, `DELETE FROM agent_task_queue WHERE issue_id = $1`, issue.ID)
+		_, _ = testPool.Exec(ctx, `DELETE FROM issue WHERE id = $1`, issue.ID)
+	})
+
+	payload := map[string]any{
+		"source":          "ai_me_think",
+		"approval_action": "assign_worker",
+		"issue_id":        issue.ID,
+		"summary":         "缺少目标员工，执行应失败并回写。",
+	}
+	createApprovalReq := newRequest("POST", "/api/ai-me/approvals?workspace_id="+testWorkspaceID, CreateAIApprovalRequest{
+		SourceType:         "ai_me_think",
+		SourceRefID:        "think-assign-worker-failed",
+		IssueID:            issue.ID,
+		Title:              "缺少目标员工的派工审批",
+		Summary:            "AI-Me 生成了不完整派工参数。",
+		RiskLevel:          "medium",
+		Reversibility:      "partially_reversible",
+		ActionType:         "assign_worker",
+		ActionTitle:        "分配员工",
+		ActionDescription:  "批准后尝试把 issue 分配给员工。",
+		OriginalPayload:    payload,
+		FinalPayload:       payload,
+		AIReasoningSummary: "该动作缺少 target_agent_id。",
+	})
+	w = httptest.NewRecorder()
+	testHandler.CreateAIApproval(w, createApprovalReq)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateAIApproval: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var approval AIApprovalResponse
+	if err := json.NewDecoder(w.Body).Decode(&approval); err != nil {
+		t.Fatalf("decode approval: %v", err)
+	}
+
+	approveReq := withURLParam(
+		newRequest("POST", "/api/ai-me/approvals/"+approval.ID+"/approve?workspace_id="+testWorkspaceID, AIApprovalTransitionRequest{Note: "确认执行"}),
+		"id",
+		approval.ID,
+	)
+	w = httptest.NewRecorder()
+	testHandler.ApproveAIApproval(w, approveReq)
+	if w.Code != http.StatusOK {
+		t.Fatalf("ApproveAIApproval: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var approved AIApprovalResponse
+	if err := json.NewDecoder(w.Body).Decode(&approved); err != nil {
+		t.Fatalf("decode approved approval: %v", err)
+	}
+	if approved.Status != "approved" || approved.ExecutionStatus != "failed" {
+		t.Fatalf("status/execution = %q/%q, want approved/failed", approved.Status, approved.ExecutionStatus)
+	}
+	if !strings.Contains(approved.ExecutionError, "target_agent_id is required") {
+		t.Fatalf("execution error = %q", approved.ExecutionError)
+	}
+	if approved.CreatedTaskID != nil {
+		t.Fatalf("created_task_id = %#v, want nil", approved.CreatedTaskID)
+	}
+
+	var eventCount int
+	if err := testPool.QueryRow(ctx, `
+		SELECT count(*)
+		FROM ai_me_approval_event
+		WHERE approval_id = $1
+		  AND event_type = 'execution_failed'
+		  AND payload->>'execution_error' LIKE '%target_agent_id is required%'
+	`, approval.ID).Scan(&eventCount); err != nil {
+		t.Fatalf("count execution_failed event: %v", err)
+	}
+	if eventCount != 1 {
+		t.Fatalf("execution_failed event count = %d, want 1", eventCount)
+	}
+
+	var evidenceCount int
+	if err := testPool.QueryRow(ctx, `
+		SELECT count(*)
+		FROM ai_me_approval_evidence
+		WHERE approval_id = $1
+		  AND evidence_type = 'log'
+		  AND label = '执行失败'
+		  AND quote LIKE '%target_agent_id is required%'
+	`, approval.ID).Scan(&evidenceCount); err != nil {
+		t.Fatalf("count execution failure evidence: %v", err)
+	}
+	if evidenceCount != 1 {
+		t.Fatalf("execution failure evidence count = %d, want 1", evidenceCount)
+	}
+
+	var assigneeType, assigneeID string
+	if err := testPool.QueryRow(ctx, `
+		SELECT COALESCE(assignee_type, ''), COALESCE(assignee_id::text, '')
+		FROM issue
+		WHERE id = $1
+	`, issue.ID).Scan(&assigneeType, &assigneeID); err != nil {
+		t.Fatalf("load issue assignee: %v", err)
+	}
+	if assigneeType != "" || assigneeID != "" {
+		t.Fatalf("assignee changed despite failed execution: %v/%v", assigneeType, assigneeID)
+	}
+}
+
 func TestNewAIModelClientUsesDeepSeekDefaults(t *testing.T) {
 	client := NewAIModelClient(Config{
 		AIModelProvider: "deepseek",

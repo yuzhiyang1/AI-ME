@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
@@ -426,7 +427,7 @@ func (h *Handler) CreateAIApproval(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to create approval event")
 		return
 	}
-	if err := recordAIApprovalActivity(r.Context(), qtx, approval, parseUUID(userID), "ai_me_approval_created", nil); err != nil {
+	if _, _, err := recordAIApprovalActivity(r.Context(), qtx, approval, parseUUID(userID), "ai_me_approval_created", nil); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to record approval activity")
 		return
 	}
@@ -463,7 +464,7 @@ func (h *Handler) createAIMeApproval(ctx context.Context, workspaceID, userID st
 	if _, err := createAIApprovalEvent(ctx, qtx, approval, "member", params.RequesterUserID, "created", "", approval.Status, eventPayload); err != nil {
 		return db.AiMeApproval{}, err
 	}
-	if err := recordAIApprovalActivity(ctx, qtx, approval, params.RequesterUserID, "ai_me_approval_created", eventPayload); err != nil {
+	if _, _, err := recordAIApprovalActivity(ctx, qtx, approval, params.RequesterUserID, "ai_me_approval_created", eventPayload); err != nil {
 		return db.AiMeApproval{}, err
 	}
 	var inboxItem *db.InboxItem
@@ -775,16 +776,13 @@ func (h *Handler) ApproveAIApproval(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	effectivePayload := approvalEffectivePayload(existing, finalPayload)
-	execution, err := h.executeApprovedAIAction(r.Context(), qtx, existing, workspaceUUID, userUUID, effectivePayload)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
+	execution := h.executeApprovedAIActionInSavepoint(r.Context(), tx, existing, workspaceUUID, userUUID, effectivePayload)
 	updated, err := qtx.ApproveAIApproval(r.Context(), db.ApproveAIApprovalParams{
 		ApprovedBy:       userUUID,
 		ApprovalNote:     optionalTextFromString(req.Note),
 		FinalPayload:     finalPayload,
 		ExecutionStatus:  execution.Status,
+		ExecutionError:   optionalTextFromString(execution.ExecutionError),
 		CreatedIssueID:   execution.CreatedIssueID,
 		CreatedTaskID:    execution.CreatedTaskID,
 		CreatedCommentID: execution.CreatedCommentID,
@@ -799,13 +797,23 @@ func (h *Handler) ApproveAIApproval(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to create approval event")
 		return
 	}
-	if execution.Status == "succeeded" {
-		if _, err := createAIApprovalEvent(r.Context(), qtx, updated, "member", userUUID, "execution_succeeded", updated.Status, updated.Status, map[string]any{"action_type": updated.ActionType}); err != nil {
+	executionEventType := "execution_succeeded"
+	if execution.Status == "failed" {
+		executionEventType = "execution_failed"
+	}
+	if execution.Status == "succeeded" || execution.Status == "failed" {
+		payload := approvalExecutionEventPayload(updated, execution)
+		if _, err := createAIApprovalEvent(r.Context(), qtx, updated, "member", userUUID, executionEventType, updated.Status, updated.Status, payload); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to create execution event")
 			return
 		}
+		if err := createAIApprovalEvidence(r.Context(), qtx, updated.WorkspaceID, updated.ID, approvalExecutionEvidenceRequest(updated, execution, payload)); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to create execution evidence")
+			return
+		}
 	}
-	if err := recordAIApprovalActivity(r.Context(), qtx, updated, userUUID, "ai_me_approval_approved", map[string]any{"execution_status": execution.Status}); err != nil {
+	approvalActivity, hasApprovalActivity, err := recordAIApprovalActivity(r.Context(), qtx, updated, userUUID, "ai_me_approval_approved", approvalExecutionEventPayload(updated, execution))
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to record approval activity")
 		return
 	}
@@ -828,9 +836,21 @@ func (h *Handler) ApproveAIApproval(w http.ResponseWriter, r *http.Request) {
 	if execution.QueuedTask != nil {
 		h.publishApprovalTaskQueued(r.Context(), *execution.QueuedTask, workspaceID)
 	}
+	if execution.CreatedComment != nil && execution.CommentIssue != nil {
+		h.publishApprovalCommentCreated(*execution.CreatedComment, *execution.CommentIssue, workspaceID, userID)
+	}
+	for _, activity := range execution.Activities {
+		h.publishApprovalActivityCreated(activity, workspaceID, userID)
+	}
+	if hasApprovalActivity {
+		h.publishApprovalActivityCreated(approvalActivity, workspaceID, userID)
+	}
 	h.publish(protocol.EventApprovalApproved, workspaceID, "member", userID, map[string]any{"approval": resp})
 	if execution.Status == "succeeded" {
 		h.publish(protocol.EventApprovalExecutionSucceeded, workspaceID, "member", userID, map[string]any{"approval": resp})
+	}
+	if execution.Status == "failed" {
+		h.publish(protocol.EventApprovalExecutionFailed, workspaceID, "member", userID, map[string]any{"approval": resp})
 	}
 	h.publishArchivedAIApprovalInboxItems(workspaceID, userID, archivedInboxItems)
 	writeJSON(w, http.StatusOK, resp)
@@ -917,7 +937,7 @@ func (h *Handler) transitionAIApproval(w http.ResponseWriter, r *http.Request, a
 		writeError(w, http.StatusInternalServerError, "failed to create approval event")
 		return
 	}
-	if err := recordAIApprovalActivity(r.Context(), qtx, updated, userUUID, "ai_me_approval_"+eventType, payload); err != nil {
+	if _, _, err := recordAIApprovalActivity(r.Context(), qtx, updated, userUUID, "ai_me_approval_"+eventType, payload); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to record approval activity")
 		return
 	}
@@ -958,13 +978,38 @@ func (h *Handler) publishArchivedAIApprovalInboxItems(workspaceID, userID string
 
 type approvedAIActionExecution struct {
 	Status           string
+	ExecutionError   string
 	CreatedIssueID   pgtype.UUID
 	CreatedTaskID    pgtype.UUID
 	CreatedCommentID pgtype.UUID
 	PreviousIssue    db.Issue
 	UpdatedIssue     *db.Issue
+	CreatedComment   *db.Comment
+	CommentIssue     *db.Issue
 	QueuedTask       *db.AgentTaskQueue
 	CancelledTasks   []db.AgentTaskQueue
+	Activities       []db.ActivityLog
+}
+
+func (h *Handler) executeApprovedAIActionInSavepoint(ctx context.Context, tx pgx.Tx, approval db.AiMeApproval, workspaceID, userID pgtype.UUID, payload []byte) approvedAIActionExecution {
+	actionTx, err := tx.Begin(ctx)
+	if err != nil {
+		return approvedAIActionExecution{Status: "failed", ExecutionError: "failed to start approved action"}
+	}
+	qtx := h.Queries.WithTx(actionTx)
+	execution, err := h.executeApprovedAIAction(ctx, qtx, approval, workspaceID, userID, payload)
+	if err != nil {
+		_ = actionTx.Rollback(ctx)
+		return approvedAIActionExecution{Status: "failed", ExecutionError: err.Error()}
+	}
+	if err := actionTx.Commit(ctx); err != nil {
+		_ = actionTx.Rollback(ctx)
+		return approvedAIActionExecution{Status: "failed", ExecutionError: "failed to commit approved action"}
+	}
+	if execution.Status == "" {
+		execution.Status = "succeeded"
+	}
+	return execution
 }
 
 // executeApprovedAIAction runs the audited command while the approval update
@@ -1047,7 +1092,12 @@ func (h *Handler) executeApprovalComment(ctx context.Context, q *db.Queries, app
 	if err != nil {
 		return approvedAIActionExecution{}, errors.New("failed to create comment")
 	}
-	return approvedAIActionExecution{Status: "succeeded", CreatedCommentID: comment.ID}, nil
+	return approvedAIActionExecution{
+		Status:           "succeeded",
+		CreatedCommentID: comment.ID,
+		CreatedComment:   &comment,
+		CommentIssue:     &issue,
+	}, nil
 }
 
 func (h *Handler) executeApprovalAssignWorker(ctx context.Context, q *db.Queries, approval db.AiMeApproval, workspaceID, userID pgtype.UUID, payload []byte) (approvedAIActionExecution, error) {
@@ -1097,7 +1147,8 @@ func (h *Handler) executeApprovalAssignWorker(ctx context.Context, q *db.Queries
 		return approvedAIActionExecution{}, errors.New("failed to assign issue to agent")
 	}
 
-	if err := h.recordApprovalAssigneeChangedActivity(ctx, q, approval, previousIssue, updatedIssue, userID); err != nil {
+	activity, err := h.recordApprovalAssigneeChangedActivity(ctx, q, approval, previousIssue, updatedIssue, userID)
+	if err != nil {
 		return approvedAIActionExecution{}, err
 	}
 
@@ -1122,6 +1173,7 @@ func (h *Handler) executeApprovalAssignWorker(ctx context.Context, q *db.Queries
 		UpdatedIssue:   &updatedIssue,
 		QueuedTask:     &task,
 		CancelledTasks: cancelled,
+		Activities:     []db.ActivityLog{activity},
 	}, nil
 }
 
@@ -1181,7 +1233,7 @@ func (h *Handler) ensureApprovalAgentAssignable(ctx context.Context, agent db.Ag
 
 // recordApprovalAssigneeChangedActivity feeds the same frequency signal used
 // by manual assignment suggestions.
-func (h *Handler) recordApprovalAssigneeChangedActivity(ctx context.Context, q *db.Queries, approval db.AiMeApproval, previousIssue, updatedIssue db.Issue, actorID pgtype.UUID) error {
+func (h *Handler) recordApprovalAssigneeChangedActivity(ctx context.Context, q *db.Queries, approval db.AiMeApproval, previousIssue, updatedIssue db.Issue, actorID pgtype.UUID) (db.ActivityLog, error) {
 	details := map[string]any{
 		"source":      "ai_me_approval",
 		"approval_id": uuidToString(approval.ID),
@@ -1190,7 +1242,7 @@ func (h *Handler) recordApprovalAssigneeChangedActivity(ctx context.Context, q *
 		"to_type":     textToPtr(updatedIssue.AssigneeType),
 		"to_id":       uuidToPtr(updatedIssue.AssigneeID),
 	}
-	_, err := q.CreateActivity(ctx, db.CreateActivityParams{
+	activity, err := q.CreateActivity(ctx, db.CreateActivityParams{
 		WorkspaceID: approval.WorkspaceID,
 		IssueID:     updatedIssue.ID,
 		ActorType:   pgtype.Text{String: "member", Valid: true},
@@ -1199,9 +1251,9 @@ func (h *Handler) recordApprovalAssigneeChangedActivity(ctx context.Context, q *
 		Details:     jsonBytesOrObject(details),
 	})
 	if err != nil {
-		return errors.New("failed to record assignee change")
+		return db.ActivityLog{}, errors.New("failed to record assignee change")
 	}
-	return nil
+	return activity, nil
 }
 
 func approvalPriorityToInt(priority string) int32 {
@@ -1255,6 +1307,24 @@ func (h *Handler) publishApprovalTaskQueued(ctx context.Context, task db.AgentTa
 	if h.TaskService != nil {
 		h.TaskService.NotifyTaskEnqueued(ctx, task)
 	}
+}
+
+func (h *Handler) publishApprovalCommentCreated(comment db.Comment, issue db.Issue, workspaceID, userID string) {
+	resp := commentToResponse(comment, nil, nil)
+	h.publish(protocol.EventCommentCreated, workspaceID, "member", userID, map[string]any{
+		"comment":             resp,
+		"issue_title":         issue.Title,
+		"issue_assignee_type": textToPtr(issue.AssigneeType),
+		"issue_assignee_id":   uuidToPtr(issue.AssigneeID),
+		"issue_status":        issue.Status,
+	})
+}
+
+func (h *Handler) publishApprovalActivityCreated(activity db.ActivityLog, workspaceID, userID string) {
+	h.publish(protocol.EventActivityCreated, workspaceID, "member", userID, map[string]any{
+		"issue_id": uuidToString(activity.IssueID),
+		"entry":    activityToEntry(activity),
+	})
 }
 
 func (h *Handler) loadAIApproval(w http.ResponseWriter, r *http.Request) (db.AiMeApproval, bool) {
@@ -1335,9 +1405,63 @@ func createAIApprovalEvent(ctx context.Context, q *db.Queries, approval db.AiMeA
 	})
 }
 
-func recordAIApprovalActivity(ctx context.Context, q *db.Queries, approval db.AiMeApproval, actorID pgtype.UUID, action string, payload any) error {
+func approvalExecutionEventPayload(approval db.AiMeApproval, execution approvedAIActionExecution) map[string]any {
+	payload := map[string]any{
+		"approval_id":      uuidToString(approval.ID),
+		"action_type":      approval.ActionType,
+		"execution_status": execution.Status,
+	}
+	if execution.ExecutionError != "" {
+		payload["execution_error"] = execution.ExecutionError
+	}
+	if execution.CreatedIssueID.Valid {
+		payload["created_issue_id"] = uuidToString(execution.CreatedIssueID)
+	}
+	if execution.CreatedTaskID.Valid {
+		payload["created_task_id"] = uuidToString(execution.CreatedTaskID)
+	}
+	if execution.CreatedCommentID.Valid {
+		payload["created_comment_id"] = uuidToString(execution.CreatedCommentID)
+	}
+	if messageID := approvalPayloadText(approval.FinalPayload, "message_id", "feishu_message_id", "source_message_id"); messageID != "" {
+		payload["message_id"] = messageID
+	}
+	if channel := approvalPayloadText(approval.FinalPayload, "channel", "provider"); channel != "" {
+		payload["channel"] = channel
+	}
+	return payload
+}
+
+func approvalExecutionEvidenceRequest(approval db.AiMeApproval, execution approvedAIActionExecution, payload map[string]any) CreateAIApprovalEvidenceRequest {
+	label := "执行结果"
+	quote := "审批动作已执行成功。"
+	if execution.Status == "failed" {
+		label = "执行失败"
+		quote = execution.ExecutionError
+		if quote == "" {
+			quote = "审批动作执行失败，后端未返回详细原因。"
+		}
+	}
+	refID := ""
+	if execution.CreatedTaskID.Valid {
+		refID = uuidToString(execution.CreatedTaskID)
+	} else if execution.CreatedCommentID.Valid {
+		refID = uuidToString(execution.CreatedCommentID)
+	} else if messageID := approvalPayloadText(approval.FinalPayload, "message_id", "feishu_message_id", "source_message_id"); messageID != "" {
+		refID = messageID
+	}
+	return CreateAIApprovalEvidenceRequest{
+		EvidenceType: "log",
+		Label:        label,
+		RefID:        refID,
+		Quote:        quote,
+		Metadata:     payload,
+	}
+}
+
+func recordAIApprovalActivity(ctx context.Context, q *db.Queries, approval db.AiMeApproval, actorID pgtype.UUID, action string, payload any) (db.ActivityLog, bool, error) {
 	if !approval.IssueID.Valid {
-		return nil
+		return db.ActivityLog{}, false, nil
 	}
 	details := map[string]any{
 		"approval_id": uuidToString(approval.ID),
@@ -1345,7 +1469,7 @@ func recordAIApprovalActivity(ctx context.Context, q *db.Queries, approval db.Ai
 		"status":      approval.Status,
 		"payload":     payload,
 	}
-	_, err := q.CreateActivity(ctx, db.CreateActivityParams{
+	activity, err := q.CreateActivity(ctx, db.CreateActivityParams{
 		WorkspaceID: approval.WorkspaceID,
 		IssueID:     approval.IssueID,
 		ActorType:   pgtype.Text{String: "member", Valid: true},
@@ -1353,7 +1477,10 @@ func recordAIApprovalActivity(ctx context.Context, q *db.Queries, approval db.Ai
 		Action:      action,
 		Details:     jsonBytesOrObject(details),
 	})
-	return err
+	if err != nil {
+		return db.ActivityLog{}, false, err
+	}
+	return activity, true, nil
 }
 
 func rawJSONFromRequest(w http.ResponseWriter, value *json.RawMessage, fieldName string) ([]byte, bool) {
