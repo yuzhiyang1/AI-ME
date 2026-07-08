@@ -1,5 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api";
+import { invalidateAIMeWorkSurface } from "../aime/invalidation";
 import { useWorkspaceId } from "../hooks";
 import type {
   AIApproval,
@@ -14,7 +15,7 @@ function invalidateApprovalLists(
   qc: ReturnType<typeof useQueryClient>,
   wsId: string,
 ) {
-  qc.invalidateQueries({ queryKey: approvalKeys.all(wsId) });
+  invalidateAIMeWorkSurface(qc, wsId);
 }
 
 function useApprovalTransition(

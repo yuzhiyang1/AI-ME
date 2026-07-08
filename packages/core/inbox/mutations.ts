@@ -1,8 +1,16 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api";
+import { invalidateAIMeWorkSurface } from "../aime/invalidation";
 import { inboxKeys } from "./queries";
 import { useWorkspaceId } from "../hooks";
 import type { InboxItem } from "../types";
+
+function invalidateInboxAndAIMe(
+  qc: ReturnType<typeof useQueryClient>,
+  wsId: string,
+) {
+  invalidateAIMeWorkSurface(qc, wsId);
+}
 
 export function useMarkInboxRead() {
   const qc = useQueryClient();
@@ -21,7 +29,7 @@ export function useMarkInboxRead() {
       if (ctx?.prev) qc.setQueryData(inboxKeys.list(wsId), ctx.prev);
     },
     onSettled: () => {
-      qc.invalidateQueries({ queryKey: inboxKeys.list(wsId) });
+      invalidateInboxAndAIMe(qc, wsId);
     },
   });
 }
@@ -50,7 +58,7 @@ export function useArchiveInbox() {
       if (ctx?.prev) qc.setQueryData(inboxKeys.list(wsId), ctx.prev);
     },
     onSettled: () => {
-      qc.invalidateQueries({ queryKey: inboxKeys.list(wsId) });
+      invalidateInboxAndAIMe(qc, wsId);
     },
   });
 }
@@ -74,7 +82,7 @@ export function useMarkAllInboxRead() {
       if (ctx?.prev) qc.setQueryData(inboxKeys.list(wsId), ctx.prev);
     },
     onSettled: () => {
-      qc.invalidateQueries({ queryKey: inboxKeys.list(wsId) });
+      invalidateInboxAndAIMe(qc, wsId);
     },
   });
 }
@@ -85,7 +93,7 @@ export function useArchiveAllInbox() {
   return useMutation({
     mutationFn: () => api.archiveAllInbox(),
     onSettled: () => {
-      qc.invalidateQueries({ queryKey: inboxKeys.list(wsId) });
+      invalidateInboxAndAIMe(qc, wsId);
     },
   });
 }
@@ -96,7 +104,7 @@ export function useArchiveAllReadInbox() {
   return useMutation({
     mutationFn: () => api.archiveAllReadInbox(),
     onSettled: () => {
-      qc.invalidateQueries({ queryKey: inboxKeys.list(wsId) });
+      invalidateInboxAndAIMe(qc, wsId);
     },
   });
 }
@@ -107,7 +115,7 @@ export function useArchiveCompletedInbox() {
   return useMutation({
     mutationFn: () => api.archiveCompletedInbox(),
     onSettled: () => {
-      qc.invalidateQueries({ queryKey: inboxKeys.list(wsId) });
+      invalidateInboxAndAIMe(qc, wsId);
     },
   });
 }

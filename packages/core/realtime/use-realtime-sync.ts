@@ -31,7 +31,7 @@ import { inboxKeys } from "../inbox/queries";
 import { notificationPreferenceOptions } from "../notification-preferences/queries";
 import { workspaceKeys, workspaceListOptions } from "../workspace/queries";
 import { chatKeys } from "../chat/queries";
-import { approvalKeys } from "../approvals/queries";
+import { invalidateAIMeWorkSurface } from "../aime/invalidation";
 import { useChatStore } from "../chat";
 import { resolvePostAuthDestination, useHasOnboarded } from "../paths";
 import type {
@@ -113,7 +113,10 @@ export function useRealtimeSync(
     const refreshMap: Record<string, () => void> = {
       inbox: () => {
         const wsId = getCurrentWsId();
-        if (wsId) onInboxInvalidate(qc, wsId);
+        if (wsId) {
+          onInboxInvalidate(qc, wsId);
+          invalidateAIMeWorkSurface(qc, wsId);
+        }
       },
       agent: () => {
         const wsId = getCurrentWsId();
@@ -160,7 +163,7 @@ export function useRealtimeSync(
       },
       approval: () => {
         const wsId = getCurrentWsId();
-        if (wsId) qc.invalidateQueries({ queryKey: approvalKeys.all(wsId) });
+        if (wsId) invalidateAIMeWorkSurface(qc, wsId);
       },
       // Powers the agent presence cache: any task lifecycle change
       // (dispatch / completed / failed / cancelled) refreshes the
@@ -170,6 +173,7 @@ export function useRealtimeSync(
       task: () => {
         const wsId = getCurrentWsId();
         if (!wsId) return;
+        invalidateAIMeWorkSurface(qc, wsId);
         qc.invalidateQueries({ queryKey: agentTaskSnapshotKeys.list(wsId) });
         // 30d activity series shares the same lifecycle signal — any task
         // completion / failure shifts the histogram. (Dispatch alone
@@ -247,6 +251,7 @@ export function useRealtimeSync(
       const wsId = getCurrentWsId();
       if (wsId) {
         onIssueUpdated(qc, wsId, issue);
+        invalidateAIMeWorkSurface(qc, wsId);
         if (issue.status) {
           onInboxIssueStatusChanged(qc, wsId, issue.id, issue.status);
         }
@@ -257,7 +262,10 @@ export function useRealtimeSync(
       const { issue } = p as IssueCreatedPayload;
       if (!issue) return;
       const wsId = getCurrentWsId();
-      if (wsId) onIssueCreated(qc, wsId, issue);
+      if (wsId) {
+        onIssueCreated(qc, wsId, issue);
+        invalidateAIMeWorkSurface(qc, wsId);
+      }
     });
 
     const unsubIssueDeleted = ws.on("issue:deleted", (p) => {
@@ -267,6 +275,7 @@ export function useRealtimeSync(
       if (wsId) {
         onIssueDeleted(qc, wsId, issue_id);
         onInboxIssueDeleted(qc, wsId, issue_id);
+        invalidateAIMeWorkSurface(qc, wsId);
       }
     });
 
@@ -281,7 +290,10 @@ export function useRealtimeSync(
       const { item } = p as InboxNewPayload;
       if (!item) return;
       const wsId = getCurrentWsId();
-      if (wsId) onInboxNew(qc, wsId, item);
+      if (wsId) {
+        onInboxNew(qc, wsId, item);
+        invalidateAIMeWorkSurface(qc, wsId);
+      }
       // Fire a native OS notification only when the app isn't focused. When
       // the user is already looking at Multica, the inbox sidebar's unread
       // styling is enough — no need to interrupt with a banner. `desktopAPI`
@@ -756,6 +768,7 @@ export function useRealtimeSync(
           qc.invalidateQueries({ queryKey: agentTaskSnapshotKeys.all(wsId) });
           qc.invalidateQueries({ queryKey: agentActivityKeys.all(wsId) });
           qc.invalidateQueries({ queryKey: agentRunCountsKeys.all(wsId) });
+          invalidateAIMeWorkSurface(qc, wsId);
         }
         qc.invalidateQueries({ queryKey: workspaceKeys.list() });
       } catch (e) {
