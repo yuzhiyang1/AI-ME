@@ -801,6 +801,11 @@ func (h *Handler) ApproveAIApproval(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to record approval activity")
 		return
 	}
+	archivedInboxItems, err := archiveAIApprovalInboxItems(r.Context(), qtx, updated)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to archive approval inbox item")
+		return
+	}
 	if err := tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit")
 		return
@@ -819,6 +824,7 @@ func (h *Handler) ApproveAIApproval(w http.ResponseWriter, r *http.Request) {
 	if execution.Status == "succeeded" {
 		h.publish(protocol.EventApprovalExecutionSucceeded, workspaceID, "member", userID, map[string]any{"approval": resp})
 	}
+	h.publishArchivedAIApprovalInboxItems(workspaceID, userID, archivedInboxItems)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -907,13 +913,39 @@ func (h *Handler) transitionAIApproval(w http.ResponseWriter, r *http.Request, a
 		writeError(w, http.StatusInternalServerError, "failed to record approval activity")
 		return
 	}
+	var archivedInboxItems []db.InboxItem
+	if action == "reject" || action == "take_over" {
+		archivedInboxItems, err = archiveAIApprovalInboxItems(r.Context(), qtx, updated)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to archive approval inbox item")
+			return
+		}
+	}
 	if err := tx.Commit(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit")
 		return
 	}
 	resp := aiApprovalToResponse(updated)
 	h.publish(proto, workspaceID, "member", userID, map[string]any{"approval": resp})
+	h.publishArchivedAIApprovalInboxItems(workspaceID, userID, archivedInboxItems)
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func archiveAIApprovalInboxItems(ctx context.Context, q *db.Queries, approval db.AiMeApproval) ([]db.InboxItem, error) {
+	return q.ArchiveInboxByApprovalID(ctx, db.ArchiveInboxByApprovalIDParams{
+		WorkspaceID: approval.WorkspaceID,
+		ApprovalID:  uuidToString(approval.ID),
+	})
+}
+
+func (h *Handler) publishArchivedAIApprovalInboxItems(workspaceID, userID string, items []db.InboxItem) {
+	for _, item := range items {
+		h.publish(protocol.EventInboxArchived, workspaceID, "member", userID, map[string]any{
+			"item_id":      uuidToString(item.ID),
+			"issue_id":     uuidToPtr(item.IssueID),
+			"recipient_id": uuidToString(item.RecipientID),
+		})
+	}
 }
 
 type approvedAIActionExecution struct {

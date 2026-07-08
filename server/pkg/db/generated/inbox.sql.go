@@ -66,6 +66,55 @@ func (q *Queries) ArchiveCompletedInbox(ctx context.Context, arg ArchiveComplete
 	return result.RowsAffected(), nil
 }
 
+const archiveInboxByApprovalID = `-- name: ArchiveInboxByApprovalID :many
+UPDATE inbox_item SET archived = true
+WHERE workspace_id = $1::uuid
+  AND details->>'approval_id' = $2::text
+  AND archived = false
+RETURNING id, workspace_id, recipient_type, recipient_id, type, severity, issue_id, title, body, read, archived, created_at, actor_type, actor_id, details
+`
+
+type ArchiveInboxByApprovalIDParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	ApprovalID  string      `json:"approval_id"`
+}
+
+func (q *Queries) ArchiveInboxByApprovalID(ctx context.Context, arg ArchiveInboxByApprovalIDParams) ([]InboxItem, error) {
+	rows, err := q.db.Query(ctx, archiveInboxByApprovalID, arg.WorkspaceID, arg.ApprovalID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []InboxItem{}
+	for rows.Next() {
+		var i InboxItem
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.RecipientType,
+			&i.RecipientID,
+			&i.Type,
+			&i.Severity,
+			&i.IssueID,
+			&i.Title,
+			&i.Body,
+			&i.Read,
+			&i.Archived,
+			&i.CreatedAt,
+			&i.ActorType,
+			&i.ActorID,
+			&i.Details,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const archiveInboxByIssue = `-- name: ArchiveInboxByIssue :execrows
 UPDATE inbox_item SET archived = true
 WHERE workspace_id = $1 AND recipient_type = $2 AND recipient_id = $3 AND issue_id = $4 AND archived = false

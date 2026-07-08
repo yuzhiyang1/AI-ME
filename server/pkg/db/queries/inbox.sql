@@ -41,6 +41,13 @@ UPDATE inbox_item SET archived = true
 WHERE workspace_id = $1 AND issue_id = $2 AND type = $3 AND archived = false
 RETURNING recipient_type, recipient_id;
 
+-- name: ArchiveInboxByApprovalID :many
+UPDATE inbox_item SET archived = true
+WHERE workspace_id = sqlc.arg('workspace_id')::uuid
+  AND details->>'approval_id' = sqlc.arg('approval_id')::text
+  AND archived = false
+RETURNING *;
+
 -- name: CountUnreadInbox :one
 SELECT count(*) FROM inbox_item
 WHERE workspace_id = $1 AND recipient_type = $2 AND recipient_id = $3 AND read = false AND archived = false;

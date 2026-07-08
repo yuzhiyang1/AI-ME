@@ -387,6 +387,87 @@ func TestCreateAIMeApprovalCreatesInboxItemForExternalReply(t *testing.T) {
 	}
 }
 
+func TestAIApprovalResolutionArchivesLinkedInboxItem(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+	ctx := context.Background()
+	confidence, err := numericFromFloat64(0.86)
+	if err != nil {
+		t.Fatalf("confidence: %v", err)
+	}
+	payload := map[string]any{
+		"channel":    "feishu",
+		"message_id": "om_ai_me_resolution_test",
+		"text":       "您好，这条回复需要确认后发送。",
+	}
+	approval, err := testHandler.createAIMeApproval(ctx, testWorkspaceID, testUserID, db.CreateAIApprovalParams{
+		WorkspaceID:        parseUUID(testWorkspaceID),
+		RequesterUserID:    parseUUID(testUserID),
+		SourceType:         "feishu",
+		SourceRefID:        optionalTextFromString("om_ai_me_resolution_test"),
+		Title:              "是否发送飞书回复",
+		Summary:            "AI-Me 已生成外部回复草稿。",
+		RiskLevel:          "high",
+		Confidence:         confidence,
+		Reversibility:      "irreversible",
+		ActionType:         "send_external_message",
+		ActionTitle:        "发送飞书回复",
+		ActionDescription:  "批准后将回复发送到飞书原消息。",
+		OriginalPayload:    jsonBytesOrObject(payload),
+		FinalPayload:       jsonBytesOrObject(payload),
+		AiReasoningSummary: "外部可见回复需要人工确认。",
+	}, nil)
+	if err != nil {
+		t.Fatalf("createAIMeApproval: %v", err)
+	}
+	approvalID := uuidToString(approval.ID)
+	t.Cleanup(func() {
+		_, _ = testPool.Exec(ctx, `DELETE FROM inbox_item WHERE details->>'approval_id' = $1`, approvalID)
+		_, _ = testPool.Exec(ctx, `DELETE FROM ai_me_approval WHERE id = $1`, approvalID)
+	})
+
+	assertInboxArchived := func(want bool) {
+		t.Helper()
+		var archived bool
+		if err := testPool.QueryRow(ctx, `
+			SELECT archived
+			FROM inbox_item
+			WHERE details->>'approval_id' = $1
+		`, approvalID).Scan(&archived); err != nil {
+			t.Fatalf("load linked inbox archived flag: %v", err)
+		}
+		if archived != want {
+			t.Fatalf("linked inbox archived = %v, want %v", archived, want)
+		}
+	}
+	assertInboxArchived(false)
+
+	observeReq := withURLParam(
+		newRequest("POST", "/api/ai-me/approvals/"+approvalID+"/observe?workspace_id="+testWorkspaceID, AIApprovalTransitionRequest{Note: "继续观察"}),
+		"id",
+		approvalID,
+	)
+	w := httptest.NewRecorder()
+	testHandler.ObserveAIApproval(w, observeReq)
+	if w.Code != http.StatusOK {
+		t.Fatalf("ObserveAIApproval: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	assertInboxArchived(false)
+
+	rejectReq := withURLParam(
+		newRequest("POST", "/api/ai-me/approvals/"+approvalID+"/reject?workspace_id="+testWorkspaceID, AIApprovalTransitionRequest{Reason: "不需要发送"}),
+		"id",
+		approvalID,
+	)
+	w = httptest.NewRecorder()
+	testHandler.RejectAIApproval(w, rejectReq)
+	if w.Code != http.StatusOK {
+		t.Fatalf("RejectAIApproval: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	assertInboxArchived(true)
+}
+
 func TestThinkAIMeInjectsAllowedMemoriesAndRecordsUsage(t *testing.T) {
 	if testHandler == nil {
 		t.Skip("database not available")
