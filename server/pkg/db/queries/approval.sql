@@ -72,6 +72,14 @@ INSERT INTO ai_me_approval (
 )
 RETURNING *;
 
+-- name: LinkAIApprovalInboxItem :one
+UPDATE ai_me_approval SET
+    inbox_item_id = sqlc.arg('inbox_item_id')::uuid,
+    updated_at = now()
+WHERE id = sqlc.arg('id')::uuid
+  AND workspace_id = sqlc.arg('workspace_id')::uuid
+RETURNING *;
+
 -- name: UpdateAIApproval :one
 UPDATE ai_me_approval SET
     title = COALESCE(sqlc.narg('title'), title),

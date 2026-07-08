@@ -471,6 +471,14 @@ func (h *Handler) createAIMeApproval(ctx context.Context, workspaceID, userID st
 		return db.AiMeApproval{}, err
 	} else if ok {
 		inboxItem = &item
+		approval, err = qtx.LinkAIApprovalInboxItem(ctx, db.LinkAIApprovalInboxItemParams{
+			InboxItemID: item.ID,
+			ID:          approval.ID,
+			WorkspaceID: approval.WorkspaceID,
+		})
+		if err != nil {
+			return db.AiMeApproval{}, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return db.AiMeApproval{}, err

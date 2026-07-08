@@ -357,6 +357,9 @@ func TestCreateAIMeApprovalCreatesInboxItemForExternalReply(t *testing.T) {
 	if itemID == "" {
 		t.Fatal("expected inbox item id")
 	}
+	if !approval.InboxItemID.Valid || uuidToString(approval.InboxItemID) != itemID {
+		t.Fatalf("approval inbox_item_id = %#v, want %s", approval.InboxItemID, itemID)
+	}
 	if recipientID != testUserID {
 		t.Fatalf("recipient id = %q, want %q", recipientID, testUserID)
 	}
@@ -384,6 +387,18 @@ func TestCreateAIMeApprovalCreatesInboxItemForExternalReply(t *testing.T) {
 	}
 	if details["reply_preview"] == "" {
 		t.Fatalf("missing reply preview: %#v", details)
+	}
+
+	var linkedInboxID string
+	if err := testPool.QueryRow(ctx, `
+		SELECT inbox_item_id::text
+		FROM ai_me_approval
+		WHERE id = $1
+	`, approvalID).Scan(&linkedInboxID); err != nil {
+		t.Fatalf("load linked approval inbox id: %v", err)
+	}
+	if linkedInboxID != itemID {
+		t.Fatalf("persisted inbox_item_id = %q, want %q", linkedInboxID, itemID)
 	}
 }
 

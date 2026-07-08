@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircle,
@@ -46,7 +46,7 @@ import { Textarea } from "@multica/ui/components/ui/textarea";
 import { cn } from "@multica/ui/lib/utils";
 import { toast } from "sonner";
 import { PageHeader } from "../../layout/page-header";
-import { useNavigation } from "../../navigation";
+import { AppLink, useNavigation } from "../../navigation";
 
 type ApprovalTabKey = "pending" | "approved" | "rejected" | "history";
 type ApprovalFilterKey = "all" | "high" | "external" | "create" | "assign" | "memory" | "failed";
@@ -557,6 +557,7 @@ function ApprovalDetail({ approval, loading }: { approval: AIApproval | null; lo
 }
 
 function ApprovalSourceTrace({ approval }: { approval: AIApproval }) {
+  const wsPaths = useWorkspacePaths();
   const channel = getApprovalPayloadText(approval, ["channel"]);
   const messageId = getApprovalPayloadText(approval, ["message_id"]);
   const outboundText = getApprovalPayloadText(approval, ["text", "reply_draft", "content"]);
@@ -583,7 +584,18 @@ function ApprovalSourceTrace({ approval }: { approval: AIApproval }) {
         <InfoCell label="来源类型" value={sourceLabel(approval.source_type)} />
         <InfoCell label="来源 ID" value={approval.source_ref_id || "未记录"} />
         <InfoCell label="关联 Issue" value={approval.issue_id || "无"} />
-        <InfoCell label="收件箱记录" value={approval.inbox_item_id || "无"} />
+        <InfoCell label="收件箱记录">
+          {approval.inbox_item_id ? (
+            <AppLink
+              href={wsPaths.inbox({ inboxItemId: approval.inbox_item_id })}
+              className="truncate text-[var(--aime-brand-600)] hover:underline"
+            >
+              {approval.inbox_item_id}
+            </AppLink>
+          ) : (
+            "无"
+          )}
+        </InfoCell>
         <InfoCell label="目标渠道" value={channel || sourceLabel(approval.source_type)} />
         <InfoCell label="消息 ID" value={messageId || "未记录"} />
       </div>
@@ -901,11 +913,11 @@ function StatusMetric({ label, value, tone }: { label: string; value: number; to
   );
 }
 
-function InfoCell({ label, value }: { label: string; value: string }) {
+function InfoCell({ label, value, children }: { label: string; value?: string; children?: ReactNode }) {
   return (
     <div className="rounded-lg border border-[var(--aime-border)] px-3 py-2">
       <p className="text-[11px] text-[var(--aime-text-tertiary)]">{label}</p>
-      <p className="mt-1 truncate text-xs font-semibold">{value}</p>
+      <p className="mt-1 truncate text-xs font-semibold">{children ?? value}</p>
     </div>
   );
 }

@@ -483,6 +483,70 @@ func (q *Queries) GetAIApprovalStats(ctx context.Context, dollar_1 pgtype.UUID) 
 	return i, err
 }
 
+const linkAIApprovalInboxItem = `-- name: LinkAIApprovalInboxItem :one
+UPDATE ai_me_approval SET
+    inbox_item_id = $1::uuid,
+    updated_at = now()
+WHERE id = $2::uuid
+  AND workspace_id = $3::uuid
+RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at
+`
+
+type LinkAIApprovalInboxItemParams struct {
+	InboxItemID pgtype.UUID `json:"inbox_item_id"`
+	ID          pgtype.UUID `json:"id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+}
+
+func (q *Queries) LinkAIApprovalInboxItem(ctx context.Context, arg LinkAIApprovalInboxItemParams) (AiMeApproval, error) {
+	row := q.db.QueryRow(ctx, linkAIApprovalInboxItem, arg.InboxItemID, arg.ID, arg.WorkspaceID)
+	var i AiMeApproval
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.RequesterUserID,
+		&i.SourceType,
+		&i.SourceRefID,
+		&i.SourceUrl,
+		&i.IssueID,
+		&i.InboxItemID,
+		&i.TaskQueueID,
+		&i.MemoryID,
+		&i.Title,
+		&i.Summary,
+		&i.Status,
+		&i.RiskLevel,
+		&i.Confidence,
+		&i.Reversibility,
+		&i.ActionType,
+		&i.ActionTitle,
+		&i.ActionDescription,
+		&i.OriginalPayload,
+		&i.FinalPayload,
+		&i.AiReasoningSummary,
+		&i.ApprovalNote,
+		&i.RejectionReason,
+		&i.ApprovedBy,
+		&i.ApprovedAt,
+		&i.RejectedBy,
+		&i.RejectedAt,
+		&i.ObservedBy,
+		&i.ObservedAt,
+		&i.TakenOverBy,
+		&i.TakenOverAt,
+		&i.ExecutedAt,
+		&i.ExecutionStatus,
+		&i.ExecutionError,
+		&i.CreatedIssueID,
+		&i.CreatedTaskID,
+		&i.CreatedCommentID,
+		&i.ExpiresAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const listAIApprovalEvents = `-- name: ListAIApprovalEvents :many
 SELECT id, approval_id, workspace_id, actor_type, actor_id, event_type, from_status, to_status, payload, created_at
 FROM ai_me_approval_event
