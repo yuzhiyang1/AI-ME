@@ -1,4 +1,4 @@
-import { type Page } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
 import { TestApiClient } from "./fixtures";
 
 const DEFAULT_E2E_NAME = "E2E User";
@@ -12,21 +12,30 @@ const DEFAULT_E2E_WORKSPACE = "e2e-workspace";
  *
  * Returns the E2E workspace slug so callers can build workspace-scoped URLs.
  */
-export async function loginAsDefault(page: Page): Promise<string> {
-  const api = new TestApiClient();
-  await api.login(DEFAULT_E2E_EMAIL, DEFAULT_E2E_NAME);
+export async function loginAsDefault(page: Page, api = new TestApiClient()): Promise<string> {
+  if (!api.getToken()) {
+    await api.login(DEFAULT_E2E_EMAIL, DEFAULT_E2E_NAME);
+  }
   const workspace = await api.ensureWorkspace(
     "E2E Workspace",
     DEFAULT_E2E_WORKSPACE,
   );
+  await api.dismissStarterContent();
 
   const token = api.getToken();
-  await page.goto("/login");
-  await page.evaluate((t) => {
-    localStorage.setItem("multica_token", t);
+  await page.addInitScript((t) => {
+    window.localStorage.setItem("multica_token", t);
   }, token);
-  await page.goto(`/${workspace.slug}/issues`);
-  await page.waitForURL("**/issues", { timeout: 10000 });
+  await page.goto(`/${workspace.slug}/issues`, {
+    waitUntil: "domcontentloaded",
+    timeout: 90_000,
+  });
+  await expect(page).toHaveURL(new RegExp(`/${workspace.slug}/issues`), {
+    timeout: 30_000,
+  });
+  await expect(page.getByRole("link", { name: /^(Issues|Issue)$/ })).toBeVisible({
+    timeout: 30_000,
+  });
   return workspace.slug;
 }
 
@@ -43,7 +52,7 @@ export async function createTestApi(): Promise<TestApiClient> {
 
 export async function openWorkspaceMenu(page: Page) {
   // Click the workspace switcher button (has ChevronDown icon)
-  await page.locator("aside button").first().click();
+  await page.getByRole("button", { name: /E2E Workspace/ }).click();
   // Wait for dropdown to appear
   await page.locator('[class*="popover"]').waitFor({ state: "visible" });
 }
