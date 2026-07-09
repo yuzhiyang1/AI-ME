@@ -127,6 +127,7 @@ export type {
   AIApprovalStats,
   AIApprovalStatus,
   AIApprovalTransitionRequest,
+  AIApprovalQualityRequest,
   CreateAIApprovalEvidenceRequest,
   CreateAIApprovalRequest,
   ListAIApprovalsParams,

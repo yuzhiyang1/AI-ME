@@ -218,3 +218,9 @@ export interface AIApprovalTransitionRequest {
   reason?: string;
   final_payload?: unknown;
 }
+
+export interface AIApprovalQualityRequest {
+  score: number;
+  note?: string;
+  outcome?: string;
+}

@@ -48,11 +48,14 @@ import type {
   TaskMessagePayload,
   Attachment,
   AIApproval,
+  AIApprovalQualityRequest,
   AIApprovalStats,
   AIApprovalTransitionRequest,
+  AIMeOnboardingStatus,
   AIMeCockpitSummary,
   AIMeThinkRequest,
   AIMeThinkResponse,
+  FeishuDogfoodPanel,
   FeishuIntegrationStatus,
   ChatSession,
   ChatMessage,
@@ -124,11 +127,15 @@ import {
   AIMeThinkResponseSchema,
   AIApprovalStatsSchema,
   AIApprovalSchema,
+  AIMeOnboardingStatusSchema,
+  EMPTY_AIME_ONBOARDING_STATUS,
   EMPTY_AIME_COCKPIT_SUMMARY,
   EMPTY_AIME_THINK_RESPONSE,
   EMPTY_AI_APPROVAL,
   EMPTY_AI_APPROVAL_STATS,
+  EMPTY_FEISHU_DOGFOOD_PANEL,
   EMPTY_FEISHU_INTEGRATION_STATUS,
+  FeishuDogfoodPanelSchema,
   FeishuIntegrationStatusSchema,
   EMPTY_KNOWLEDGE_DOCUMENT,
   EMPTY_LIST_AI_APPROVALS_RESPONSE,
@@ -450,6 +457,13 @@ export class ApiClient {
     });
   }
 
+  async getAIMeOnboardingStatus(): Promise<AIMeOnboardingStatus> {
+    const raw = await this.fetch<unknown>("/api/ai-me/onboarding");
+    return parseWithFallback(raw, AIMeOnboardingStatusSchema, EMPTY_AIME_ONBOARDING_STATUS, {
+      endpoint: "GET /api/ai-me/onboarding",
+    });
+  }
+
   async thinkAIMe(data: AIMeThinkRequest): Promise<AIMeThinkResponse> {
     const raw = await this.fetch<unknown>("/api/ai-me/think", {
       method: "POST",
@@ -489,6 +503,17 @@ export class ApiClient {
     });
   }
 
+  async getFeishuDogfoodPanel(params?: { limit?: number; offset?: number }): Promise<FeishuDogfoodPanel> {
+    const search = new URLSearchParams();
+    if (params?.limit !== undefined) search.set("limit", String(params.limit));
+    if (params?.offset !== undefined) search.set("offset", String(params.offset));
+    const suffix = search.toString();
+    const raw = await this.fetch<unknown>(`/api/integrations/feishu/logs${suffix ? `?${suffix}` : ""}`);
+    return parseWithFallback(raw, FeishuDogfoodPanelSchema, EMPTY_FEISHU_DOGFOOD_PANEL, {
+      endpoint: "GET /api/integrations/feishu/logs",
+    });
+  }
+
   async getAIApproval(id: string): Promise<AIApproval> {
     const raw = await this.fetch<unknown>(`/api/ai-me/approvals/${id}`);
     return parseWithFallback(raw, AIApprovalSchema, EMPTY_AI_APPROVAL, {
@@ -523,6 +548,26 @@ export class ApiClient {
     });
     return parseWithFallback(raw, AIApprovalSchema, EMPTY_AI_APPROVAL, {
       endpoint: "POST /api/ai-me/approvals/:id/approve",
+    });
+  }
+
+  async retryAIApprovalExecution(id: string): Promise<AIApproval> {
+    const raw = await this.fetch<unknown>(`/api/ai-me/approvals/${id}/retry`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    return parseWithFallback(raw, AIApprovalSchema, EMPTY_AI_APPROVAL, {
+      endpoint: "POST /api/ai-me/approvals/:id/retry",
+    });
+  }
+
+  async rateAIApproval(id: string, data: AIApprovalQualityRequest): Promise<AIApproval> {
+    const raw = await this.fetch<unknown>(`/api/ai-me/approvals/${id}/quality`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+    return parseWithFallback(raw, AIApprovalSchema, EMPTY_AI_APPROVAL, {
+      endpoint: "POST /api/ai-me/approvals/:id/quality",
     });
   }
 

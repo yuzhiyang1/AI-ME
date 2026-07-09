@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -205,6 +206,12 @@ type AIApprovalTransitionRequest struct {
 	Note         string           `json:"note"`
 	Reason       string           `json:"reason"`
 	FinalPayload *json.RawMessage `json:"final_payload"`
+}
+
+type AIApprovalQualityRequest struct {
+	Score   int    `json:"score"`
+	Note    string `json:"note"`
+	Outcome string `json:"outcome"`
 }
 
 func aiApprovalToResponse(a db.AiMeApproval) AIApprovalResponse {
@@ -860,6 +867,186 @@ func (h *Handler) RejectAIApproval(w http.ResponseWriter, r *http.Request) {
 	h.transitionAIApproval(w, r, "reject")
 }
 
+func (h *Handler) RetryAIApprovalExecution(w http.ResponseWriter, r *http.Request) {
+	workspaceID := h.resolveWorkspaceID(r)
+	workspaceUUID := parseUUID(workspaceID)
+	approvalID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "id"), "approval id")
+	if !ok {
+		return
+	}
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	userUUID := parseUUID(userID)
+	tx, err := h.TxStarter.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to start transaction")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	qtx := h.Queries.WithTx(tx)
+	existing, err := qtx.GetAIApprovalInWorkspace(r.Context(), db.GetAIApprovalInWorkspaceParams{
+		ID: approvalID, WorkspaceID: workspaceUUID,
+	})
+	if err != nil {
+		writeError(w, http.StatusNotFound, "approval not found")
+		return
+	}
+	if existing.Status != "approved" || existing.ExecutionStatus != "failed" {
+		writeError(w, http.StatusConflict, "only failed approved executions can be retried")
+		return
+	}
+	if _, err := createAIApprovalEvent(r.Context(), qtx, existing, "member", userUUID, "execution_started", existing.Status, existing.Status, map[string]any{
+		"retry": true,
+		"note":  "manual retry",
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create retry event")
+		return
+	}
+	execution := h.executeApprovedAIActionInSavepoint(r.Context(), tx, existing, workspaceUUID, userUUID, approvalEffectivePayload(existing, nil))
+	var updated db.AiMeApproval
+	if execution.Status == "succeeded" {
+		updated, err = qtx.MarkAIApprovalExecutionSucceeded(r.Context(), db.MarkAIApprovalExecutionSucceededParams{
+			CreatedIssueID:   execution.CreatedIssueID,
+			CreatedTaskID:    execution.CreatedTaskID,
+			CreatedCommentID: execution.CreatedCommentID,
+			ID:               approvalID,
+			WorkspaceID:      workspaceUUID,
+		})
+	} else {
+		if execution.Status == "" {
+			execution.Status = "failed"
+		}
+		updated, err = qtx.MarkAIApprovalExecutionFailed(r.Context(), db.MarkAIApprovalExecutionFailedParams{
+			ExecutionError: execution.ExecutionError,
+			ID:             approvalID,
+			WorkspaceID:    workspaceUUID,
+		})
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update retry result")
+		return
+	}
+	executionEventType := "execution_succeeded"
+	if execution.Status == "failed" {
+		executionEventType = "execution_failed"
+	}
+	payload := approvalExecutionEventPayload(updated, execution)
+	payload["retry"] = true
+	if _, err := createAIApprovalEvent(r.Context(), qtx, updated, "member", userUUID, executionEventType, updated.Status, updated.Status, payload); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create retry result event")
+		return
+	}
+	if err := createAIApprovalEvidence(r.Context(), qtx, updated.WorkspaceID, updated.ID, approvalExecutionEvidenceRequest(updated, execution, payload)); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create retry evidence")
+		return
+	}
+	approvalActivity, hasApprovalActivity, err := recordAIApprovalActivity(r.Context(), qtx, updated, userUUID, "ai_me_approval_execution_retried", payload)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to record retry activity")
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit")
+		return
+	}
+	resp := aiApprovalToResponse(updated)
+	if execution.UpdatedIssue != nil {
+		h.publishApprovalIssueUpdated(r.Context(), *execution.UpdatedIssue, execution.PreviousIssue, workspaceID, userID)
+	}
+	if h.TaskService != nil && len(execution.CancelledTasks) > 0 {
+		h.TaskService.BroadcastCancelledTasks(r.Context(), execution.CancelledTasks)
+	}
+	if execution.QueuedTask != nil {
+		h.publishApprovalTaskQueued(r.Context(), *execution.QueuedTask, workspaceID)
+	}
+	if execution.CreatedComment != nil && execution.CommentIssue != nil {
+		h.publishApprovalCommentCreated(*execution.CreatedComment, *execution.CommentIssue, workspaceID, userID)
+	}
+	for _, activity := range execution.Activities {
+		h.publishApprovalActivityCreated(activity, workspaceID, userID)
+	}
+	if hasApprovalActivity {
+		h.publishApprovalActivityCreated(approvalActivity, workspaceID, userID)
+	}
+	h.publish(protocol.EventApprovalUpdated, workspaceID, "member", userID, map[string]any{"approval": resp})
+	if execution.Status == "succeeded" {
+		h.publish(protocol.EventApprovalExecutionSucceeded, workspaceID, "member", userID, map[string]any{"approval": resp})
+	}
+	if execution.Status == "failed" {
+		h.publish(protocol.EventApprovalExecutionFailed, workspaceID, "member", userID, map[string]any{"approval": resp})
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) RateAIApproval(w http.ResponseWriter, r *http.Request) {
+	workspaceID := h.resolveWorkspaceID(r)
+	workspaceUUID := parseUUID(workspaceID)
+	approvalID, ok := parseUUIDOrBadRequest(w, chi.URLParam(r, "id"), "approval id")
+	if !ok {
+		return
+	}
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	var req AIApprovalQualityRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Score < 1 || req.Score > 5 {
+		writeError(w, http.StatusBadRequest, "score must be between 1 and 5")
+		return
+	}
+	userUUID := parseUUID(userID)
+	tx, err := h.TxStarter.Begin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to start transaction")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	qtx := h.Queries.WithTx(tx)
+	approval, err := qtx.GetAIApprovalInWorkspace(r.Context(), db.GetAIApprovalInWorkspaceParams{
+		ID: approvalID, WorkspaceID: workspaceUUID,
+	})
+	if err != nil {
+		writeError(w, http.StatusNotFound, "approval not found")
+		return
+	}
+	payload := map[string]any{
+		"kind":    "quality_review",
+		"score":   req.Score,
+		"note":    strings.TrimSpace(req.Note),
+		"outcome": strings.TrimSpace(req.Outcome),
+	}
+	if _, err := createAIApprovalEvent(r.Context(), qtx, approval, "member", userUUID, "edited", approval.Status, approval.Status, payload); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create quality event")
+		return
+	}
+	if err := createAIApprovalEvidence(r.Context(), qtx, approval.WorkspaceID, approval.ID, CreateAIApprovalEvidenceRequest{
+		EvidenceType: "log",
+		Label:        "决策质量评分",
+		RefID:        uuidToString(approval.ID),
+		Quote:        approvalQualityQuote(req),
+		Metadata:     payload,
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create quality evidence")
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit")
+		return
+	}
+	resp, ok := h.aiApprovalDetailResponse(w, r, approval)
+	if !ok {
+		return
+	}
+	h.publish(protocol.EventApprovalUpdated, workspaceID, "member", userID, map[string]any{"approval": resp})
+	writeJSON(w, http.StatusOK, resp)
+}
+
 func (h *Handler) ObserveAIApproval(w http.ResponseWriter, r *http.Request) {
 	h.transitionAIApproval(w, r, "observe")
 }
@@ -1457,6 +1644,17 @@ func approvalExecutionEvidenceRequest(approval db.AiMeApproval, execution approv
 		Quote:        quote,
 		Metadata:     payload,
 	}
+}
+
+func approvalQualityQuote(req AIApprovalQualityRequest) string {
+	parts := []string{fmt.Sprintf("评分：%d/5", req.Score)}
+	if note := strings.TrimSpace(req.Note); note != "" {
+		parts = append(parts, "备注："+note)
+	}
+	if outcome := strings.TrimSpace(req.Outcome); outcome != "" {
+		parts = append(parts, "结果："+outcome)
+	}
+	return strings.Join(parts, "；")
 }
 
 func recordAIApprovalActivity(ctx context.Context, q *db.Queries, approval db.AiMeApproval, actorID pgtype.UUID, action string, payload any) (db.ActivityLog, bool, error) {

@@ -19,6 +19,7 @@ import { MyIssuesPage } from "@multica/views/my-issues";
 import { SkillsPage } from "@multica/views/skills";
 import { AIMeDashboardPage } from "@multica/views/aime";
 import { ApprovalCenterPage } from "@multica/views/approvals";
+import { FeishuDogfoodPage } from "@multica/views/feishu";
 import { MemoryPage } from "@multica/views/memory";
 import { ToolsPermissionsPage } from "@multica/views/tools-permissions";
 import { DesktopRuntimesPage } from "./components/desktop-runtimes-page";
@@ -144,6 +145,7 @@ export const appRoutes: RouteObject[] = [
           },
           { path: "memory", element: <MemoryPage />, handle: { title: "Memory" } },
           { path: "approvals", element: <ApprovalCenterPage />, handle: { title: "Approvals" } },
+          { path: "feishu", element: <FeishuDogfoodPage />, handle: { title: "Feishu" } },
           { path: "tools", element: <ToolsPermissionsPage />, handle: { title: "Tools" } },
           { path: "skills", element: <SkillsPage />, handle: { title: "Skills" } },
           {

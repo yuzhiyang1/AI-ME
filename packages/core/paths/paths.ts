@@ -39,6 +39,7 @@ function workspaceScoped(slug: string) {
     memory: () => `${ws}/memory`,
     approvals: (approvalId = "") =>
       approvalId ? `${ws}/approvals?approval=${encode(approvalId)}` : `${ws}/approvals`,
+    feishu: () => `${ws}/feishu`,
     agents: () => `${ws}/agents`,
     tools: () => `${ws}/tools`,
     agentDetail: (id: string) => `${ws}/agents/${encode(id)}`,

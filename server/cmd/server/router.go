@@ -355,8 +355,10 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 
 			// AI-Me command center
 			r.Get("/api/ai-me/cockpit/summary", h.GetAIMeCockpitSummary)
+			r.Get("/api/ai-me/onboarding", h.GetAIMeOnboardingStatus)
 			r.Post("/api/ai-me/think", h.ThinkAIMe)
 			r.Get("/api/integrations/feishu/status", h.GetFeishuIntegrationStatus)
+			r.Get("/api/integrations/feishu/logs", h.ListFeishuLogs)
 			r.Route("/api/ai-me/approvals", func(r chi.Router) {
 				r.Get("/", h.ListAIApprovals)
 				r.Post("/", h.CreateAIApproval)
@@ -365,6 +367,8 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 					r.Get("/", h.GetAIApproval)
 					r.Patch("/", h.UpdateAIApproval)
 					r.Post("/approve", h.ApproveAIApproval)
+					r.Post("/retry", h.RetryAIApprovalExecution)
+					r.Post("/quality", h.RateAIApproval)
 					r.Post("/reject", h.RejectAIApproval)
 					r.Post("/observe", h.ObserveAIApproval)
 					r.Post("/take-over", h.TakeOverAIApproval)

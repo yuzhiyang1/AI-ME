@@ -45,6 +45,7 @@ vi.mock("@multica/core/paths", () => ({
       opts?.inboxItemId ? `/test/inbox/${opts.inboxItemId}` : "/test/inbox",
     agents: () => "/test/agents",
     memory: () => "/test/memory",
+    feishu: () => "/test/feishu",
   }),
 }));
 

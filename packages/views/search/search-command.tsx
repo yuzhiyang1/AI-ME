@@ -18,6 +18,7 @@ import {
   Brain,
   BrainCircuit,
   ShieldCheck,
+  MessagesSquare,
   Monitor,
   Moon,
   Sun,
@@ -103,6 +104,7 @@ type NavKey =
   | "projects"
   | "memory"
   | "approvals"
+  | "feishu"
   | "agents"
   | "tools"
   | "runtimes"
@@ -142,6 +144,7 @@ export function SearchCommand() {
     { key: "projects", label: t(($) => $.pages.projects), icon: FolderKanban, keywords: ["projects", "kanban", "项目"] },
     { key: "memory", label: t(($) => $.pages.memory), icon: Brain, keywords: ["memory", "knowledge", "记忆", "知识"] },
     { key: "approvals", label: t(($) => $.pages.approvals), icon: ShieldCheck, keywords: ["approval", "approve", "risk", "审批", "批准", "风险"] },
+    { key: "feishu", label: t(($) => $.pages.feishu), icon: MessagesSquare, keywords: ["feishu", "lark", "dogfood", "飞书", "狗粮", "日志"] },
     { key: "agents", label: t(($) => $.pages.agents), icon: Bot, keywords: ["agents", "bots", "ai"] },
     { key: "tools", label: t(($) => $.pages.tools), icon: Wrench, keywords: ["tools", "permissions", "policy", "工具", "权限", "策略"] },
     { key: "runtimes", label: t(($) => $.pages.runtimes), icon: Monitor, keywords: ["runtimes", "environments"] },

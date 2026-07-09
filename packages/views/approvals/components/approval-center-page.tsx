@@ -5,6 +5,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircle,
   CheckCircle2,
+  ClipboardCheck,
   Clock3,
   Eye,
   FileText,
@@ -23,7 +24,9 @@ import {
   approvalStatsOptions,
   useApproveAIApproval,
   useObserveAIApproval,
+  useRateAIApproval,
   useRejectAIApproval,
+  useRetryAIApprovalExecution,
   useTakeOverAIApproval,
 } from "@multica/core/approvals";
 import { useWorkspaceId } from "@multica/core/hooks";
@@ -682,6 +685,7 @@ function ApprovalExecutionPanel({ approval }: { approval: AIApproval }) {
   const queryClient = useQueryClient();
   const { getAgentName } = useActorName();
   const [retrying, setRetrying] = useState(false);
+  const retryApprovalExecution = useRetryAIApprovalExecution();
   const issueId = approval.issue_id;
   const shouldTrackTask = approval.action_type === "assign_worker" || !!approval.created_task_id;
   const shouldShow =
@@ -706,6 +710,8 @@ function ApprovalExecutionPanel({ approval }: { approval: AIApproval }) {
     ? tasks.find((task) => task.id === approval.created_task_id) ?? null
     : null;
   const canRetry = !!issueId && (createdTask?.status === "failed" || createdTask?.status === "cancelled");
+  const canRetryApprovalExecution =
+    approval.status === "approved" && approval.execution_status === "failed";
 
   const retryTask = async () => {
     if (!issueId || retrying) return;
@@ -718,6 +724,16 @@ function ApprovalExecutionPanel({ approval }: { approval: AIApproval }) {
       toast.error(error instanceof Error ? error.message : "重新派工失败");
     } finally {
       setRetrying(false);
+    }
+  };
+
+  const retryExecution = async () => {
+    if (!canRetryApprovalExecution) return;
+    try {
+      await retryApprovalExecution.mutateAsync({ id: approval.id });
+      toast.success("已重新执行审批动作");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "重试执行失败");
     }
   };
 
@@ -739,7 +755,22 @@ function ApprovalExecutionPanel({ approval }: { approval: AIApproval }) {
         </div>
       ) : approval.execution_status === "failed" ? (
         <div className="mt-3 rounded-lg border border-[var(--aime-danger-bg)] bg-[var(--aime-danger-bg)] px-3 py-3 text-sm leading-6 text-[var(--aime-danger)]">
-          审批动作执行失败：{approval.execution_error || "后端未返回失败原因。"}
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <span>审批动作执行失败：{approval.execution_error || "后端未返回失败原因。"}</span>
+            {canRetryApprovalExecution && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={retryApprovalExecution.isPending}
+                onClick={retryExecution}
+                className="border-[var(--aime-danger)] bg-[var(--aime-surface)] text-[var(--aime-danger)] hover:bg-[var(--aime-surface)]"
+              >
+                {retryApprovalExecution.isPending ? <Loader2 className="size-3.5 animate-spin" /> : <RotateCcw className="size-3.5" />}
+                重试执行
+              </Button>
+            )}
+          </div>
         </div>
       ) : approval.created_comment_id ? (
         <div className="mt-3 grid gap-3 md:grid-cols-3">
@@ -836,6 +867,8 @@ function ApprovalRiskPanel({ approval, loading }: { approval: AIApproval | null;
             </div>
           </section>
 
+          <ApprovalQualityReview approval={approval} />
+
           <section>
             <h3 className="text-sm font-semibold">关联证据</h3>
             <div className="mt-3 space-y-2">
@@ -922,6 +955,82 @@ function ApprovalRiskPanel({ approval, loading }: { approval: AIApproval | null;
         </div>
       )}
     </aside>
+  );
+}
+
+function ApprovalQualityReview({ approval }: { approval: AIApproval }) {
+  const rateApproval = useRateAIApproval();
+  const [score, setScore] = useState(approvalQualityScore(approval) || 0);
+  const [note, setNote] = useState("");
+  const canSubmit = score >= 1 && score <= 5 && !rateApproval.isPending;
+
+  useEffect(() => {
+    setScore(approvalQualityScore(approval) || 0);
+    setNote("");
+  }, [approval]);
+
+  const submit = async () => {
+    if (!canSubmit) return;
+    try {
+      await rateApproval.mutateAsync({
+        id: approval.id,
+        data: {
+          score,
+          note: note.trim(),
+          outcome: approval.execution_status === "succeeded" ? "accepted" : approval.execution_status,
+        },
+      });
+      toast.success("质量复盘已记录");
+      setNote("");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "记录复盘失败");
+    }
+  };
+
+  return (
+    <section>
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="text-sm font-semibold">质量复盘</h3>
+        {approvalQualityScore(approval) > 0 && (
+          <span className="rounded-full bg-[var(--aime-success-bg)] px-2 py-0.5 text-[11px] font-semibold text-[var(--aime-success)]">
+            已评分 {approvalQualityScore(approval)}/5
+          </span>
+        )}
+      </div>
+      <div className="mt-3 flex flex-wrap gap-1.5">
+        {[1, 2, 3, 4, 5].map((value) => (
+          <button
+            key={value}
+            type="button"
+            onClick={() => setScore(value)}
+            className={cn(
+              "flex size-7 items-center justify-center rounded-lg border text-xs font-semibold transition-colors",
+              score === value
+                ? "border-[var(--aime-brand-200)] bg-[var(--aime-brand-50)] text-[var(--aime-brand-700)]"
+                : "border-[var(--aime-border)] text-[var(--aime-text-tertiary)] hover:bg-[var(--aime-surface-muted)]",
+            )}
+          >
+            {value}
+          </button>
+        ))}
+      </div>
+      <Textarea
+        value={note}
+        onChange={(event) => setNote(event.target.value)}
+        placeholder="记录这次判断哪里好、哪里需要改..."
+        className="mt-3 min-h-20 resize-none rounded-xl border-[var(--aime-border)] text-sm"
+      />
+      <Button
+        type="button"
+        size="sm"
+        className="mt-3 border-[var(--aime-brand-500)] bg-[var(--aime-brand-500)] text-white hover:bg-[var(--aime-brand-600)]"
+        disabled={!canSubmit}
+        onClick={submit}
+      >
+        {rateApproval.isPending ? <Loader2 className="size-3.5 animate-spin" /> : <ClipboardCheck className="size-3.5" />}
+        记录评分
+      </Button>
+    </section>
   );
 }
 
@@ -1380,12 +1489,19 @@ function metadataValueLabel(value: unknown) {
 function eventPayloadSummary(value: unknown) {
   if (!isRecord(value)) return "";
   const parts: string[] = [];
+  const kind = metadataString(value.kind);
+  const score = metadataString(value.score);
+  const note = metadataString(value.note);
+  const outcome = metadataString(value.outcome);
   const status = metadataString(value.execution_status);
   const error = metadataString(value.execution_error);
   const taskId = metadataString(value.created_task_id);
   const commentId = metadataString(value.created_comment_id);
   const messageId = metadataString(value.message_id);
   const channel = metadataString(value.channel);
+  if (kind === "quality_review") parts.push(`评分：${score || "-"} / 5`);
+  if (kind === "quality_review" && outcome) parts.push(`结果：${outcome}`);
+  if (kind === "quality_review" && note) parts.push(`备注：${note}`);
   if (status) parts.push(`状态：${executionLabel(status)}`);
   if (taskId) parts.push(`任务：${taskId}`);
   if (commentId) parts.push(`评论：${commentId}`);
@@ -1393,6 +1509,18 @@ function eventPayloadSummary(value: unknown) {
   if (messageId) parts.push(`消息：${messageId}`);
   if (error) parts.push(`错误：${error}`);
   return parts.join(" · ");
+}
+
+function approvalQualityScore(approval: AIApproval) {
+  const event = [...(approval.events ?? [])]
+    .reverse()
+    .find((item) => {
+      if (!isRecord(item.payload)) return false;
+      return item.payload.kind === "quality_review";
+    });
+  if (!event || !isRecord(event.payload)) return 0;
+  const raw = event.payload.score;
+  return typeof raw === "number" && Number.isFinite(raw) ? raw : 0;
 }
 
 function metadataString(value: unknown) {

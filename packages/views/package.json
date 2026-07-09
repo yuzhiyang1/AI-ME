@@ -27,6 +27,7 @@
     "./skills": "./skills/index.ts",
     "./aime": "./aime/index.ts",
     "./approvals": "./approvals/index.ts",
+    "./feishu": "./feishu/index.ts",
     "./agents": "./agents/index.ts",
     "./memory": "./memory/index.ts",
     "./tools-permissions": "./tools-permissions/index.ts",

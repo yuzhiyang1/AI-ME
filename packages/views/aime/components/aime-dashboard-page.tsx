@@ -16,6 +16,7 @@ import {
   Inbox,
   ListChecks,
   Loader2,
+  MessagesSquare,
   Send,
   ShieldAlert,
   Sparkles,
@@ -222,6 +223,13 @@ export function AIMeDashboardPage() {
           </p>
         </div>
         <div className="hidden items-center gap-2 md:flex">
+          <AppLink
+            href={paths.feishu()}
+            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[var(--aime-border)] bg-[var(--aime-surface)] px-3 text-xs font-medium text-[var(--aime-text-secondary)] shadow-[var(--aime-shadow-xs)] transition-colors hover:bg-[var(--aime-surface-muted)]"
+          >
+            <MessagesSquare className="size-3.5" />
+            飞书狗粮日志
+          </AppLink>
           <StatusPill configured={result?.configured} />
         </div>
       </PageHeader>

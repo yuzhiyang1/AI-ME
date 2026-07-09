@@ -4,6 +4,7 @@ import { invalidateAIMeWorkSurface } from "../aime/invalidation";
 import { useWorkspaceId } from "../hooks";
 import type {
   AIApproval,
+  AIApprovalQualityRequest,
   AIApprovalTransitionRequest,
   CreateAIApprovalRequest,
   ListAIApprovalsResponse,
@@ -80,6 +81,26 @@ export function useUpdateAIApproval() {
 
 export function useApproveAIApproval() {
   return useApprovalTransition((id, data) => api.approveAIApproval(id, data));
+}
+
+export function useRetryAIApprovalExecution() {
+  return useApprovalTransition((id) => api.retryAIApprovalExecution(id));
+}
+
+export function useRateAIApproval() {
+  const qc = useQueryClient();
+  const wsId = useWorkspaceId();
+  return useMutation({
+    mutationFn: ({ id, data }: { id: string; data: AIApprovalQualityRequest }) =>
+      api.rateAIApproval(id, data),
+    onSuccess: (approval) => {
+      qc.setQueryData<AIApproval>(approvalKeys.detail(wsId, approval.id), approval);
+    },
+    onSettled: (_data, _error, vars) => {
+      qc.invalidateQueries({ queryKey: approvalKeys.detail(wsId, vars.id) });
+      invalidateApprovalLists(qc, wsId);
+    },
+  });
 }
 
 export function useRejectAIApproval() {

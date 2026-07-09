@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -94,15 +95,106 @@ type FeishuIntegrationStatusResponse struct {
 	Warnings              []string `json:"warnings"`
 }
 
+type FeishuMessageLogResponse struct {
+	InboxItemID     string  `json:"inbox_item_id"`
+	WorkspaceID     string  `json:"workspace_id"`
+	RecipientID     string  `json:"recipient_id"`
+	InboxTitle      string  `json:"inbox_title"`
+	InboundText     string  `json:"inbound_text"`
+	Read            bool    `json:"read"`
+	Archived        bool    `json:"archived"`
+	ReceivedAt      string  `json:"received_at"`
+	MessageID       string  `json:"message_id"`
+	EventID         string  `json:"event_id"`
+	ChatID          string  `json:"chat_id"`
+	ChatType        string  `json:"chat_type"`
+	SenderOpenID    string  `json:"sender_open_id"`
+	SenderUserID    string  `json:"sender_user_id"`
+	SenderUnionID   string  `json:"sender_union_id"`
+	GateReason      string  `json:"gate_reason"`
+	ApprovalID      string  `json:"approval_id"`
+	ApprovalStatus  string  `json:"approval_status"`
+	RiskLevel       string  `json:"risk_level"`
+	ExecutionStatus string  `json:"execution_status"`
+	ExecutionError  string  `json:"execution_error"`
+	ApprovedAt      *string `json:"approved_at"`
+	ExecutedAt      *string `json:"executed_at"`
+	ReplyText       string  `json:"reply_text"`
+	DraftSource     string  `json:"draft_source"`
+	DraftProvider   string  `json:"draft_provider"`
+	DraftModel      string  `json:"draft_model"`
+	QualityScore    int32   `json:"quality_score"`
+	QualityNote     string  `json:"quality_note"`
+	QualityScoredAt *string `json:"quality_scored_at"`
+}
+
+type FeishuDogfoodSummaryResponse struct {
+	TotalReceived    int64   `json:"total_received"`
+	ReceivedToday    int64   `json:"received_today"`
+	ApprovalsCreated int64   `json:"approvals_created"`
+	PendingApproval  int64   `json:"pending_approval"`
+	Rejected         int64   `json:"rejected"`
+	Sent             int64   `json:"sent"`
+	SendFailed       int64   `json:"send_failed"`
+	AIDrafted        int64   `json:"ai_drafted"`
+	QualityReviewed  int64   `json:"quality_reviewed"`
+	AvgQualityScore  float64 `json:"avg_quality_score"`
+	DogfoodTarget    int64   `json:"dogfood_target"`
+	DogfoodCompleted int64   `json:"dogfood_completed"`
+	DogfoodRemaining int64   `json:"dogfood_remaining"`
+	FirstReceivedAt  *string `json:"first_received_at"`
+	LastReceivedAt   *string `json:"last_received_at"`
+}
+
+type AIMeCostControlResponse struct {
+	Currency                string `json:"currency"`
+	DraftCallCount          int64  `json:"draft_call_count"`
+	EstimatedDraftCostCents int64  `json:"estimated_draft_cost_cents"`
+	DailyBudgetCents        int64  `json:"daily_budget_cents"`
+	RemainingBudgetCents    int64  `json:"remaining_budget_cents"`
+	BudgetStatus            string `json:"budget_status"`
+	WorkerTaskCount         int64  `json:"worker_task_count"`
+	WorkerInputTokens       int64  `json:"worker_input_tokens"`
+	WorkerOutputTokens      int64  `json:"worker_output_tokens"`
+	WorkerCacheReadTokens   int64  `json:"worker_cache_read_tokens"`
+	WorkerCacheWriteTokens  int64  `json:"worker_cache_write_tokens"`
+}
+
+type AIMeOnboardingStepResponse struct {
+	Key         string `json:"key"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Completed   bool   `json:"completed"`
+}
+
+type AIMeOnboardingResponse struct {
+	Completed      bool                         `json:"completed"`
+	CompletedSteps int                          `json:"completed_steps"`
+	TotalSteps     int                          `json:"total_steps"`
+	Steps          []AIMeOnboardingStepResponse `json:"steps"`
+}
+
+type FeishuDogfoodPanelResponse struct {
+	Status     FeishuIntegrationStatusResponse `json:"status"`
+	Summary    FeishuDogfoodSummaryResponse    `json:"summary"`
+	Cost       AIMeCostControlResponse         `json:"cost"`
+	Onboarding AIMeOnboardingResponse          `json:"onboarding"`
+	Logs       []FeishuMessageLogResponse      `json:"logs"`
+}
+
 func (h *Handler) GetFeishuIntegrationStatus(w http.ResponseWriter, r *http.Request) {
 	workspaceID := h.resolveWorkspaceID(r)
 	workspaceUUID := parseUUID(workspaceID)
+	writeJSON(w, http.StatusOK, h.buildFeishuIntegrationStatus(r.Context(), workspaceUUID, workspaceID))
+}
+
+func (h *Handler) buildFeishuIntegrationStatus(ctx context.Context, workspaceUUID pgtype.UUID, workspaceID string) FeishuIntegrationStatusResponse {
 	cfg := feishuConfigFromEnv()
 	mode := feishuEventModeFromEnv()
 	webhookConfigured := cfg.WebhookToken != ""
 	appConfigured := feishuAppCredentialsConfigured()
 	workspaceConfigured := cfg.WorkspaceID != "" || cfg.WorkspaceSlug != ""
-	workspaceMatches, workspaceWarnings := h.feishuWorkspaceMatches(r.Context(), workspaceUUID, workspaceID, cfg)
+	workspaceMatches, workspaceWarnings := h.feishuWorkspaceMatches(ctx, workspaceUUID, workspaceID, cfg)
 	websocketConfigured := appConfigured && workspaceConfigured
 	incomingConfigured := workspaceConfigured && workspaceMatches
 	if mode == "websocket" {
@@ -130,7 +222,7 @@ func (h *Handler) GetFeishuIntegrationStatus(w http.ResponseWriter, r *http.Requ
 		warnings = append(warnings, "reply_client_not_configured")
 	}
 
-	writeJSON(w, http.StatusOK, FeishuIntegrationStatusResponse{
+	return FeishuIntegrationStatusResponse{
 		Provider:              "feishu",
 		EventMode:             mode,
 		IncomingConfigured:    incomingConfigured,
@@ -146,7 +238,223 @@ func (h *Handler) GetFeishuIntegrationStatus(w http.ResponseWriter, r *http.Requ
 		RequiredEvents:        []string{"im.message.receive_v1"},
 		RequiredScopes:        []string{"im:message:receive_as_bot", "im:message:send_as_bot"},
 		Warnings:              warnings,
+	}
+}
+
+func (h *Handler) ListFeishuLogs(w http.ResponseWriter, r *http.Request) {
+	workspaceID := h.resolveWorkspaceID(r)
+	workspaceUUID, ok := parseUUIDOrBadRequest(w, workspaceID, "workspace id")
+	if !ok {
+		return
+	}
+	limit, offset := feishuLogPagination(r)
+	logs, err := h.Queries.ListFeishuMessageLogs(r.Context(), db.ListFeishuMessageLogsParams{
+		WorkspaceID: workspaceUUID,
+		Limit:       limit,
+		Offset:      offset,
 	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list feishu logs")
+		return
+	}
+	summary, err := h.Queries.GetFeishuDogfoodSummary(r.Context(), db.GetFeishuDogfoodSummaryParams{
+		WorkspaceID:    workspaceUUID,
+		DraftCostCents: aimeDraftCostCentsFromEnv(),
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load feishu summary")
+		return
+	}
+	workerUsage, err := h.Queries.GetAIMeWorkerUsageSummary(r.Context(), workspaceUUID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load AI-Me usage summary")
+		return
+	}
+	status := h.buildFeishuIntegrationStatus(r.Context(), workspaceUUID, workspaceID)
+	onboarding, err := h.buildAIMeOnboardingResponse(r.Context(), workspaceUUID, status)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load AI-Me onboarding status")
+		return
+	}
+	writeJSON(w, http.StatusOK, FeishuDogfoodPanelResponse{
+		Status:     status,
+		Summary:    feishuDogfoodSummaryToResponse(summary),
+		Cost:       aimeCostControlToResponse(summary, workerUsage),
+		Onboarding: onboarding,
+		Logs:       feishuLogsToResponse(logs),
+	})
+}
+
+func (h *Handler) GetAIMeOnboardingStatus(w http.ResponseWriter, r *http.Request) {
+	workspaceID := h.resolveWorkspaceID(r)
+	workspaceUUID, ok := parseUUIDOrBadRequest(w, workspaceID, "workspace id")
+	if !ok {
+		return
+	}
+	status := h.buildFeishuIntegrationStatus(r.Context(), workspaceUUID, workspaceID)
+	onboarding, err := h.buildAIMeOnboardingResponse(r.Context(), workspaceUUID, status)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load AI-Me onboarding status")
+		return
+	}
+	writeJSON(w, http.StatusOK, onboarding)
+}
+
+func feishuLogPagination(r *http.Request) (int32, int32) {
+	limit := int32(30)
+	offset := int32(0)
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 && parsed <= 100 {
+			limit = int32(parsed)
+		}
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("offset")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed >= 0 {
+			offset = int32(parsed)
+		}
+	}
+	return limit, offset
+}
+
+func feishuLogsToResponse(rows []db.ListFeishuMessageLogsRow) []FeishuMessageLogResponse {
+	resp := make([]FeishuMessageLogResponse, len(rows))
+	for i, row := range rows {
+		resp[i] = FeishuMessageLogResponse{
+			InboxItemID:     uuidToString(row.InboxItemID),
+			WorkspaceID:     uuidToString(row.WorkspaceID),
+			RecipientID:     uuidToString(row.RecipientID),
+			InboxTitle:      row.InboxTitle,
+			InboundText:     row.InboundText,
+			Read:            row.Read,
+			Archived:        row.Archived,
+			ReceivedAt:      timestampToString(row.ReceivedAt),
+			MessageID:       row.MessageID,
+			EventID:         row.EventID,
+			ChatID:          row.ChatID,
+			ChatType:        row.ChatType,
+			SenderOpenID:    row.SenderOpenID,
+			SenderUserID:    row.SenderUserID,
+			SenderUnionID:   row.SenderUnionID,
+			GateReason:      row.GateReason,
+			ApprovalID:      row.ApprovalID,
+			ApprovalStatus:  row.ApprovalStatus,
+			RiskLevel:       row.RiskLevel,
+			ExecutionStatus: row.ExecutionStatus,
+			ExecutionError:  row.ExecutionError,
+			ApprovedAt:      timestampToPtr(row.ApprovedAt),
+			ExecutedAt:      timestampToPtr(row.ExecutedAt),
+			ReplyText:       row.ReplyText,
+			DraftSource:     row.DraftSource,
+			DraftProvider:   row.DraftProvider,
+			DraftModel:      row.DraftModel,
+			QualityScore:    row.QualityScore,
+			QualityNote:     row.QualityNote,
+			QualityScoredAt: timestampToPtr(row.QualityScoredAt),
+		}
+	}
+	return resp
+}
+
+func feishuDogfoodSummaryToResponse(row db.GetFeishuDogfoodSummaryRow) FeishuDogfoodSummaryResponse {
+	return FeishuDogfoodSummaryResponse{
+		TotalReceived:    row.TotalReceived,
+		ReceivedToday:    row.ReceivedToday,
+		ApprovalsCreated: row.ApprovalsCreated,
+		PendingApproval:  row.PendingApproval,
+		Rejected:         row.Rejected,
+		Sent:             row.Sent,
+		SendFailed:       row.SendFailed,
+		AIDrafted:        row.AiDrafted,
+		QualityReviewed:  row.QualityReviewed,
+		AvgQualityScore:  row.AvgQualityScore,
+		DogfoodTarget:    20,
+		DogfoodCompleted: row.DogfoodCompleted,
+		DogfoodRemaining: row.DogfoodRemaining,
+		FirstReceivedAt:  timestampToPtr(row.FirstReceivedAt),
+		LastReceivedAt:   timestampToPtr(row.LastReceivedAt),
+	}
+}
+
+func aimeCostControlToResponse(summary db.GetFeishuDogfoodSummaryRow, worker db.GetAIMeWorkerUsageSummaryRow) AIMeCostControlResponse {
+	budget := aimeDailyBudgetCentsFromEnv()
+	used := summary.EstimatedDraftCostCents
+	remaining := budget - used
+	if remaining < 0 {
+		remaining = 0
+	}
+	status := "ok"
+	if budget > 0 && used >= budget {
+		status = "exceeded"
+	} else if budget > 0 && used*100 >= budget*80 {
+		status = "warning"
+	}
+	return AIMeCostControlResponse{
+		Currency:                "USD",
+		DraftCallCount:          summary.AiDrafted,
+		EstimatedDraftCostCents: used,
+		DailyBudgetCents:        budget,
+		RemainingBudgetCents:    remaining,
+		BudgetStatus:            status,
+		WorkerTaskCount:         worker.TaskCount,
+		WorkerInputTokens:       worker.InputTokens,
+		WorkerOutputTokens:      worker.OutputTokens,
+		WorkerCacheReadTokens:   worker.CacheReadTokens,
+		WorkerCacheWriteTokens:  worker.CacheWriteTokens,
+	}
+}
+
+func (h *Handler) buildAIMeOnboardingResponse(ctx context.Context, workspaceUUID pgtype.UUID, status FeishuIntegrationStatusResponse) (AIMeOnboardingResponse, error) {
+	workspace, err := h.Queries.GetWorkspace(ctx, workspaceUUID)
+	if err != nil {
+		return AIMeOnboardingResponse{}, err
+	}
+	counts, err := h.Queries.GetAIMeOnboardingCounts(ctx, workspaceUUID)
+	if err != nil {
+		return AIMeOnboardingResponse{}, err
+	}
+	settings := aimeWorkspaceSettingsFromJSON(workspace.Settings)
+	llmConfigured := settings.Enabled && aimeModelConfiguredForSettings(h.AIModel, settings)
+	steps := []AIMeOnboardingStepResponse{
+		{Key: "llm_configured", Title: "连接 AI-Me 大脑", Description: "配置 DeepSeek 或其他 LLM API，让 AI-Me 能生成判断和回复草稿。", Completed: llmConfigured},
+		{Key: "workers_ready", Title: "配置 AI 员工", Description: "至少准备一个 Codex 或 Claude Code 员工用于承接任务。", Completed: counts.AgentCount > 0},
+		{Key: "feishu_incoming", Title: "接收飞书消息", Description: "飞书事件入口已绑定当前工作区，可以进入例外收件箱。", Completed: status.IncomingConfigured},
+		{Key: "feishu_outgoing", Title: "发送飞书回复", Description: "飞书机器人具备回复原消息的权限和 App 凭证。", Completed: status.OutgoingConfigured},
+		{Key: "first_message", Title: "收到第一条真实消息", Description: "AI-Me 已经接住至少一条来自飞书的工作项。", Completed: counts.FeishuMessageCount > 0},
+		{Key: "first_approval", Title: "生成第一次审批", Description: "飞书消息已进入 AI 回复审批闭环。", Completed: counts.FeishuApprovalCount > 0},
+		{Key: "first_reply_sent", Title: "完成第一次发送", Description: "审批通过后，AI-Me 已成功通过飞书回复。", Completed: counts.FeishuSentCount > 0},
+	}
+	completed := 0
+	for _, step := range steps {
+		if step.Completed {
+			completed++
+		}
+	}
+	return AIMeOnboardingResponse{
+		Completed:      completed == len(steps),
+		CompletedSteps: completed,
+		TotalSteps:     len(steps),
+		Steps:          steps,
+	}, nil
+}
+
+func aimeDraftCostCentsFromEnv() int64 {
+	return int64FromEnv("AI_ME_LLM_DRAFT_COST_CENTS", 1)
+}
+
+func aimeDailyBudgetCentsFromEnv() int64 {
+	return int64FromEnv("AI_ME_DAILY_BUDGET_CENTS", 200)
+}
+
+func int64FromEnv(key string, fallback int64) int64 {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed < 0 {
+		return fallback
+	}
+	return parsed
 }
 
 func (h *Handler) FeishuWebhook(w http.ResponseWriter, r *http.Request) {

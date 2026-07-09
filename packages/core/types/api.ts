@@ -118,6 +118,93 @@ export interface FeishuIntegrationStatus {
   warnings: string[];
 }
 
+export interface FeishuMessageLog {
+  inbox_item_id: string;
+  workspace_id: string;
+  recipient_id: string;
+  inbox_title: string;
+  inbound_text: string;
+  read: boolean;
+  archived: boolean;
+  received_at: string;
+  message_id: string;
+  event_id: string;
+  chat_id: string;
+  chat_type: string;
+  sender_open_id: string;
+  sender_user_id: string;
+  sender_union_id: string;
+  gate_reason: string;
+  approval_id: string;
+  approval_status: string;
+  risk_level: string;
+  execution_status: string;
+  execution_error: string;
+  approved_at: string | null;
+  executed_at: string | null;
+  reply_text: string;
+  draft_source: string;
+  draft_provider: string;
+  draft_model: string;
+  quality_score: number;
+  quality_note: string;
+  quality_scored_at: string | null;
+}
+
+export interface FeishuDogfoodSummary {
+  total_received: number;
+  received_today: number;
+  approvals_created: number;
+  pending_approval: number;
+  rejected: number;
+  sent: number;
+  send_failed: number;
+  ai_drafted: number;
+  quality_reviewed: number;
+  avg_quality_score: number;
+  dogfood_target: number;
+  dogfood_completed: number;
+  dogfood_remaining: number;
+  first_received_at: string | null;
+  last_received_at: string | null;
+}
+
+export interface AIMeCostControl {
+  currency: string;
+  draft_call_count: number;
+  estimated_draft_cost_cents: number;
+  daily_budget_cents: number;
+  remaining_budget_cents: number;
+  budget_status: string;
+  worker_task_count: number;
+  worker_input_tokens: number;
+  worker_output_tokens: number;
+  worker_cache_read_tokens: number;
+  worker_cache_write_tokens: number;
+}
+
+export interface AIMeOnboardingStep {
+  key: string;
+  title: string;
+  description: string;
+  completed: boolean;
+}
+
+export interface AIMeOnboardingStatus {
+  completed: boolean;
+  completed_steps: number;
+  total_steps: number;
+  steps: AIMeOnboardingStep[];
+}
+
+export interface FeishuDogfoodPanel {
+  status: FeishuIntegrationStatus;
+  summary: FeishuDogfoodSummary;
+  cost: AIMeCostControl;
+  onboarding: AIMeOnboardingStatus;
+  logs: FeishuMessageLog[];
+}
+
 // Personal Access Tokens
 export interface PersonalAccessToken {
   id: string;

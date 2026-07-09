@@ -8,7 +8,9 @@ export {
   useApproveAIApproval,
   useCreateAIApproval,
   useObserveAIApproval,
+  useRateAIApproval,
   useRejectAIApproval,
+  useRetryAIApprovalExecution,
   useTakeOverAIApproval,
   useUpdateAIApproval,
 } from "./mutations";

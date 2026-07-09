@@ -32,6 +32,7 @@ import {
   Brain,
   BrainCircuit,
   ShieldCheck,
+  MessagesSquare,
   X,
   Zap,
   Wrench,
@@ -112,6 +113,7 @@ type NavKey =
   | "autopilots"
   | "memory"
   | "approvals"
+  | "feishu"
   | "agents"
   | "tools"
   | "runtimes"
@@ -128,6 +130,7 @@ type NavLabelKey =
   | "autopilots"
   | "memory"
   | "approvals"
+  | "feishu"
   | "agents"
   | "tools"
   | "runtimes"
@@ -146,6 +149,7 @@ const workspaceNav: { key: NavKey; labelKey: NavLabelKey; icon: typeof Inbox }[]
   { key: "autopilots", labelKey: "autopilots", icon: Zap },
   { key: "memory", labelKey: "memory", icon: Brain },
   { key: "approvals", labelKey: "approvals", icon: ShieldCheck },
+  { key: "feishu", labelKey: "feishu", icon: MessagesSquare },
   { key: "agents", labelKey: "agents", icon: Bot },
   { key: "tools", labelKey: "tools", icon: Wrench },
 ];

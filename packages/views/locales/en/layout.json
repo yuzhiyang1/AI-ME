@@ -8,6 +8,7 @@
     "autopilots": "Autopilot",
     "memory": "Memory & Knowledge",
     "approvals": "Approval Center",
+    "feishu": "Feishu Dogfood",
     "agents": "AI Workers",
     "tools": "Tools & Permissions",
     "runtimes": "Runtimes",

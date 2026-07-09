@@ -392,6 +392,87 @@ WHERE id = $1
 	}
 }
 
+func TestListFeishuLogsReturnsDogfoodPanel(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("handler test fixture is not available")
+	}
+
+	const messageID = "om_ai_me_log_panel_test"
+	ctx := context.Background()
+	cleanupFeishuMessageTestRows(ctx, messageID)
+	origModel := testHandler.AIModel
+	testHandler.AIModel = nil
+	t.Cleanup(func() {
+		testHandler.AIModel = origModel
+		cleanupFeishuMessageTestRows(ctx, messageID)
+	})
+
+	t.Setenv("FEISHU_WEBHOOK_TOKEN", "test-token")
+	t.Setenv("FEISHU_WORKSPACE_ID", testWorkspaceID)
+	t.Setenv("FEISHU_WORKSPACE_SLUG", "")
+	t.Setenv("FEISHU_OWNER_USER_ID", testUserID)
+	t.Setenv("FEISHU_ALLOWED_CHAT_ID", "")
+	t.Setenv("FEISHU_GROUP_MESSAGE_POLICY", "mention")
+	t.Setenv("AI_ME_LLM_DRAFT_COST_CENTS", "9")
+	t.Setenv("AI_ME_DAILY_BUDGET_CENTS", "20")
+
+	payload := feishuEventCallback{
+		Header: feishuHeader{
+			EventID:   "evt_ai_me_log_panel_test",
+			EventType: "im.message.receive_v1",
+			Token:     "test-token",
+		},
+		Event: feishuEventBody{
+			Sender: feishuSender{
+				SenderType: "user",
+				SenderID: feishuSenderID{
+					OpenID: "ou_colleague_log",
+					UserID: "u_colleague_log",
+				},
+			},
+			Message: feishuMessage{
+				MessageID:   messageID,
+				ChatID:      "oc_log_test",
+				ChatType:    "p2p",
+				MessageType: "text",
+				Content:     `{"text":"帮我确认一下测试日志面板"}`,
+			},
+		},
+	}
+
+	w := httptest.NewRecorder()
+	testHandler.FeishuWebhook(w, feishuWebhookRequest(t, payload))
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("webhook status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	req := newRequest(http.MethodGet, "/api/integrations/feishu/logs?workspace_id="+testWorkspaceID+"&limit=5", nil)
+	w = httptest.NewRecorder()
+	testHandler.ListFeishuLogs(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("ListFeishuLogs: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp FeishuDogfoodPanelResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode logs response: %v", err)
+	}
+	if len(resp.Logs) == 0 || resp.Logs[0].MessageID != messageID {
+		t.Fatalf("logs = %#v, want newest message %s", resp.Logs, messageID)
+	}
+	if resp.Logs[0].ApprovalID == "" || resp.Logs[0].ExecutionStatus != "not_started" {
+		t.Fatalf("log approval metadata = %#v", resp.Logs[0])
+	}
+	if resp.Summary.TotalReceived < 1 || resp.Summary.DogfoodCompleted < 1 || resp.Summary.DogfoodTarget != 20 {
+		t.Fatalf("summary = %+v, want dogfood progress", resp.Summary)
+	}
+	if resp.Onboarding.TotalSteps == 0 || resp.Onboarding.CompletedSteps == 0 {
+		t.Fatalf("onboarding = %+v, want at least configured workspace steps", resp.Onboarding)
+	}
+	if resp.Cost.DailyBudgetCents != 20 || resp.Cost.BudgetStatus == "" {
+		t.Fatalf("cost = %+v, want configured budget", resp.Cost)
+	}
+}
+
 func feishuWebhookRequest(t *testing.T, payload feishuEventCallback) *http.Request {
 	t.Helper()
 
