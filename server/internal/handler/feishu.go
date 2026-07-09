@@ -206,12 +206,17 @@ func (h *Handler) FeishuWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if result.Status == "duplicate" {
-		writeJSON(w, http.StatusOK, map[string]any{"status": result.Status, "inbox_item_id": result.InboxItemID})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":        result.Status,
+			"inbox_item_id": result.InboxItemID,
+			"approval_id":   result.ApprovalID,
+		})
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"status":        result.Status,
 		"inbox_item_id": result.InboxItemID,
+		"approval_id":   result.ApprovalID,
 		"workspace_id":  result.WorkspaceID,
 		"recipient_id":  result.RecipientID,
 	})
@@ -221,6 +226,7 @@ type feishuIngestResult struct {
 	Status      string
 	Reason      string
 	InboxItemID string
+	ApprovalID  string
 	WorkspaceID string
 	RecipientID string
 }
@@ -257,7 +263,11 @@ func (h *Handler) ingestFeishuMessage(ctx context.Context, payload feishuEventCa
 		MessageID:     feishuMessageID,
 	}); err == nil {
 		slog.Info("飞书消息重复，已跳过", append(logAttrs, "message_id", feishuMessageID, "inbox_item_id", uuidToString(existing.ID))...)
-		return feishuIngestResult{Status: "duplicate", InboxItemID: uuidToString(existing.ID)}, nil
+		return feishuIngestResult{
+			Status:      "duplicate",
+			InboxItemID: uuidToString(existing.ID),
+			ApprovalID:  inboxDetailsText(existing.Details, "approval_id"),
+		}, nil
 	} else if !isNotFound(err) {
 		slog.Warn("飞书消息查重失败", append(logAttrs, "message_id", feishuMessageID, "error", err)...)
 		return feishuIngestResult{}, fmt.Errorf("failed to check duplicate feishu message: %w", err)
@@ -269,23 +279,27 @@ func (h *Handler) ingestFeishuMessage(ctx context.Context, payload feishuEventCa
 		return feishuIngestResult{Status: "ignored", Reason: "empty_message"}, nil
 	}
 
-	item, err := h.createFeishuInboxItem(ctx, workspace.ID, recipient.UserID, payload, messageText, gate)
+	item, approval, err := h.createFeishuInboxItemAndApproval(ctx, workspace.ID, recipient.UserID, payload, messageText, gate)
 	if err != nil {
-		slog.Warn("飞书消息创建 AI-Me 收件箱失败", append(logAttrs, "error", err)...)
-		return feishuIngestResult{}, fmt.Errorf("failed to create feishu inbox item: %w", err)
+		slog.Warn("飞书消息创建 AI-Me 收件箱和审批失败", append(logAttrs, "error", err)...)
+		return feishuIngestResult{}, fmt.Errorf("failed to create feishu inbox item and approval: %w", err)
 	}
 
 	workspaceID := uuidToString(workspace.ID)
 	recipientID := uuidToString(recipient.UserID)
+	approvalID := uuidToString(approval.ID)
+	h.publish(protocol.EventApprovalCreated, workspaceID, "ai_me", recipientID, map[string]any{"approval": aiApprovalToResponse(approval)})
 	h.publish(protocol.EventInboxNew, workspaceID, "system", "", map[string]any{"item": inboxToResponse(item)})
 	slog.Info("飞书消息已进入 AI-Me 收件箱", append(logAttrs,
 		"workspace_id", workspaceID,
 		"recipient_id", recipientID,
 		"inbox_item_id", uuidToString(item.ID),
+		"approval_id", approvalID,
 	)...)
 	return feishuIngestResult{
 		Status:      "received",
 		InboxItemID: uuidToString(item.ID),
+		ApprovalID:  approvalID,
 		WorkspaceID: workspaceID,
 		RecipientID: recipientID,
 	}, nil
@@ -370,13 +384,62 @@ func (h *Handler) feishuWorkspaceMatches(ctx context.Context, workspaceUUID pgty
 	return false, nil
 }
 
-func (h *Handler) createFeishuInboxItem(ctx context.Context, workspaceID, recipientID pgtype.UUID, payload feishuEventCallback, messageText string, gate feishuInboundGateResult) (db.InboxItem, error) {
+func (h *Handler) createFeishuInboxItemAndApproval(ctx context.Context, workspaceID, recipientID pgtype.UUID, payload feishuEventCallback, messageText string, gate feishuInboundGateResult) (db.InboxItem, db.AiMeApproval, error) {
+	// Keep the inbound message, approval, and inbox link atomic for webhook retries.
+	tx, err := h.TxStarter.Begin(ctx)
+	if err != nil {
+		return db.InboxItem{}, db.AiMeApproval{}, err
+	}
+	defer tx.Rollback(ctx)
+	qtx := h.Queries.WithTx(tx)
+
+	item, err := createFeishuInboxItem(ctx, qtx, workspaceID, recipientID, payload, messageText, gate)
+	if err != nil {
+		return db.InboxItem{}, db.AiMeApproval{}, err
+	}
+	approvalReq := feishuReplyApprovalRequest(item, payload, messageText, gate)
+	params, err := createAIMeApprovalParams(workspaceID, recipientID, approvalReq)
+	if err != nil {
+		return db.InboxItem{}, db.AiMeApproval{}, err
+	}
+	approval, err := qtx.CreateAIApproval(ctx, params)
+	if err != nil {
+		return db.InboxItem{}, db.AiMeApproval{}, err
+	}
+	for _, evidenceReq := range approvalReq.Evidence {
+		if err := createAIApprovalEvidence(ctx, qtx, workspaceID, approval.ID, evidenceReq); err != nil {
+			return db.InboxItem{}, db.AiMeApproval{}, err
+		}
+	}
+	eventPayload := map[string]any{
+		"source":        "feishu",
+		"source_ref_id": feishuSourceMessageID(payload),
+		"inbox_item_id": uuidToString(item.ID),
+	}
+	if _, err := createAIApprovalEvent(ctx, qtx, approval, "ai_me", recipientID, "created", "", approval.Status, eventPayload); err != nil {
+		return db.InboxItem{}, db.AiMeApproval{}, err
+	}
+	item, err = qtx.LinkInboxItemApproval(ctx, db.LinkInboxItemApprovalParams{
+		ID:          item.ID,
+		WorkspaceID: workspaceID,
+		ApprovalID:  uuidToString(approval.ID),
+	})
+	if err != nil {
+		return db.InboxItem{}, db.AiMeApproval{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return db.InboxItem{}, db.AiMeApproval{}, err
+	}
+	return item, approval, nil
+}
+
+func createFeishuInboxItem(ctx context.Context, q *db.Queries, workspaceID, recipientID pgtype.UUID, payload feishuEventCallback, messageText string, gate feishuInboundGateResult) (db.InboxItem, error) {
 	itemType := "new_comment"
 	if gate.OwnerMentioned {
 		itemType = "mentioned"
 	}
 	title := feishuInboxTitle(payload, messageText, gate)
-	return h.Queries.CreateInboxItem(ctx, db.CreateInboxItemParams{
+	return q.CreateInboxItem(ctx, db.CreateInboxItemParams{
 		WorkspaceID:   workspaceID,
 		RecipientType: "member",
 		RecipientID:   recipientID,
@@ -386,6 +449,63 @@ func (h *Handler) createFeishuInboxItem(ctx context.Context, workspaceID, recipi
 		Body:          optionalTextFromString(messageText),
 		Details:       feishuInboxDetails(payload, messageText, gate),
 	})
+}
+
+func feishuReplyApprovalRequest(item db.InboxItem, payload feishuEventCallback, messageText string, gate feishuInboundGateResult) CreateAIApprovalRequest {
+	messageID := feishuSourceMessageID(payload)
+	// Avoid spending LLM tokens from webhook delivery; the user can edit before approval.
+	replyDraft := "收到，我会看一下并尽快回复你。"
+	confidence := 0.55
+	metadata := map[string]any{
+		"event_id":        payload.Header.EventID,
+		"chat_id":         payload.Event.Message.ChatID,
+		"chat_type":       payload.Event.Message.ChatType,
+		"message_type":    payload.Event.Message.MessageType,
+		"sender_open_id":  payload.Event.Sender.SenderID.OpenID,
+		"sender_user_id":  payload.Event.Sender.SenderID.UserID,
+		"sender_union_id": payload.Event.Sender.SenderID.UnionID,
+		"owner_mentioned": gate.OwnerMentioned,
+		"gate_reason":     gate.Reason,
+	}
+	originalPayload := map[string]any{
+		"channel":       "feishu",
+		"message_id":    messageID,
+		"chat_id":       payload.Event.Message.ChatID,
+		"chat_type":     payload.Event.Message.ChatType,
+		"incoming_text": messageText,
+		"sender":        metadata,
+	}
+	finalPayload := map[string]any{
+		"channel":    "feishu",
+		"message_id": messageID,
+		"chat_id":    payload.Event.Message.ChatID,
+		"text":       replyDraft,
+	}
+	return CreateAIApprovalRequest{
+		SourceType:         "feishu",
+		SourceRefID:        messageID,
+		InboxItemID:        uuidToString(item.ID),
+		Title:              "是否回复这条飞书消息",
+		Summary:            "飞书收到一条需要处理的消息，AI-Me 已准备保守回复，请确认或编辑后发送。",
+		RiskLevel:          "high",
+		Confidence:         &confidence,
+		Reversibility:      "irreversible",
+		ActionType:         "send_external_message",
+		ActionTitle:        "回复飞书消息",
+		ActionDescription:  "批准后，AI-Me 会通过飞书机器人回复原消息。",
+		OriginalPayload:    originalPayload,
+		FinalPayload:       finalPayload,
+		AIReasoningSummary: "这条飞书消息通过入站规则进入工作区，属于代表用户对外回复的动作，必须先经过人工审批。",
+		Evidence: []CreateAIApprovalEvidenceRequest{
+			{
+				EvidenceType: "feishu",
+				Label:        "飞书原消息",
+				RefID:        messageID,
+				Quote:        truncateText(messageText, 240),
+				Metadata:     metadata,
+			},
+		},
+	}
 }
 
 func feishuInboxTitle(payload feishuEventCallback, messageText string, gate feishuInboundGateResult) string {
@@ -427,6 +547,18 @@ func feishuInboxDetails(payload feishuEventCallback, messageText string, gate fe
 		"text_preview":    truncateText(strings.Join(strings.Fields(messageText), " "), 240),
 	}
 	return jsonBytesOrObject(details)
+}
+
+func inboxDetailsText(details []byte, key string) string {
+	var parsed map[string]any
+	if err := json.Unmarshal(details, &parsed); err != nil {
+		return ""
+	}
+	value, ok := parsed[key].(string)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(value)
 }
 
 func feishuSourceMessageID(payload feishuEventCallback) string {

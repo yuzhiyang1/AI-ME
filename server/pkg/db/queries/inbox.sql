@@ -32,6 +32,13 @@ INSERT INTO inbox_item (
 ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 RETURNING *;
 
+-- name: LinkInboxItemApproval :one
+UPDATE inbox_item SET
+  details = COALESCE(details, '{}'::jsonb) || jsonb_build_object('approval_id', sqlc.arg('approval_id')::text)
+WHERE id = sqlc.arg('id')::uuid
+  AND workspace_id = sqlc.arg('workspace_id')::uuid
+RETURNING *;
+
 -- name: MarkInboxRead :one
 UPDATE inbox_item SET read = true
 WHERE id = $1

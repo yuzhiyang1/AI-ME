@@ -282,6 +282,54 @@ func (q *Queries) CreateInboxItem(ctx context.Context, arg CreateInboxItemParams
 	return i, err
 }
 
+const findInboxItemByExternalMessage = `-- name: FindInboxItemByExternalMessage :one
+SELECT id, workspace_id, recipient_type, recipient_id, type, severity, issue_id, title, body, read, archived, created_at, actor_type, actor_id, details FROM inbox_item
+WHERE workspace_id = $1::uuid
+  AND recipient_type = $2::text
+  AND recipient_id = $3::uuid
+  AND details->>'source_type' = $4::text
+  AND details->>'message_id' = $5::text
+ORDER BY created_at DESC
+LIMIT 1
+`
+
+type FindInboxItemByExternalMessageParams struct {
+	WorkspaceID   pgtype.UUID `json:"workspace_id"`
+	RecipientType string      `json:"recipient_type"`
+	RecipientID   pgtype.UUID `json:"recipient_id"`
+	SourceType    string      `json:"source_type"`
+	MessageID     string      `json:"message_id"`
+}
+
+func (q *Queries) FindInboxItemByExternalMessage(ctx context.Context, arg FindInboxItemByExternalMessageParams) (InboxItem, error) {
+	row := q.db.QueryRow(ctx, findInboxItemByExternalMessage,
+		arg.WorkspaceID,
+		arg.RecipientType,
+		arg.RecipientID,
+		arg.SourceType,
+		arg.MessageID,
+	)
+	var i InboxItem
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.RecipientType,
+		&i.RecipientID,
+		&i.Type,
+		&i.Severity,
+		&i.IssueID,
+		&i.Title,
+		&i.Body,
+		&i.Read,
+		&i.Archived,
+		&i.CreatedAt,
+		&i.ActorType,
+		&i.ActorID,
+		&i.Details,
+	)
+	return i, err
+}
+
 const getInboxItem = `-- name: GetInboxItem :one
 SELECT id, workspace_id, recipient_type, recipient_id, type, severity, issue_id, title, body, read, archived, created_at, actor_type, actor_id, details FROM inbox_item
 WHERE id = $1
@@ -343,33 +391,22 @@ func (q *Queries) GetInboxItemInWorkspace(ctx context.Context, arg GetInboxItemI
 	return i, err
 }
 
-const findInboxItemByExternalMessage = `-- name: FindInboxItemByExternalMessage :one
-SELECT id, workspace_id, recipient_type, recipient_id, type, severity, issue_id, title, body, read, archived, created_at, actor_type, actor_id, details FROM inbox_item
-WHERE workspace_id = $1::uuid
-  AND recipient_type = $2::text
-  AND recipient_id = $3::uuid
-  AND details->>'source_type' = $4::text
-  AND details->>'message_id' = $5::text
-ORDER BY created_at DESC
-LIMIT 1
+const linkInboxItemApproval = `-- name: LinkInboxItemApproval :one
+UPDATE inbox_item SET
+  details = COALESCE(details, '{}'::jsonb) || jsonb_build_object('approval_id', $1::text)
+WHERE id = $2::uuid
+  AND workspace_id = $3::uuid
+RETURNING id, workspace_id, recipient_type, recipient_id, type, severity, issue_id, title, body, read, archived, created_at, actor_type, actor_id, details
 `
 
-type FindInboxItemByExternalMessageParams struct {
-	WorkspaceID   pgtype.UUID `json:"workspace_id"`
-	RecipientType string      `json:"recipient_type"`
-	RecipientID   pgtype.UUID `json:"recipient_id"`
-	SourceType    string      `json:"source_type"`
-	MessageID     string      `json:"message_id"`
+type LinkInboxItemApprovalParams struct {
+	ApprovalID  string      `json:"approval_id"`
+	ID          pgtype.UUID `json:"id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
 }
 
-func (q *Queries) FindInboxItemByExternalMessage(ctx context.Context, arg FindInboxItemByExternalMessageParams) (InboxItem, error) {
-	row := q.db.QueryRow(ctx, findInboxItemByExternalMessage,
-		arg.WorkspaceID,
-		arg.RecipientType,
-		arg.RecipientID,
-		arg.SourceType,
-		arg.MessageID,
-	)
+func (q *Queries) LinkInboxItemApproval(ctx context.Context, arg LinkInboxItemApprovalParams) (InboxItem, error) {
+	row := q.db.QueryRow(ctx, linkInboxItemApproval, arg.ApprovalID, arg.ID, arg.WorkspaceID)
 	var i InboxItem
 	err := row.Scan(
 		&i.ID,

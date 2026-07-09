@@ -152,8 +152,9 @@ func TestFeishuWebhookCreatesAIMeInboxItemAndDeduplicates(t *testing.T) {
 
 	const messageID = "om_ai_me_intake_test"
 	ctx := context.Background()
+	cleanupFeishuMessageTestRows(ctx, messageID)
 	t.Cleanup(func() {
-		_, _ = testPool.Exec(ctx, `DELETE FROM inbox_item WHERE details->>'message_id' = $1`, messageID)
+		cleanupFeishuMessageTestRows(ctx, messageID)
 	})
 
 	t.Setenv("FEISHU_WEBHOOK_TOKEN", "test-token")
@@ -192,22 +193,64 @@ func TestFeishuWebhookCreatesAIMeInboxItemAndDeduplicates(t *testing.T) {
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("first webhook status = %d, body = %s", w.Code, w.Body.String())
 	}
+	var firstResp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&firstResp); err != nil {
+		t.Fatalf("decode first webhook response: %v", err)
+	}
+	approvalID, _ := firstResp["approval_id"].(string)
+	if approvalID == "" {
+		t.Fatalf("expected approval_id in webhook response, got %#v", firstResp)
+	}
 
 	var count int
+	var inboxID string
 	var itemType string
 	var sourceType string
+	var approvalIDInDetails string
 	if err := testPool.QueryRow(ctx, `
-SELECT count(*), max(type), max(details->>'source_type')
+SELECT count(*), max(id::text), max(type), max(details->>'source_type'), max(details->>'approval_id')
 FROM inbox_item
 WHERE workspace_id = $1
   AND recipient_type = 'member'
   AND recipient_id = $2
   AND details->>'message_id' = $3
-`, testWorkspaceID, testUserID, messageID).Scan(&count, &itemType, &sourceType); err != nil {
+`, testWorkspaceID, testUserID, messageID).Scan(&count, &inboxID, &itemType, &sourceType, &approvalIDInDetails); err != nil {
 		t.Fatalf("query inbox item: %v", err)
 	}
 	if count != 1 || itemType != "new_comment" || sourceType != "feishu" {
 		t.Fatalf("created inbox item = count %d type %q source %q", count, itemType, sourceType)
+	}
+	if approvalIDInDetails != approvalID {
+		t.Fatalf("inbox approval_id = %q, want %q", approvalIDInDetails, approvalID)
+	}
+
+	var (
+		approvalSourceType string
+		approvalSourceRef  string
+		approvalActionType string
+		approvalInboxID    string
+		finalPayloadRaw    []byte
+	)
+	if err := testPool.QueryRow(ctx, `
+SELECT source_type, source_ref_id, action_type, inbox_item_id::text, final_payload
+FROM ai_me_approval
+WHERE id = $1
+`, approvalID).Scan(&approvalSourceType, &approvalSourceRef, &approvalActionType, &approvalInboxID, &finalPayloadRaw); err != nil {
+		t.Fatalf("query linked approval: %v", err)
+	}
+	if approvalSourceType != "feishu" || approvalSourceRef != messageID || approvalActionType != "send_external_message" || approvalInboxID != inboxID {
+		t.Fatalf("linked approval = source %q ref %q action %q inbox %q, want feishu/%s/send_external_message/%s",
+			approvalSourceType, approvalSourceRef, approvalActionType, approvalInboxID, messageID, inboxID)
+	}
+	var finalPayload map[string]any
+	if err := json.Unmarshal(finalPayloadRaw, &finalPayload); err != nil {
+		t.Fatalf("decode final payload: %v", err)
+	}
+	if finalPayload["channel"] != "feishu" || finalPayload["message_id"] != messageID || finalPayload["chat_id"] != "oc_test" {
+		t.Fatalf("final payload = %#v, want feishu reply metadata", finalPayload)
+	}
+	if finalPayload["text"] != "收到，我会看一下并尽快回复你。" {
+		t.Fatalf("final payload text = %#v", finalPayload["text"])
 	}
 
 	w = httptest.NewRecorder()
@@ -221,6 +264,18 @@ WHERE workspace_id = $1
 	if count != 1 {
 		t.Fatalf("duplicate created %d inbox items, want 1", count)
 	}
+	if err := testPool.QueryRow(ctx, `
+SELECT count(*)
+FROM ai_me_approval
+WHERE workspace_id = $1
+  AND source_type = 'feishu'
+  AND source_ref_id = $2
+`, testWorkspaceID, messageID).Scan(&count); err != nil {
+		t.Fatalf("count duplicate approval: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("duplicate created %d approvals, want 1", count)
+	}
 }
 
 func feishuWebhookRequest(t *testing.T, payload feishuEventCallback) *http.Request {
@@ -233,4 +288,9 @@ func feishuWebhookRequest(t *testing.T, payload feishuEventCallback) *http.Reque
 	req := httptest.NewRequest(http.MethodPost, "/api/integrations/feishu/webhook", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	return req
+}
+
+func cleanupFeishuMessageTestRows(ctx context.Context, messageID string) {
+	_, _ = testPool.Exec(ctx, `DELETE FROM ai_me_approval WHERE source_type = 'feishu' AND source_ref_id = $1`, messageID)
+	_, _ = testPool.Exec(ctx, `DELETE FROM inbox_item WHERE details->>'message_id' = $1`, messageID)
 }
