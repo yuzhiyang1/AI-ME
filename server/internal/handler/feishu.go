@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/logger"
@@ -279,7 +280,8 @@ func (h *Handler) ingestFeishuMessage(ctx context.Context, payload feishuEventCa
 		return feishuIngestResult{Status: "ignored", Reason: "empty_message"}, nil
 	}
 
-	item, approval, err := h.createFeishuInboxItemAndApproval(ctx, workspace.ID, recipient.UserID, payload, messageText, gate)
+	draft := h.generateFeishuReplyDraft(ctx, workspace, recipient, payload, messageText, gate)
+	item, approval, err := h.createFeishuInboxItemAndApproval(ctx, workspace.ID, recipient.UserID, payload, messageText, gate, draft)
 	if err != nil {
 		slog.Warn("飞书消息创建 AI-Me 收件箱和审批失败", append(logAttrs, "error", err)...)
 		return feishuIngestResult{}, fmt.Errorf("failed to create feishu inbox item and approval: %w", err)
@@ -384,7 +386,7 @@ func (h *Handler) feishuWorkspaceMatches(ctx context.Context, workspaceUUID pgty
 	return false, nil
 }
 
-func (h *Handler) createFeishuInboxItemAndApproval(ctx context.Context, workspaceID, recipientID pgtype.UUID, payload feishuEventCallback, messageText string, gate feishuInboundGateResult) (db.InboxItem, db.AiMeApproval, error) {
+func (h *Handler) createFeishuInboxItemAndApproval(ctx context.Context, workspaceID, recipientID pgtype.UUID, payload feishuEventCallback, messageText string, gate feishuInboundGateResult, draft feishuReplyDraft) (db.InboxItem, db.AiMeApproval, error) {
 	// Keep the inbound message, approval, and inbox link atomic for webhook retries.
 	tx, err := h.TxStarter.Begin(ctx)
 	if err != nil {
@@ -397,7 +399,7 @@ func (h *Handler) createFeishuInboxItemAndApproval(ctx context.Context, workspac
 	if err != nil {
 		return db.InboxItem{}, db.AiMeApproval{}, err
 	}
-	approvalReq := feishuReplyApprovalRequest(item, payload, messageText, gate)
+	approvalReq := feishuReplyApprovalRequest(item, payload, messageText, gate, draft)
 	params, err := createAIMeApprovalParams(workspaceID, recipientID, approvalReq)
 	if err != nil {
 		return db.InboxItem{}, db.AiMeApproval{}, err
@@ -451,11 +453,158 @@ func createFeishuInboxItem(ctx context.Context, q *db.Queries, workspaceID, reci
 	})
 }
 
-func feishuReplyApprovalRequest(item db.InboxItem, payload feishuEventCallback, messageText string, gate feishuInboundGateResult) CreateAIApprovalRequest {
+type feishuReplyDraft struct {
+	Text             string
+	Summary          string
+	ReasoningSummary string
+	RiskLevel        string
+	Confidence       float64
+	Source           string
+	Provider         string
+	Model            string
+	Error            string
+}
+
+func fallbackFeishuReplyDraft(source, errText string) feishuReplyDraft {
+	return feishuReplyDraft{
+		Text:             "收到，我会看一下并尽快回复你。",
+		Summary:          "飞书收到一条需要处理的消息，AI-Me 已准备保守回复，请确认或编辑后发送。",
+		ReasoningSummary: "飞书入站消息属于代表用户对外回复的动作，必须先经过人工审批。",
+		RiskLevel:        "high",
+		Confidence:       0.55,
+		Source:           firstNonEmpty(source, "fallback"),
+		Error:            strings.TrimSpace(errText),
+	}
+}
+
+func (h *Handler) generateFeishuReplyDraft(ctx context.Context, workspace db.Workspace, recipient db.Member, payload feishuEventCallback, messageText string, gate feishuInboundGateResult) feishuReplyDraft {
+	draft := fallbackFeishuReplyDraft("fallback", "")
+	settings := aimeWorkspaceSettingsFromJSON(workspace.Settings)
+	if !settings.Enabled {
+		draft.Source = "ai_me_disabled"
+		draft.Error = "AI-Me workspace settings are disabled"
+		return draft
+	}
+	if !aimeModelConfiguredForSettings(h.AIModel, settings) {
+		draft.Source = "model_unconfigured"
+		return draft
+	}
+	workspaceID := uuidToString(workspace.ID)
+	recipientID := uuidToString(recipient.UserID)
+	policy := buildAIMePolicyContext(settings, time.Now())
+	aimeCtx, err := h.buildAIMeContext(ctx, workspaceID, recipientID)
+	if err != nil {
+		draft.Source = "context_error"
+		draft.Error = err.Error()
+		return draft
+	}
+	systemPrompt := buildFeishuReplyDraftSystemPrompt(policy)
+	userPrompt, err := buildFeishuReplyDraftUserPrompt(recipientID, payload, messageText, gate, aimeCtx, policy)
+	if err != nil {
+		draft.Source = "prompt_error"
+		draft.Error = err.Error()
+		return draft
+	}
+	raw, model, err := completeAIMeModel(ctx, h.AIModel, systemPrompt, userPrompt, settings)
+	if err != nil {
+		draft.Source = "model_error"
+		draft.Provider = h.AIModel.Provider()
+		draft.Model = model
+		draft.Error = err.Error()
+		return draft
+	}
+	decision, ok := parseAIMeDecision(raw)
+	if !ok || strings.TrimSpace(decision.ReplyDraft) == "" {
+		draft.Source = "model_parse_error"
+		draft.Provider = h.AIModel.Provider()
+		draft.Model = model
+		draft.Error = "model returned an unparseable or empty reply_draft"
+		return draft
+	}
+	enforceAIMeMemoryApprovalPolicy(&decision)
+	h.recordAIMeMemoryUsage(ctx, workspaceID, recipientID, AIMeThinkRequest{
+		Input:       messageText,
+		Intent:      "feishu_reply_draft",
+		SourceType:  "feishu",
+		SourceRefID: feishuSourceMessageID(payload),
+	}, decision)
+	return feishuReplyDraft{
+		Text:             strings.TrimSpace(decision.ReplyDraft),
+		Summary:          firstNonEmpty(decision.Summary, draft.Summary),
+		ReasoningSummary: firstNonEmpty(decision.ReasoningSummary, draft.ReasoningSummary),
+		RiskLevel:        normalizeRisk(decision.RiskLevel),
+		Confidence:       normalizeConfidence(decision.Confidence),
+		Source:           "ai_model",
+		Provider:         h.AIModel.Provider(),
+		Model:            model,
+	}
+}
+
+func buildFeishuReplyDraftSystemPrompt(policy AIMePolicyContext) string {
+	return fmt.Sprintf(`你是 AI-Me，负责为用户收到的飞书消息生成“待审批回复草稿”。
+
+必须只输出一个 JSON object，不要输出 Markdown、解释文字或代码块。JSON shape：
+{
+  "summary": "一句话判断这条飞书消息",
+  "risk_level": "low | medium | high",
+  "confidence": 0.0,
+  "need_approval": true,
+  "reply_draft": "准备发送给对方的中文回复草稿",
+  "reasoning_summary": "可给用户看的简短判断摘要，不要写隐藏思维链",
+  "actions": [],
+  "evidence": [
+    { "type": "user_input | memory | document | workspace", "label": "证据标题", "ref_id": "可选", "quote": "可选短摘录" }
+  ]
+}
+
+规则：
+- 这只是草稿，不会直接发送；need_approval 必须为 true。
+- 回复必须简洁、礼貌、像真人同事，不要说自己是 AI。
+- 不要承诺退款、修复、完成时间或具体结果，除非原消息或上下文明确给出。
+- 信息不足时，优先回复“我来确认/我看一下后同步”，不要编造事实。
+- 当前工作区策略：autonomy_level=%s，approval_mode=%s，in_working_hours=%v，model_provider=%s，model_name=%s。
+- 可以使用 context.memories 中的已确认长期记忆，但 external_use_policy=never 的记忆不得写进对外回复。
+- 使用 external_use_policy=with_approval 的记忆时，必须在 evidence 中引用对应 memory id。`,
+		policy.AutonomyLevel,
+		policy.ApprovalMode,
+		policy.InWorkingHours,
+		policy.ModelProvider,
+		policy.ModelName,
+	)
+}
+
+func buildFeishuReplyDraftUserPrompt(userID string, payload feishuEventCallback, messageText string, gate feishuInboundGateResult, ctx AIMeContextSummary, policy AIMePolicyContext) (string, error) {
+	body := map[string]any{
+		"user_id": userID,
+		"policy":  policy,
+		"feishu_message": map[string]any{
+			"message_id":      feishuSourceMessageID(payload),
+			"event_id":        payload.Header.EventID,
+			"chat_id":         payload.Event.Message.ChatID,
+			"chat_type":       payload.Event.Message.ChatType,
+			"message_type":    payload.Event.Message.MessageType,
+			"text":            truncateText(messageText, 4000),
+			"sender_open_id":  payload.Event.Sender.SenderID.OpenID,
+			"sender_user_id":  payload.Event.Sender.SenderID.UserID,
+			"sender_union_id": payload.Event.Sender.SenderID.UnionID,
+			"owner_mentioned": gate.OwnerMentioned,
+			"gate_reason":     gate.Reason,
+		},
+		"context": ctx,
+	}
+	raw, err := json.MarshalIndent(body, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(raw), nil
+}
+
+func feishuReplyApprovalRequest(item db.InboxItem, payload feishuEventCallback, messageText string, gate feishuInboundGateResult, draft feishuReplyDraft) CreateAIApprovalRequest {
 	messageID := feishuSourceMessageID(payload)
-	// Avoid spending LLM tokens from webhook delivery; the user can edit before approval.
-	replyDraft := "收到，我会看一下并尽快回复你。"
-	confidence := 0.55
+	if strings.TrimSpace(draft.Text) == "" {
+		draft = fallbackFeishuReplyDraft("fallback", "empty draft")
+	}
+	confidence := draft.Confidence
 	metadata := map[string]any{
 		"event_id":        payload.Header.EventID,
 		"chat_id":         payload.Event.Message.ChatID,
@@ -466,6 +615,16 @@ func feishuReplyApprovalRequest(item db.InboxItem, payload feishuEventCallback, 
 		"sender_union_id": payload.Event.Sender.SenderID.UnionID,
 		"owner_mentioned": gate.OwnerMentioned,
 		"gate_reason":     gate.Reason,
+		"draft_source":    draft.Source,
+	}
+	if draft.Provider != "" {
+		metadata["draft_provider"] = draft.Provider
+	}
+	if draft.Model != "" {
+		metadata["draft_model"] = draft.Model
+	}
+	if draft.Error != "" {
+		metadata["draft_error"] = truncateText(draft.Error, 400)
 	}
 	originalPayload := map[string]any{
 		"channel":       "feishu",
@@ -476,17 +635,24 @@ func feishuReplyApprovalRequest(item db.InboxItem, payload feishuEventCallback, 
 		"sender":        metadata,
 	}
 	finalPayload := map[string]any{
-		"channel":    "feishu",
-		"message_id": messageID,
-		"chat_id":    payload.Event.Message.ChatID,
-		"text":       replyDraft,
+		"channel":      "feishu",
+		"message_id":   messageID,
+		"chat_id":      payload.Event.Message.ChatID,
+		"text":         draft.Text,
+		"draft_source": draft.Source,
+	}
+	if draft.Provider != "" {
+		finalPayload["draft_provider"] = draft.Provider
+	}
+	if draft.Model != "" {
+		finalPayload["draft_model"] = draft.Model
 	}
 	return CreateAIApprovalRequest{
 		SourceType:         "feishu",
 		SourceRefID:        messageID,
 		InboxItemID:        uuidToString(item.ID),
 		Title:              "是否回复这条飞书消息",
-		Summary:            "飞书收到一条需要处理的消息，AI-Me 已准备保守回复，请确认或编辑后发送。",
+		Summary:            firstNonEmpty(draft.Summary, "飞书收到一条需要处理的消息，AI-Me 已准备回复草稿，请确认或编辑后发送。"),
 		RiskLevel:          "high",
 		Confidence:         &confidence,
 		Reversibility:      "irreversible",
@@ -495,7 +661,7 @@ func feishuReplyApprovalRequest(item db.InboxItem, payload feishuEventCallback, 
 		ActionDescription:  "批准后，AI-Me 会通过飞书机器人回复原消息。",
 		OriginalPayload:    originalPayload,
 		FinalPayload:       finalPayload,
-		AIReasoningSummary: "这条飞书消息通过入站规则进入工作区，属于代表用户对外回复的动作，必须先经过人工审批。",
+		AIReasoningSummary: firstNonEmpty(draft.ReasoningSummary, "这条飞书消息通过入站规则进入工作区，属于代表用户对外回复的动作，必须先经过人工审批。"),
 		Evidence: []CreateAIApprovalEvidenceRequest{
 			{
 				EvidenceType: "feishu",

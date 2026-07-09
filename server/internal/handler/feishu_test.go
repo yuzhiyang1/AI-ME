@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	channeltypes "github.com/larksuite/oapi-sdk-go/v3/channel/types"
@@ -153,7 +154,10 @@ func TestFeishuWebhookCreatesAIMeInboxItemAndDeduplicates(t *testing.T) {
 	const messageID = "om_ai_me_intake_test"
 	ctx := context.Background()
 	cleanupFeishuMessageTestRows(ctx, messageID)
+	origModel := testHandler.AIModel
+	testHandler.AIModel = nil
 	t.Cleanup(func() {
+		testHandler.AIModel = origModel
 		cleanupFeishuMessageTestRows(ctx, messageID)
 	})
 
@@ -275,6 +279,116 @@ WHERE workspace_id = $1
 	}
 	if count != 1 {
 		t.Fatalf("duplicate created %d approvals, want 1", count)
+	}
+}
+
+func TestFeishuWebhookUsesAIMeModelForReplyDraft(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("handler test fixture is not available")
+	}
+
+	const messageID = "om_ai_me_model_draft_test"
+	ctx := context.Background()
+	cleanupFeishuMessageTestRows(ctx, messageID)
+	var capturedPrompt string
+	origModel := testHandler.AIModel
+	testHandler.AIModel = fakeAIMeModelClient{
+		content: `{
+			"summary":"需要回复退款状态咨询",
+			"risk_level":"medium",
+			"confidence":0.82,
+			"need_approval":true,
+			"reply_draft":"您好，退款状态我来确认一下，稍后给您同步结果。",
+			"reasoning_summary":"用户在飞书中询问退款状态，适合先确认会跟进，不承诺具体结果。",
+			"evidence":[{"type":"user_input","label":"飞书消息","quote":"退款状态"}]
+		}`,
+		onComplete: func(_ string, userPrompt string) {
+			capturedPrompt = userPrompt
+		},
+	}
+	t.Cleanup(func() {
+		testHandler.AIModel = origModel
+		cleanupFeishuMessageTestRows(ctx, messageID)
+	})
+
+	t.Setenv("FEISHU_WEBHOOK_TOKEN", "test-token")
+	t.Setenv("FEISHU_WORKSPACE_ID", testWorkspaceID)
+	t.Setenv("FEISHU_WORKSPACE_SLUG", "")
+	t.Setenv("FEISHU_OWNER_USER_ID", testUserID)
+	t.Setenv("FEISHU_ALLOWED_CHAT_ID", "")
+	t.Setenv("FEISHU_GROUP_MESSAGE_POLICY", "mention")
+
+	payload := feishuEventCallback{
+		Header: feishuHeader{
+			EventID:   "evt_ai_me_model_draft_test",
+			EventType: "im.message.receive_v1",
+			Token:     "test-token",
+		},
+		Event: feishuEventBody{
+			Sender: feishuSender{
+				SenderType: "user",
+				SenderID: feishuSenderID{
+					OpenID: "ou_colleague",
+					UserID: "u_colleague",
+				},
+			},
+			Message: feishuMessage{
+				MessageID:   messageID,
+				ChatID:      "oc_model_test",
+				ChatType:    "p2p",
+				MessageType: "text",
+				Content:     `{"text":"帮我看一下退款状态，客户比较着急"}`,
+			},
+		},
+	}
+
+	w := httptest.NewRecorder()
+	testHandler.FeishuWebhook(w, feishuWebhookRequest(t, payload))
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("webhook status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(capturedPrompt, "客户比较着急") || !strings.Contains(capturedPrompt, "feishu") {
+		t.Fatalf("model prompt did not include Feishu message context: %s", capturedPrompt)
+	}
+
+	var approvalID string
+	if err := json.NewDecoder(w.Body).Decode(&struct {
+		ApprovalID *string `json:"approval_id"`
+	}{ApprovalID: &approvalID}); err != nil {
+		t.Fatalf("decode webhook response: %v", err)
+	}
+	if approvalID == "" {
+		t.Fatal("expected approval_id")
+	}
+
+	var (
+		summary         string
+		reasoning       string
+		confidence      float64
+		finalPayloadRaw []byte
+	)
+	if err := testPool.QueryRow(ctx, `
+SELECT summary, ai_reasoning_summary, confidence::float8, final_payload
+FROM ai_me_approval
+WHERE id = $1
+`, approvalID).Scan(&summary, &reasoning, &confidence, &finalPayloadRaw); err != nil {
+		t.Fatalf("query approval: %v", err)
+	}
+	if summary != "需要回复退款状态咨询" || reasoning != "用户在飞书中询问退款状态，适合先确认会跟进，不承诺具体结果。" {
+		t.Fatalf("approval summary/reasoning = %q / %q", summary, reasoning)
+	}
+	if confidence != 0.82 {
+		t.Fatalf("confidence = %v, want 0.82", confidence)
+	}
+	var finalPayload map[string]any
+	if err := json.Unmarshal(finalPayloadRaw, &finalPayload); err != nil {
+		t.Fatalf("decode final payload: %v", err)
+	}
+	if finalPayload["text"] != "您好，退款状态我来确认一下，稍后给您同步结果。" {
+		t.Fatalf("final payload text = %#v", finalPayload["text"])
+	}
+	if finalPayload["draft_source"] != "ai_model" || finalPayload["draft_provider"] != "fake" || finalPayload["draft_model"] != "fake-model" {
+		t.Fatalf("final payload draft metadata = %#v", finalPayload)
 	}
 }
 
