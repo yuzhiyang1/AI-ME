@@ -199,6 +199,18 @@ func TestRetryAIApprovalExecutionRetriesFailedFeishuSend(t *testing.T) {
 	if retried.ExecutionStatus != "succeeded" || sentText != "收到，我来处理。" {
 		t.Fatalf("retried approval = %+v sentText=%q", retried, sentText)
 	}
+	var deliveryStatus string
+	var attemptCount int
+	if err := testPool.QueryRow(ctx, `
+		SELECT status, attempt_count
+		FROM ai_me_feishu_delivery
+		WHERE approval_id = $1
+	`, approval.ID).Scan(&deliveryStatus, &attemptCount); err != nil {
+		t.Fatalf("load delivery status: %v", err)
+	}
+	if deliveryStatus != "succeeded" || attemptCount < 2 {
+		t.Fatalf("delivery = %s attempts=%d, want succeeded with retry", deliveryStatus, attemptCount)
+	}
 
 	var retryEvents int
 	if err := testPool.QueryRow(ctx, `

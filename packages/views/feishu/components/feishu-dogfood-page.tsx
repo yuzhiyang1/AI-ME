@@ -21,9 +21,16 @@ import { useWorkspaceId } from "@multica/core/hooks";
 import { useWorkspacePaths } from "@multica/core/paths";
 import type {
   AIMeCostControl,
+  AIMeModelRouting,
   AIMeOnboardingStep,
+  AIMeQualitySummary,
+  FeishuDelivery,
+  FeishuDeliverySummary,
+  FeishuDogfoodChecklistItem,
   FeishuIntegrationStatus,
   FeishuMessageLog,
+  FeishuReliabilitySummary,
+  FeishuWebhookEvent,
 } from "@multica/core/types";
 import { Badge } from "@multica/ui/components/ui/badge";
 import { Button } from "@multica/ui/components/ui/button";
@@ -131,6 +138,14 @@ export function FeishuDogfoodPage() {
               <CostPanel cost={data.cost} />
             </section>
 
+            <section className="grid shrink-0 gap-4 lg:grid-cols-3">
+              <ReliabilityPanel reliability={data.reliability} status={data.status} />
+              <DeliveryPanel delivery={data.delivery} />
+              <QualityPanel quality={data.quality} />
+            </section>
+
+            <ModelRoutePanel route={data.model_route} />
+
             <section className="grid min-h-[560px] flex-1 gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
               <LogsPanel
                 logs={data.logs}
@@ -139,7 +154,10 @@ export function FeishuDogfoodPage() {
               />
               <aside className="flex min-h-0 flex-col gap-4">
                 <ConnectionPanel status={data.status} />
+                <ChecklistPanel checklist={data.checklist} />
                 <OnboardingPanel steps={data.onboarding.steps} />
+                <WebhookEventsPanel events={data.events} />
+                <DeliveryListPanel deliveries={data.deliveries} />
               </aside>
             </section>
           </>
@@ -249,7 +267,7 @@ function CostPanel({ cost }: { cost: AIMeCostControl }) {
             成本控制
           </h2>
           <p className="mt-1 text-xs leading-5 text-[var(--aime-text-tertiary)]">
-            DeepSeek 草稿和员工运行分别计数，后续接预算路由策略。
+            DeepSeek 草稿和员工运行分别计数，超过预算后优先降级低价值草稿。
           </p>
         </div>
         <BudgetBadge status={cost.budget_status} />
@@ -270,6 +288,112 @@ function CostPanel({ cost }: { cost: AIMeCostControl }) {
           <span className="font-mono text-xs font-semibold tabular-nums">{formatNumber(totalTokens)}</span>
         </div>
       </div>
+    </section>
+  );
+}
+
+function ReliabilityPanel({
+  reliability,
+  status,
+}: {
+  reliability: FeishuReliabilitySummary;
+  status: FeishuIntegrationStatus;
+}) {
+  return (
+    <section className="rounded-xl border border-[var(--aime-border)] bg-[var(--aime-surface)] p-4 shadow-[var(--aime-shadow-xs)]">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-semibold">入口可靠性</h2>
+          <p className="mt-1 text-xs leading-5 text-[var(--aime-text-tertiary)]">
+            记录 webhook、去重、签名和重放保护状态。
+          </p>
+        </div>
+        <StatusBadge
+          status={status.signature_configured ? "succeeded" : "not_started"}
+          kind="execution"
+        />
+      </div>
+      <div className="mt-4 grid grid-cols-2 gap-3">
+        <InfoCell label="事件总数" value={String(reliability.webhook_events)} />
+        <InfoCell label="今日事件" value={String(reliability.events_today)} />
+        <InfoCell label="重复拦截" value={String(reliability.duplicate_events)} />
+        <InfoCell label="签名通过" value={String(reliability.signature_verified_events)} />
+        <InfoCell label="失败事件" value={String(reliability.failed_events)} tone={reliability.failed_events > 0 ? "danger" : "neutral"} />
+        <InfoCell label="最近事件" value={reliability.last_event_at ? formatDateTime(reliability.last_event_at) : "暂无"} />
+      </div>
+    </section>
+  );
+}
+
+function DeliveryPanel({ delivery }: { delivery: FeishuDeliverySummary }) {
+  return (
+    <section className="rounded-xl border border-[var(--aime-border)] bg-[var(--aime-surface)] p-4 shadow-[var(--aime-shadow-xs)]">
+      <div>
+        <h2 className="text-sm font-semibold">发送可靠性</h2>
+        <p className="mt-1 text-xs leading-5 text-[var(--aime-text-tertiary)]">
+          审批通过后的飞书发送会记录尝试次数、失败和死信。
+        </p>
+      </div>
+      <div className="mt-4 grid grid-cols-2 gap-3">
+        <InfoCell label="发送记录" value={String(delivery.deliveries)} />
+        <InfoCell label="总尝试" value={String(delivery.attempts)} />
+        <InfoCell label="成功" value={String(delivery.succeeded)} />
+        <InfoCell label="重试中" value={String(delivery.failed)} tone={delivery.failed > 0 ? "danger" : "neutral"} />
+        <InfoCell label="死信" value={String(delivery.dead_letter)} tone={delivery.dead_letter > 0 ? "danger" : "neutral"} />
+        <InfoCell label="最近发送" value={delivery.last_delivery_at ? formatDateTime(delivery.last_delivery_at) : "暂无"} />
+      </div>
+    </section>
+  );
+}
+
+function QualityPanel({ quality }: { quality: AIMeQualitySummary }) {
+  return (
+    <section className="rounded-xl border border-[var(--aime-border)] bg-[var(--aime-surface)] p-4 shadow-[var(--aime-shadow-xs)]">
+      <div>
+        <h2 className="text-sm font-semibold">决策质量</h2>
+        <p className="mt-1 text-xs leading-5 text-[var(--aime-text-tertiary)]">
+          审批中心评分会汇总到这里，用来复盘 AI-Me 的判断质量。
+        </p>
+      </div>
+      <div className="mt-4 grid grid-cols-2 gap-3">
+        <InfoCell label="已复盘" value={String(quality.reviewed)} />
+        <InfoCell label="平均分" value={quality.reviewed > 0 ? quality.avg_score.toFixed(1) : "暂无"} />
+        <InfoCell label="高质量" value={String(quality.good)} />
+        <InfoCell label="低质量" value={String(quality.poor)} tone={quality.poor > 0 ? "danger" : "neutral"} />
+        <InfoCell label="需重试" value={String(quality.needs_retry)} tone={quality.needs_retry > 0 ? "danger" : "neutral"} />
+        <InfoCell label="最近复盘" value={quality.last_reviewed_at ? formatDateTime(quality.last_reviewed_at) : "暂无"} />
+      </div>
+    </section>
+  );
+}
+
+function ModelRoutePanel({ route }: { route: AIMeModelRouting }) {
+  return (
+    <section className="rounded-xl border border-[var(--aime-border)] bg-[var(--aime-surface)] p-4 shadow-[var(--aime-shadow-xs)]">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="min-w-0">
+          <h2 className="text-sm font-semibold">模型路由与预算</h2>
+          <p className="mt-1 text-xs leading-5 text-[var(--aime-text-tertiary)]">
+            {route.worker_policy || "DeepSeek 负责回复草稿，Codex / Claude Code 只承接审批后的员工任务。"}
+          </p>
+        </div>
+        <BudgetBadge status={route.budget_status} />
+      </div>
+      <div className="mt-4 grid gap-3 md:grid-cols-4">
+        <InfoCell label="默认大脑" value={`${route.default_provider} / ${route.default_model}`} />
+        <InfoCell label="草稿模型" value={`${route.draft_provider} / ${route.draft_model}`} />
+        <InfoCell label="每日预算" value={formatMoney(route.daily_budget_cents, "USD")} />
+        <InfoCell label="建议动作" value={String(route.recommended_next_actions.length)} />
+      </div>
+      {route.recommended_next_actions.length > 0 && (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {route.recommended_next_actions.map((action) => (
+            <span key={action} className="rounded-lg bg-[var(--aime-surface-muted)] px-2.5 py-1 text-xs text-[var(--aime-text-secondary)]">
+              {action}
+            </span>
+          ))}
+        </div>
+      )}
     </section>
   );
 }
@@ -414,6 +538,7 @@ function LogRow({
 function ConnectionPanel({ status }: { status: FeishuIntegrationStatus }) {
   const checks = [
     { label: "接收事件", ok: status.incoming_configured },
+    { label: "签名保护", ok: status.signature_configured },
     { label: "发送消息", ok: status.outgoing_configured },
     { label: "工作区匹配", ok: status.workspace_configured && status.workspace_matches },
     { label: "接收人", ok: status.owner_configured },
@@ -461,6 +586,40 @@ function ConnectionPanel({ status }: { status: FeishuIntegrationStatus }) {
   );
 }
 
+function ChecklistPanel({ checklist }: { checklist: FeishuDogfoodChecklistItem[] }) {
+  const completed = checklist.filter((item) => item.completed).length;
+  return (
+    <section className="rounded-xl border border-[var(--aime-border)] bg-[var(--aime-surface)] p-4 shadow-[var(--aime-shadow-xs)]">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-semibold">真实狗粮清单</h2>
+          <p className="mt-1 text-xs leading-5 text-[var(--aime-text-tertiary)]">
+            按真实消息闭环验收，不用手动拼测试表。
+          </p>
+        </div>
+        <span className="font-mono text-xs text-[var(--aime-text-tertiary)]">
+          {completed}/{checklist.length}
+        </span>
+      </div>
+      <div className="mt-4 space-y-2">
+        {checklist.map((item) => (
+          <div key={item.key} className="flex gap-2 rounded-lg border border-[var(--aime-border)] px-3 py-2">
+            {item.completed ? (
+              <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-[var(--aime-success)]" />
+            ) : (
+              <CircleDashed className="mt-0.5 size-4 shrink-0 text-[var(--aime-text-tertiary)]" />
+            )}
+            <div className="min-w-0">
+              <p className="text-xs font-semibold">{item.title}</p>
+              <p className="mt-0.5 text-[11px] leading-5 text-[var(--aime-text-tertiary)]">{item.description}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function OnboardingPanel({ steps }: { steps: AIMeOnboardingStep[] }) {
   const completed = steps.filter((step) => step.completed).length;
   return (
@@ -487,6 +646,76 @@ function OnboardingPanel({ steps }: { steps: AIMeOnboardingStep[] }) {
         ) : (
           steps.map((step) => (
             <OnboardingStepRow key={step.key} step={step} />
+          ))
+        )}
+      </div>
+    </section>
+  );
+}
+
+function WebhookEventsPanel({ events }: { events: FeishuWebhookEvent[] }) {
+  return (
+    <section className="rounded-xl border border-[var(--aime-border)] bg-[var(--aime-surface)] p-4 shadow-[var(--aime-shadow-xs)]">
+      <div className="flex items-center justify-between gap-3">
+        <h2 className="text-sm font-semibold">最近入口事件</h2>
+        <span className="font-mono text-xs text-[var(--aime-text-tertiary)]">{events.length}</span>
+      </div>
+      <div className="mt-3 space-y-2">
+        {events.length === 0 ? (
+          <p className="rounded-lg border border-dashed border-[var(--aime-border)] px-3 py-4 text-xs text-[var(--aime-text-tertiary)]">
+            暂无 webhook 事件。
+          </p>
+        ) : (
+          events.slice(0, 6).map((event) => (
+            <div key={event.id} className="rounded-lg border border-[var(--aime-border)] px-3 py-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="truncate font-mono text-[11px] text-[var(--aime-text-tertiary)]">
+                  {event.event_id || event.message_id || event.event_key}
+                </span>
+                <StatusBadge status={event.status === "accepted" ? "succeeded" : event.status} kind="execution" />
+              </div>
+              <p className="mt-1 text-[11px] leading-5 text-[var(--aime-text-tertiary)]">
+                签名 {event.signature_verified ? "已通过" : "未验证"} · 重复 {event.duplicate_count}
+              </p>
+              {event.reason && (
+                <p className="mt-1 line-clamp-2 text-[11px] leading-5 text-[var(--aime-warning)]">{event.reason}</p>
+              )}
+            </div>
+          ))
+        )}
+      </div>
+    </section>
+  );
+}
+
+function DeliveryListPanel({ deliveries }: { deliveries: FeishuDelivery[] }) {
+  return (
+    <section className="rounded-xl border border-[var(--aime-border)] bg-[var(--aime-surface)] p-4 shadow-[var(--aime-shadow-xs)]">
+      <div className="flex items-center justify-between gap-3">
+        <h2 className="text-sm font-semibold">最近发送尝试</h2>
+        <span className="font-mono text-xs text-[var(--aime-text-tertiary)]">{deliveries.length}</span>
+      </div>
+      <div className="mt-3 space-y-2">
+        {deliveries.length === 0 ? (
+          <p className="rounded-lg border border-dashed border-[var(--aime-border)] px-3 py-4 text-xs text-[var(--aime-text-tertiary)]">
+            暂无发送尝试。
+          </p>
+        ) : (
+          deliveries.slice(0, 6).map((delivery) => (
+            <div key={delivery.id} className="rounded-lg border border-[var(--aime-border)] px-3 py-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="truncate font-mono text-[11px] text-[var(--aime-text-tertiary)]">
+                  {delivery.source_message_id}
+                </span>
+                <StatusBadge status={delivery.status === "dead_letter" ? "failed" : delivery.status} kind="execution" />
+              </div>
+              <p className="mt-1 text-[11px] leading-5 text-[var(--aime-text-tertiary)]">
+                尝试 {delivery.attempt_count} 次 · {delivery.updated_at ? formatDateTime(delivery.updated_at) : "暂无时间"}
+              </p>
+              {delivery.last_error && (
+                <p className="mt-1 line-clamp-2 text-[11px] leading-5 text-[var(--aime-danger)]">{delivery.last_error}</p>
+              )}
+            </div>
           ))
         )}
       </div>

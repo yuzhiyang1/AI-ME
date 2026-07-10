@@ -122,6 +122,12 @@ pnpm aime:demo
 
 更多说明见 [docs/ai-me-demo.md](docs/ai-me-demo.md)。
 
+## 飞书狗粮测试与发布形态
+
+AI-ME 当前建议先按本地优先、自托管优先的方式验证真实飞书闭环。飞书消息进入 AI-ME 后，会生成例外收件箱 item 和 AI 回复审批；用户审批后才允许通过飞书机器人回复。
+
+飞书可靠性、安全配置、20 条真实狗粮测试、成本预算和发布形态收口见 [docs/ai-me-feishu-dogfood-release.md](docs/ai-me-feishu-dogfood-release.md)。
+
 ## 配置与敏感信息
 
 本地配置从 `.env.example` 复制。

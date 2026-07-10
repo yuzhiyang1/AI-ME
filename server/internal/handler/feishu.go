@@ -2,7 +2,9 @@ package handler
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -83,6 +85,7 @@ type FeishuIntegrationStatusResponse struct {
 	IncomingConfigured    bool     `json:"incoming_configured"`
 	OutgoingConfigured    bool     `json:"outgoing_configured"`
 	WebhookConfigured     bool     `json:"webhook_configured"`
+	SignatureConfigured   bool     `json:"signature_configured"`
 	WebSocketConfigured   bool     `json:"websocket_configured"`
 	WorkspaceConfigured   bool     `json:"workspace_configured"`
 	WorkspaceMatches      bool     `json:"workspace_matches"`
@@ -160,6 +163,90 @@ type AIMeCostControlResponse struct {
 	WorkerCacheWriteTokens  int64  `json:"worker_cache_write_tokens"`
 }
 
+type FeishuReliabilitySummaryResponse struct {
+	WebhookEvents           int64   `json:"webhook_events"`
+	DuplicateEvents         int64   `json:"duplicate_events"`
+	AcceptedEvents          int64   `json:"accepted_events"`
+	IgnoredEvents           int64   `json:"ignored_events"`
+	FailedEvents            int64   `json:"failed_events"`
+	RejectedEvents          int64   `json:"rejected_events"`
+	SignatureVerifiedEvents int64   `json:"signature_verified_events"`
+	ReplayProtectedEvents   int64   `json:"replay_protected_events"`
+	EventsToday             int64   `json:"events_today"`
+	LastEventAt             *string `json:"last_event_at"`
+}
+
+type FeishuDeliverySummaryResponse struct {
+	Deliveries     int64   `json:"deliveries"`
+	Sending        int64   `json:"sending"`
+	Succeeded      int64   `json:"succeeded"`
+	Failed         int64   `json:"failed"`
+	DeadLetter     int64   `json:"dead_letter"`
+	Attempts       int64   `json:"attempts"`
+	LastDeliveryAt *string `json:"last_delivery_at"`
+}
+
+type AIMeQualitySummaryResponse struct {
+	Reviewed       int64   `json:"reviewed"`
+	AvgScore       float64 `json:"avg_score"`
+	Good           int64   `json:"good"`
+	Poor           int64   `json:"poor"`
+	Accepted       int64   `json:"accepted"`
+	NeedsRetry     int64   `json:"needs_retry"`
+	Wrong          int64   `json:"wrong"`
+	LastReviewedAt *string `json:"last_reviewed_at"`
+}
+
+type AIMeModelRoutingResponse struct {
+	DefaultProvider        string   `json:"default_provider"`
+	DefaultModel           string   `json:"default_model"`
+	DraftProvider          string   `json:"draft_provider"`
+	DraftModel             string   `json:"draft_model"`
+	WorkerPolicy           string   `json:"worker_policy"`
+	DailyBudgetCents       int64    `json:"daily_budget_cents"`
+	BudgetStatus           string   `json:"budget_status"`
+	RecommendedNextActions []string `json:"recommended_next_actions"`
+}
+
+type FeishuDogfoodChecklistItemResponse struct {
+	Key         string `json:"key"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Completed   bool   `json:"completed"`
+}
+
+type FeishuWebhookEventResponse struct {
+	ID                string  `json:"id"`
+	EventKey          string  `json:"event_key"`
+	EventID           string  `json:"event_id"`
+	MessageID         string  `json:"message_id"`
+	EventType         string  `json:"event_type"`
+	Status            string  `json:"status"`
+	Reason            string  `json:"reason"`
+	SignatureVerified bool    `json:"signature_verified"`
+	TokenVerified     bool    `json:"token_verified"`
+	ReplayProtected   bool    `json:"replay_protected"`
+	DuplicateCount    int32   `json:"duplicate_count"`
+	RequestTimestamp  *string `json:"request_timestamp"`
+	InboxItemID       *string `json:"inbox_item_id"`
+	ApprovalID        *string `json:"approval_id"`
+	CreatedAt         string  `json:"created_at"`
+	UpdatedAt         string  `json:"updated_at"`
+}
+
+type FeishuDeliveryResponse struct {
+	ID              string  `json:"id"`
+	ApprovalID      *string `json:"approval_id"`
+	SourceMessageID string  `json:"source_message_id"`
+	ReplyMessageID  string  `json:"reply_message_id"`
+	Status          string  `json:"status"`
+	AttemptCount    int32   `json:"attempt_count"`
+	LastError       string  `json:"last_error"`
+	NextRetryAt     *string `json:"next_retry_at"`
+	SentAt          *string `json:"sent_at"`
+	UpdatedAt       string  `json:"updated_at"`
+}
+
 type AIMeOnboardingStepResponse struct {
 	Key         string `json:"key"`
 	Title       string `json:"title"`
@@ -175,11 +262,18 @@ type AIMeOnboardingResponse struct {
 }
 
 type FeishuDogfoodPanelResponse struct {
-	Status     FeishuIntegrationStatusResponse `json:"status"`
-	Summary    FeishuDogfoodSummaryResponse    `json:"summary"`
-	Cost       AIMeCostControlResponse         `json:"cost"`
-	Onboarding AIMeOnboardingResponse          `json:"onboarding"`
-	Logs       []FeishuMessageLogResponse      `json:"logs"`
+	Status      FeishuIntegrationStatusResponse      `json:"status"`
+	Summary     FeishuDogfoodSummaryResponse         `json:"summary"`
+	Cost        AIMeCostControlResponse              `json:"cost"`
+	Reliability FeishuReliabilitySummaryResponse     `json:"reliability"`
+	Delivery    FeishuDeliverySummaryResponse        `json:"delivery"`
+	Quality     AIMeQualitySummaryResponse           `json:"quality"`
+	ModelRoute  AIMeModelRoutingResponse             `json:"model_route"`
+	Onboarding  AIMeOnboardingResponse               `json:"onboarding"`
+	Checklist   []FeishuDogfoodChecklistItemResponse `json:"checklist"`
+	Logs        []FeishuMessageLogResponse           `json:"logs"`
+	Events      []FeishuWebhookEventResponse         `json:"events"`
+	Deliveries  []FeishuDeliveryResponse             `json:"deliveries"`
 }
 
 func (h *Handler) GetFeishuIntegrationStatus(w http.ResponseWriter, r *http.Request) {
@@ -192,6 +286,7 @@ func (h *Handler) buildFeishuIntegrationStatus(ctx context.Context, workspaceUUI
 	cfg := feishuConfigFromEnv()
 	mode := feishuEventModeFromEnv()
 	webhookConfigured := cfg.WebhookToken != ""
+	signatureConfigured := cfg.EncryptKey != ""
 	appConfigured := feishuAppCredentialsConfigured()
 	workspaceConfigured := cfg.WorkspaceID != "" || cfg.WorkspaceSlug != ""
 	workspaceMatches, workspaceWarnings := h.feishuWorkspaceMatches(ctx, workspaceUUID, workspaceID, cfg)
@@ -215,6 +310,9 @@ func (h *Handler) buildFeishuIntegrationStatus(ctx context.Context, workspaceUUI
 	if mode == "webhook" && !webhookConfigured {
 		warnings = append(warnings, "webhook_token_missing")
 	}
+	if mode == "webhook" && !signatureConfigured {
+		warnings = append(warnings, "webhook_signature_not_configured")
+	}
 	if mode == "websocket" && !appConfigured {
 		warnings = append(warnings, "app_credentials_missing")
 	}
@@ -228,6 +326,7 @@ func (h *Handler) buildFeishuIntegrationStatus(ctx context.Context, workspaceUUI
 		IncomingConfigured:    incomingConfigured,
 		OutgoingConfigured:    outgoingConfigured,
 		WebhookConfigured:     webhookConfigured,
+		SignatureConfigured:   signatureConfigured,
 		WebSocketConfigured:   websocketConfigured,
 		WorkspaceConfigured:   workspaceConfigured,
 		WorkspaceMatches:      workspaceMatches,
@@ -270,18 +369,63 @@ func (h *Handler) ListFeishuLogs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load AI-Me usage summary")
 		return
 	}
+	reliability, err := h.Queries.GetFeishuReliabilitySummary(r.Context(), workspaceUUID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load feishu reliability summary")
+		return
+	}
+	delivery, err := h.Queries.GetFeishuDeliverySummary(r.Context(), workspaceUUID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load feishu delivery summary")
+		return
+	}
+	quality, err := h.Queries.GetAIApprovalQualitySummary(r.Context(), workspaceUUID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load AI-Me quality summary")
+		return
+	}
+	events, err := h.Queries.ListFeishuWebhookEvents(r.Context(), db.ListFeishuWebhookEventsParams{
+		WorkspaceID: workspaceUUID,
+		Limit:       12,
+		Offset:      0,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list feishu webhook events")
+		return
+	}
+	deliveries, err := h.Queries.ListFeishuDeliveries(r.Context(), db.ListFeishuDeliveriesParams{
+		WorkspaceID: workspaceUUID,
+		Limit:       12,
+		Offset:      0,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list feishu deliveries")
+		return
+	}
 	status := h.buildFeishuIntegrationStatus(r.Context(), workspaceUUID, workspaceID)
 	onboarding, err := h.buildAIMeOnboardingResponse(r.Context(), workspaceUUID, status)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load AI-Me onboarding status")
 		return
 	}
+	summaryResp := feishuDogfoodSummaryToResponse(summary)
+	costResp := aimeCostControlToResponse(summary, workerUsage)
+	reliabilityResp := feishuReliabilitySummaryToResponse(reliability)
+	deliveryResp := feishuDeliverySummaryToResponse(delivery)
+	qualityResp := aimeQualitySummaryToResponse(quality)
 	writeJSON(w, http.StatusOK, FeishuDogfoodPanelResponse{
-		Status:     status,
-		Summary:    feishuDogfoodSummaryToResponse(summary),
-		Cost:       aimeCostControlToResponse(summary, workerUsage),
-		Onboarding: onboarding,
-		Logs:       feishuLogsToResponse(logs),
+		Status:      status,
+		Summary:     summaryResp,
+		Cost:        costResp,
+		Reliability: reliabilityResp,
+		Delivery:    deliveryResp,
+		Quality:     qualityResp,
+		ModelRoute:  buildAIMeModelRoutingResponse(status, costResp),
+		Onboarding:  onboarding,
+		Checklist:   buildFeishuDogfoodChecklist(status, summaryResp, reliabilityResp, deliveryResp, qualityResp),
+		Logs:        feishuLogsToResponse(logs),
+		Events:      feishuWebhookEventsToResponse(events),
+		Deliveries:  feishuDeliveriesToResponse(deliveries),
 	})
 }
 
@@ -403,6 +547,180 @@ func aimeCostControlToResponse(summary db.GetFeishuDogfoodSummaryRow, worker db.
 	}
 }
 
+func feishuReliabilitySummaryToResponse(row db.GetFeishuReliabilitySummaryRow) FeishuReliabilitySummaryResponse {
+	return FeishuReliabilitySummaryResponse{
+		WebhookEvents:           row.WebhookEvents,
+		DuplicateEvents:         row.DuplicateEvents,
+		AcceptedEvents:          row.AcceptedEvents,
+		IgnoredEvents:           row.IgnoredEvents,
+		FailedEvents:            row.FailedEvents,
+		RejectedEvents:          row.RejectedEvents,
+		SignatureVerifiedEvents: row.SignatureVerifiedEvents,
+		ReplayProtectedEvents:   row.ReplayProtectedEvents,
+		EventsToday:             row.EventsToday,
+		LastEventAt:             timestampToPtr(row.LastEventAt),
+	}
+}
+
+func feishuDeliverySummaryToResponse(row db.GetFeishuDeliverySummaryRow) FeishuDeliverySummaryResponse {
+	return FeishuDeliverySummaryResponse{
+		Deliveries:     row.Deliveries,
+		Sending:        row.Sending,
+		Succeeded:      row.Succeeded,
+		Failed:         row.Failed,
+		DeadLetter:     row.DeadLetter,
+		Attempts:       row.Attempts,
+		LastDeliveryAt: timestampToPtr(row.LastDeliveryAt),
+	}
+}
+
+func aimeQualitySummaryToResponse(row db.GetAIApprovalQualitySummaryRow) AIMeQualitySummaryResponse {
+	return AIMeQualitySummaryResponse{
+		Reviewed:       row.Reviewed,
+		AvgScore:       row.AvgScore,
+		Good:           row.Good,
+		Poor:           row.Poor,
+		Accepted:       row.Accepted,
+		NeedsRetry:     row.NeedsRetry,
+		Wrong:          row.Wrong,
+		LastReviewedAt: timestampToPtr(row.LastReviewedAt),
+	}
+}
+
+func buildAIMeModelRoutingResponse(status FeishuIntegrationStatusResponse, cost AIMeCostControlResponse) AIMeModelRoutingResponse {
+	provider := firstNonEmpty(os.Getenv("AI_ME_LLM_PROVIDER"), os.Getenv("AI_MODEL_PROVIDER"), "deepseek")
+	model := firstNonEmpty(os.Getenv("AI_ME_LLM_MODEL"), os.Getenv("AI_MODEL_MODEL"), "deepseek-chat")
+	actions := make([]string, 0, 4)
+	if !status.OutgoingConfigured {
+		actions = append(actions, "配置 FEISHU_APP_ID / FEISHU_APP_SECRET 后才能发送审批通过的回复")
+	}
+	if !status.SignatureConfigured {
+		actions = append(actions, "配置 FEISHU_ENCRYPT_KEY 以启用飞书 Webhook 签名和重放保护")
+	}
+	if cost.BudgetStatus == "warning" || cost.BudgetStatus == "exceeded" {
+		actions = append(actions, "降低草稿模型成本或提高 AI_ME_DAILY_BUDGET_CENTS")
+	}
+	if len(actions) == 0 {
+		actions = append(actions, "保持 DeepSeek 负责草稿，Codex / Claude Code 只承接需要真实执行的员工任务")
+	}
+	return AIMeModelRoutingResponse{
+		DefaultProvider:        provider,
+		DefaultModel:           model,
+		DraftProvider:          provider,
+		DraftModel:             model,
+		WorkerPolicy:           "DeepSeek 负责低成本判断和回复草稿；Codex / Claude Code 只在审批后的代码任务中作为员工执行。",
+		DailyBudgetCents:       cost.DailyBudgetCents,
+		BudgetStatus:           cost.BudgetStatus,
+		RecommendedNextActions: actions,
+	}
+}
+
+func buildFeishuDogfoodChecklist(
+	status FeishuIntegrationStatusResponse,
+	summary FeishuDogfoodSummaryResponse,
+	reliability FeishuReliabilitySummaryResponse,
+	delivery FeishuDeliverySummaryResponse,
+	quality AIMeQualitySummaryResponse,
+) []FeishuDogfoodChecklistItemResponse {
+	return []FeishuDogfoodChecklistItemResponse{
+		{Key: "connect_incoming", Title: "接入飞书入站", Description: "当前工作区能接收飞书事件。", Completed: status.IncomingConfigured},
+		{Key: "signature_enabled", Title: "启用签名防伪", Description: "Webhook 已启用签名校验和时间窗防重放。", Completed: status.SignatureConfigured && reliability.SignatureVerifiedEvents > 0},
+		{Key: "first_real_message", Title: "收到第一条真实消息", Description: "飞书消息已进入 AI-Me 收件箱。", Completed: summary.TotalReceived > 0},
+		{Key: "approval_created", Title: "生成审批", Description: "AI-Me 已为飞书消息创建可编辑审批。", Completed: summary.ApprovalsCreated > 0},
+		{Key: "edited_or_approved", Title: "完成审批动作", Description: "至少有一条飞书审批被批准或拒绝。", Completed: summary.Sent > 0 || summary.Rejected > 0},
+		{Key: "reply_sent", Title: "发送成功", Description: "审批通过后已通过飞书机器人回复。", Completed: delivery.Succeeded > 0 || summary.Sent > 0},
+		{Key: "retry_observed", Title: "验证失败重试", Description: "发送失败会留下失败原因，并可从审批中心重试。", Completed: delivery.Failed > 0 || delivery.DeadLetter > 0 || delivery.Attempts > delivery.Deliveries},
+		{Key: "quality_reviewed", Title: "完成质量复盘", Description: "至少为一条 AI-Me 回复打分并记录复盘意见。", Completed: quality.Reviewed > 0},
+		{Key: "twenty_messages", Title: "跑满 20 条真实狗粮", Description: "用真实飞书消息连续验证 AI-Me 闭环。", Completed: summary.DogfoodCompleted >= summary.DogfoodTarget},
+	}
+}
+
+func feishuWebhookEventsToResponse(rows []db.AiMeFeishuWebhookEvent) []FeishuWebhookEventResponse {
+	resp := make([]FeishuWebhookEventResponse, len(rows))
+	for i, row := range rows {
+		resp[i] = FeishuWebhookEventResponse{
+			ID:                uuidToString(row.ID),
+			EventKey:          row.EventKey,
+			EventID:           row.EventID,
+			MessageID:         row.MessageID,
+			EventType:         row.EventType,
+			Status:            row.Status,
+			Reason:            row.Reason,
+			SignatureVerified: row.SignatureVerified,
+			TokenVerified:     row.TokenVerified,
+			ReplayProtected:   row.ReplayProtected,
+			DuplicateCount:    row.DuplicateCount,
+			RequestTimestamp:  timestampToPtr(row.RequestTimestamp),
+			InboxItemID:       uuidToPtr(row.InboxItemID),
+			ApprovalID:        uuidToPtr(row.ApprovalID),
+			CreatedAt:         timestampToString(row.CreatedAt),
+			UpdatedAt:         timestampToString(row.UpdatedAt),
+		}
+	}
+	return resp
+}
+
+func feishuDeliveriesToResponse(rows []db.AiMeFeishuDelivery) []FeishuDeliveryResponse {
+	resp := make([]FeishuDeliveryResponse, len(rows))
+	for i, row := range rows {
+		resp[i] = FeishuDeliveryResponse{
+			ID:              uuidToString(row.ID),
+			ApprovalID:      uuidToPtr(row.ApprovalID),
+			SourceMessageID: row.SourceMessageID,
+			ReplyMessageID:  row.ReplyMessageID,
+			Status:          row.Status,
+			AttemptCount:    row.AttemptCount,
+			LastError:       row.LastError,
+			NextRetryAt:     timestampToPtr(row.NextRetryAt),
+			SentAt:          timestampToPtr(row.SentAt),
+			UpdatedAt:       timestampToString(row.UpdatedAt),
+		}
+	}
+	return resp
+}
+
+func (h *Handler) recordFeishuDeliverySending(ctx context.Context, approval db.AiMeApproval, messageID string) {
+	if h.Queries == nil || !approval.ID.Valid || !approval.WorkspaceID.Valid {
+		return
+	}
+	_, err := h.Queries.UpsertFeishuDeliverySending(ctx, db.UpsertFeishuDeliverySendingParams{
+		WorkspaceID:     approval.WorkspaceID,
+		ApprovalID:      approval.ID,
+		SourceMessageID: messageID,
+	})
+	if err != nil {
+		slog.Warn("飞书发送状态记录失败", "approval_id", uuidToString(approval.ID), "error", err)
+	}
+}
+
+func (h *Handler) recordFeishuDeliverySucceeded(ctx context.Context, approval db.AiMeApproval, replyMessageID string) {
+	if h.Queries == nil || !approval.ID.Valid {
+		return
+	}
+	_, err := h.Queries.MarkFeishuDeliverySucceeded(ctx, db.MarkFeishuDeliverySucceededParams{
+		ApprovalID:     approval.ID,
+		ReplyMessageID: pgtype.Text{String: strings.TrimSpace(replyMessageID), Valid: strings.TrimSpace(replyMessageID) != ""},
+	})
+	if err != nil {
+		slog.Warn("飞书发送成功状态记录失败", "approval_id", uuidToString(approval.ID), "error", err)
+	}
+}
+
+func (h *Handler) recordFeishuDeliveryFailed(ctx context.Context, approval db.AiMeApproval, sendErr error) {
+	if h.Queries == nil || !approval.ID.Valid || sendErr == nil {
+		return
+	}
+	_, err := h.Queries.MarkFeishuDeliveryFailed(ctx, db.MarkFeishuDeliveryFailedParams{
+		ApprovalID:        approval.ID,
+		LastError:         truncateText(sendErr.Error(), 800),
+		MaxAttempts:       int32FromEnv("AI_ME_FEISHU_SEND_MAX_ATTEMPTS", 3),
+		RetryAfterSeconds: int32FromEnv("AI_ME_FEISHU_RETRY_AFTER_SECONDS", 300),
+	})
+	if err != nil {
+		slog.Warn("飞书发送失败状态记录失败", "approval_id", uuidToString(approval.ID), "error", err)
+	}
+}
+
 func (h *Handler) buildAIMeOnboardingResponse(ctx context.Context, workspaceUUID pgtype.UUID, status FeishuIntegrationStatusResponse) (AIMeOnboardingResponse, error) {
 	workspace, err := h.Queries.GetWorkspace(ctx, workspaceUUID)
 	if err != nil {
@@ -418,10 +736,14 @@ func (h *Handler) buildAIMeOnboardingResponse(ctx context.Context, workspaceUUID
 		{Key: "llm_configured", Title: "连接 AI-Me 大脑", Description: "配置 DeepSeek 或其他 LLM API，让 AI-Me 能生成判断和回复草稿。", Completed: llmConfigured},
 		{Key: "workers_ready", Title: "配置 AI 员工", Description: "至少准备一个 Codex 或 Claude Code 员工用于承接任务。", Completed: counts.AgentCount > 0},
 		{Key: "feishu_incoming", Title: "接收飞书消息", Description: "飞书事件入口已绑定当前工作区，可以进入例外收件箱。", Completed: status.IncomingConfigured},
+		{Key: "feishu_signature", Title: "启用飞书签名", Description: "配置 FEISHU_ENCRYPT_KEY，防止伪造回调和过期重放。", Completed: status.SignatureConfigured},
 		{Key: "feishu_outgoing", Title: "发送飞书回复", Description: "飞书机器人具备回复原消息的权限和 App 凭证。", Completed: status.OutgoingConfigured},
 		{Key: "first_message", Title: "收到第一条真实消息", Description: "AI-Me 已经接住至少一条来自飞书的工作项。", Completed: counts.FeishuMessageCount > 0},
 		{Key: "first_approval", Title: "生成第一次审批", Description: "飞书消息已进入 AI 回复审批闭环。", Completed: counts.FeishuApprovalCount > 0},
 		{Key: "first_reply_sent", Title: "完成第一次发送", Description: "审批通过后，AI-Me 已成功通过飞书回复。", Completed: counts.FeishuSentCount > 0},
+		{Key: "quality_reviewed", Title: "完成第一次复盘", Description: "至少为一条 AI-Me 飞书回复打分，留下质量评估。", Completed: counts.FeishuQualityReviewCount > 0},
+		{Key: "budget_configured", Title: "设置每日预算", Description: "配置 AI_ME_DAILY_BUDGET_CENTS，让 AI-Me 有成本边界。", Completed: aimeDailyBudgetCentsFromEnv() > 0},
+		{Key: "dogfood_20", Title: "跑满 20 条真实狗粮", Description: "用真实同事消息验证连续工作稳定性。", Completed: counts.FeishuMessageCount >= 20},
 	}
 	completed := 0
 	for _, step := range steps {
@@ -457,6 +779,18 @@ func int64FromEnv(key string, fallback int64) int64 {
 	return parsed
 }
 
+func int32FromEnv(key string, fallback int32) int32 {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseInt(value, 10, 32)
+	if err != nil || parsed < 0 {
+		return fallback
+	}
+	return int32(parsed)
+}
+
 func (h *Handler) FeishuWebhook(w http.ResponseWriter, r *http.Request) {
 	config := feishuConfigFromEnv()
 	if config.WebhookToken == "" {
@@ -479,6 +813,7 @@ func (h *Handler) FeishuWebhook(w http.ResponseWriter, r *http.Request) {
 
 	logAttrs := feishuLogAttrs(r, payload)
 	slog.Info("收到飞书回调", logAttrs...)
+	security := verifyFeishuWebhookSecurity(r, body, config)
 
 	if payload.Challenge != "" {
 		if !secureEqual(firstNonEmpty(payload.Token, payload.Header.Token), config.WebhookToken) {
@@ -491,30 +826,60 @@ func (h *Handler) FeishuWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if config.EncryptKey != "" && !security.SignatureVerified {
+		slog.Warn("飞书事件签名校验失败", append(logAttrs, "reason", security.Reason)...)
+		h.recordFeishuWebhookRejected(r.Context(), payload, config, security)
+		writeError(w, http.StatusUnauthorized, "invalid feishu signature")
+		return
+	}
+
 	if !secureEqual(firstNonEmpty(payload.Header.Token, payload.Token), config.WebhookToken) {
 		slog.Warn("飞书事件被拒绝", append(logAttrs, "reason", "invalid_token")...)
+		security.TokenVerified = false
+		security.Reason = "invalid_token"
+		h.recordFeishuWebhookRejected(r.Context(), payload, config, security)
 		writeError(w, http.StatusUnauthorized, "invalid feishu token")
 		return
 	}
+	security.TokenVerified = true
 
 	eventType := firstNonEmpty(payload.Header.EventType, payload.Type)
 	if eventType != "im.message.receive_v1" {
 		slog.Info("飞书事件已忽略", append(logAttrs, "reason", "unsupported_event_type", "event_type", eventType)...)
+		h.recordFeishuWebhookIgnored(r.Context(), payload, config, security, "unsupported_event_type")
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ignored", "reason": "unsupported_event_type"})
+		return
+	}
+
+	record, duplicate, err := h.recordFeishuWebhookReceived(r.Context(), payload, config, security)
+	if err != nil {
+		slog.Warn("飞书事件可靠性记录失败", append(logAttrs, "error", err)...)
+		writeError(w, http.StatusInternalServerError, "failed to record feishu webhook event")
+		return
+	}
+	if duplicate {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"status":        "duplicate",
+			"inbox_item_id": uuidToString(record.InboxItemID),
+			"approval_id":   uuidToString(record.ApprovalID),
+		})
 		return
 	}
 
 	result, err := h.ingestFeishuMessage(r.Context(), payload, config, logAttrs)
 	if err != nil {
 		slog.Warn("飞书消息进入 AI-Me 收件箱失败", append(logAttrs, "error", err)...)
+		h.updateFeishuWebhookEventFromResult(r.Context(), payload, config, "failed", err.Error(), result)
 		writeError(w, http.StatusInternalServerError, "failed to ingest feishu message")
 		return
 	}
 	if result.Status == "ignored" {
+		h.updateFeishuWebhookEventFromResult(r.Context(), payload, config, "ignored", result.Reason, result)
 		writeJSON(w, http.StatusOK, map[string]string{"status": result.Status, "reason": result.Reason})
 		return
 	}
 	if result.Status == "duplicate" {
+		h.updateFeishuWebhookEventFromResult(r.Context(), payload, config, "duplicate", "message_duplicate", result)
 		writeJSON(w, http.StatusOK, map[string]any{
 			"status":        result.Status,
 			"inbox_item_id": result.InboxItemID,
@@ -522,6 +887,7 @@ func (h *Handler) FeishuWebhook(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	h.updateFeishuWebhookEventFromResult(r.Context(), payload, config, "accepted", "", result)
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"status":        result.Status,
 		"inbox_item_id": result.InboxItemID,
@@ -1057,8 +1423,171 @@ func feishuPayloadLogAttrs(payload feishuEventCallback) []any {
 	}
 }
 
+type feishuWebhookSecurityResult struct {
+	SignatureVerified bool
+	TokenVerified     bool
+	ReplayProtected   bool
+	Reason            string
+	RequestTimestamp  pgtype.Timestamptz
+	RawBodySHA256     string
+}
+
+func verifyFeishuWebhookSecurity(r *http.Request, body []byte, cfg feishuConfig) feishuWebhookSecurityResult {
+	result := feishuWebhookSecurityResult{
+		Reason:        "signature_not_configured",
+		RawBodySHA256: sha256Hex(body),
+	}
+	if cfg.EncryptKey == "" {
+		return result
+	}
+	signature := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Lark-Signature")))
+	timestamp := strings.TrimSpace(r.Header.Get("X-Lark-Request-Timestamp"))
+	nonce := strings.TrimSpace(r.Header.Get("X-Lark-Request-Nonce"))
+	if signature == "" || timestamp == "" || nonce == "" {
+		result.Reason = "signature_headers_missing"
+		return result
+	}
+	parsedTimestamp, err := strconv.ParseInt(timestamp, 10, 64)
+	if err != nil || parsedTimestamp <= 0 {
+		result.Reason = "signature_timestamp_invalid"
+		return result
+	}
+	requestTime := time.Unix(parsedTimestamp, 0)
+	result.RequestTimestamp = pgtype.Timestamptz{Time: requestTime, Valid: true}
+	now := time.Now()
+	if requestTime.Before(now.Add(-5*time.Minute)) || requestTime.After(now.Add(5*time.Minute)) {
+		result.Reason = "signature_timestamp_out_of_range"
+		return result
+	}
+	base := append([]byte(timestamp+nonce+cfg.EncryptKey), body...)
+	sum := sha256.Sum256(base)
+	expected := hex.EncodeToString(sum[:])
+	if !secureEqual(expected, signature) {
+		result.Reason = "signature_mismatch"
+		return result
+	}
+	result.SignatureVerified = true
+	result.ReplayProtected = true
+	result.Reason = ""
+	return result
+}
+
+func sha256Hex(body []byte) string {
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])
+}
+
+func (h *Handler) recordFeishuWebhookReceived(ctx context.Context, payload feishuEventCallback, cfg feishuConfig, security feishuWebhookSecurityResult) (db.AiMeFeishuWebhookEvent, bool, error) {
+	eventKey := feishuWebhookEventKey(payload, security.RawBodySHA256)
+	if eventKey == "" || h.Queries == nil {
+		return db.AiMeFeishuWebhookEvent{}, false, nil
+	}
+	if existing, err := h.Queries.FindFeishuWebhookEventByKey(ctx, eventKey); err == nil {
+		updated, updateErr := h.Queries.MarkFeishuWebhookEventDuplicate(ctx, eventKey)
+		if updateErr != nil {
+			return existing, true, updateErr
+		}
+		return updated, true, nil
+	} else if !isNotFound(err) {
+		return db.AiMeFeishuWebhookEvent{}, false, err
+	}
+	created, err := h.Queries.CreateFeishuWebhookEvent(ctx, db.CreateFeishuWebhookEventParams{
+		WorkspaceID:       h.feishuWebhookWorkspaceUUID(ctx, cfg),
+		EventKey:          eventKey,
+		EventID:           payload.Header.EventID,
+		MessageID:         payload.Event.Message.MessageID,
+		EventType:         firstNonEmpty(payload.Header.EventType, payload.Type),
+		Status:            "received",
+		Reason:            firstNonEmpty(security.Reason, ""),
+		SignatureVerified: security.SignatureVerified,
+		TokenVerified:     security.TokenVerified,
+		ReplayProtected:   security.ReplayProtected,
+		RequestTimestamp:  security.RequestTimestamp,
+		RawBodySha256:     security.RawBodySHA256,
+	})
+	return created, false, err
+}
+
+func (h *Handler) recordFeishuWebhookRejected(ctx context.Context, payload feishuEventCallback, cfg feishuConfig, security feishuWebhookSecurityResult) {
+	h.recordFeishuWebhookTerminal(ctx, payload, cfg, security, "rejected", firstNonEmpty(security.Reason, "rejected"))
+}
+
+func (h *Handler) recordFeishuWebhookIgnored(ctx context.Context, payload feishuEventCallback, cfg feishuConfig, security feishuWebhookSecurityResult, reason string) {
+	h.recordFeishuWebhookTerminal(ctx, payload, cfg, security, "ignored", reason)
+}
+
+func (h *Handler) recordFeishuWebhookTerminal(ctx context.Context, payload feishuEventCallback, cfg feishuConfig, security feishuWebhookSecurityResult, status, reason string) {
+	if h.Queries == nil {
+		return
+	}
+	event, duplicate, err := h.recordFeishuWebhookReceived(ctx, payload, cfg, security)
+	if err != nil {
+		slog.Warn("飞书事件终态记录失败", "event_key", feishuWebhookEventKey(payload, security.RawBodySHA256), "error", err)
+		return
+	}
+	if duplicate {
+		return
+	}
+	_, err = h.Queries.UpdateFeishuWebhookEventStatus(ctx, db.UpdateFeishuWebhookEventStatusParams{
+		WorkspaceID: h.feishuWebhookWorkspaceUUID(ctx, cfg),
+		Status:      status,
+		Reason:      pgtype.Text{String: reason, Valid: reason != ""},
+		EventKey:    event.EventKey,
+	})
+	if err != nil {
+		slog.Warn("飞书事件终态更新失败", "event_key", event.EventKey, "error", err)
+	}
+}
+
+func (h *Handler) updateFeishuWebhookEventFromResult(ctx context.Context, payload feishuEventCallback, cfg feishuConfig, status, reason string, result feishuIngestResult) {
+	if h.Queries == nil {
+		return
+	}
+	eventKey := feishuWebhookEventKey(payload, "")
+	workspaceID := h.feishuWebhookWorkspaceUUID(ctx, cfg)
+	if result.WorkspaceID != "" {
+		workspaceID = feishuOptionalUUID(result.WorkspaceID)
+	}
+	_, err := h.Queries.UpdateFeishuWebhookEventStatus(ctx, db.UpdateFeishuWebhookEventStatusParams{
+		WorkspaceID: workspaceID,
+		Status:      status,
+		Reason:      pgtype.Text{String: strings.TrimSpace(reason), Valid: strings.TrimSpace(reason) != ""},
+		InboxItemID: feishuOptionalUUID(result.InboxItemID),
+		ApprovalID:  feishuOptionalUUID(result.ApprovalID),
+		EventKey:    eventKey,
+	})
+	if err != nil {
+		slog.Warn("飞书事件状态更新失败", "event_key", eventKey, "status", status, "error", err)
+	}
+}
+
+func (h *Handler) feishuWebhookWorkspaceUUID(ctx context.Context, cfg feishuConfig) pgtype.UUID {
+	workspace, err := h.resolveFeishuWorkspace(ctx, cfg)
+	if err != nil {
+		return pgtype.UUID{}
+	}
+	return workspace.ID
+}
+
+func feishuWebhookEventKey(payload feishuEventCallback, fallbackHash string) string {
+	return firstNonEmpty(payload.Header.EventID, payload.Event.Message.MessageID, fallbackHash)
+}
+
+func feishuOptionalUUID(value string) pgtype.UUID {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return pgtype.UUID{}
+	}
+	parsed, err := util.ParseUUID(value)
+	if err != nil {
+		return pgtype.UUID{}
+	}
+	return parsed
+}
+
 type feishuConfig struct {
 	WebhookToken       string
+	EncryptKey         string
 	WorkspaceID        string
 	WorkspaceSlug      string
 	OwnerUserID        string
@@ -1073,6 +1602,7 @@ type feishuConfig struct {
 func feishuConfigFromEnv() feishuConfig {
 	return feishuConfig{
 		WebhookToken:       strings.TrimSpace(os.Getenv("FEISHU_WEBHOOK_TOKEN")),
+		EncryptKey:         strings.TrimSpace(os.Getenv("FEISHU_ENCRYPT_KEY")),
 		WorkspaceID:        strings.TrimSpace(os.Getenv("FEISHU_WORKSPACE_ID")),
 		WorkspaceSlug:      strings.TrimSpace(os.Getenv("FEISHU_WORKSPACE_SLUG")),
 		OwnerUserID:        strings.TrimSpace(os.Getenv("FEISHU_OWNER_USER_ID")),

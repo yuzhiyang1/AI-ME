@@ -106,6 +106,7 @@ export interface FeishuIntegrationStatus {
   incoming_configured: boolean;
   outgoing_configured: boolean;
   webhook_configured: boolean;
+  signature_configured: boolean;
   websocket_configured: boolean;
   workspace_configured: boolean;
   workspace_matches: boolean;
@@ -183,6 +184,90 @@ export interface AIMeCostControl {
   worker_cache_write_tokens: number;
 }
 
+export interface FeishuReliabilitySummary {
+  webhook_events: number;
+  duplicate_events: number;
+  accepted_events: number;
+  ignored_events: number;
+  failed_events: number;
+  rejected_events: number;
+  signature_verified_events: number;
+  replay_protected_events: number;
+  events_today: number;
+  last_event_at: string | null;
+}
+
+export interface FeishuDeliverySummary {
+  deliveries: number;
+  sending: number;
+  succeeded: number;
+  failed: number;
+  dead_letter: number;
+  attempts: number;
+  last_delivery_at: string | null;
+}
+
+export interface AIMeQualitySummary {
+  reviewed: number;
+  avg_score: number;
+  good: number;
+  poor: number;
+  accepted: number;
+  needs_retry: number;
+  wrong: number;
+  last_reviewed_at: string | null;
+}
+
+export interface AIMeModelRouting {
+  default_provider: string;
+  default_model: string;
+  draft_provider: string;
+  draft_model: string;
+  worker_policy: string;
+  daily_budget_cents: number;
+  budget_status: string;
+  recommended_next_actions: string[];
+}
+
+export interface FeishuDogfoodChecklistItem {
+  key: string;
+  title: string;
+  description: string;
+  completed: boolean;
+}
+
+export interface FeishuWebhookEvent {
+  id: string;
+  event_key: string;
+  event_id: string;
+  message_id: string;
+  event_type: string;
+  status: string;
+  reason: string;
+  signature_verified: boolean;
+  token_verified: boolean;
+  replay_protected: boolean;
+  duplicate_count: number;
+  request_timestamp: string | null;
+  inbox_item_id: string | null;
+  approval_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FeishuDelivery {
+  id: string;
+  approval_id: string | null;
+  source_message_id: string;
+  reply_message_id: string;
+  status: string;
+  attempt_count: number;
+  last_error: string;
+  next_retry_at: string | null;
+  sent_at: string | null;
+  updated_at: string;
+}
+
 export interface AIMeOnboardingStep {
   key: string;
   title: string;
@@ -201,8 +286,15 @@ export interface FeishuDogfoodPanel {
   status: FeishuIntegrationStatus;
   summary: FeishuDogfoodSummary;
   cost: AIMeCostControl;
+  reliability: FeishuReliabilitySummary;
+  delivery: FeishuDeliverySummary;
+  quality: AIMeQualitySummary;
+  model_route: AIMeModelRouting;
   onboarding: AIMeOnboardingStatus;
+  checklist: FeishuDogfoodChecklistItem[];
   logs: FeishuMessageLog[];
+  events: FeishuWebhookEvent[];
+  deliveries: FeishuDelivery[];
 }
 
 // Personal Access Tokens

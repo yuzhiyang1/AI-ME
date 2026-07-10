@@ -147,6 +147,7 @@ describe("buildToolPermissionRows", () => {
         incoming_configured: true,
         outgoing_configured: true,
         webhook_configured: true,
+        signature_configured: true,
         websocket_configured: false,
         workspace_configured: true,
         workspace_matches: true,

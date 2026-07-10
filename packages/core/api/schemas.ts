@@ -514,6 +514,7 @@ export const FeishuIntegrationStatusSchema = z.object({
   incoming_configured: z.boolean().default(false),
   outgoing_configured: z.boolean().default(false),
   webhook_configured: z.boolean().default(false),
+  signature_configured: z.boolean().default(false),
   websocket_configured: z.boolean().default(false),
   workspace_configured: z.boolean().default(false),
   workspace_matches: z.boolean().default(false),
@@ -532,6 +533,7 @@ export const EMPTY_FEISHU_INTEGRATION_STATUS: FeishuIntegrationStatus = {
   incoming_configured: false,
   outgoing_configured: false,
   webhook_configured: false,
+  signature_configured: false,
   websocket_configured: false,
   workspace_configured: false,
   workspace_matches: false,
@@ -609,6 +611,90 @@ const AIMeCostControlSchema = z.object({
   worker_cache_write_tokens: z.number().default(0),
 }).loose();
 
+const FeishuReliabilitySummarySchema = z.object({
+  webhook_events: z.number().default(0),
+  duplicate_events: z.number().default(0),
+  accepted_events: z.number().default(0),
+  ignored_events: z.number().default(0),
+  failed_events: z.number().default(0),
+  rejected_events: z.number().default(0),
+  signature_verified_events: z.number().default(0),
+  replay_protected_events: z.number().default(0),
+  events_today: z.number().default(0),
+  last_event_at: z.string().nullable().default(null),
+}).loose();
+
+const FeishuDeliverySummarySchema = z.object({
+  deliveries: z.number().default(0),
+  sending: z.number().default(0),
+  succeeded: z.number().default(0),
+  failed: z.number().default(0),
+  dead_letter: z.number().default(0),
+  attempts: z.number().default(0),
+  last_delivery_at: z.string().nullable().default(null),
+}).loose();
+
+const AIMeQualitySummarySchema = z.object({
+  reviewed: z.number().default(0),
+  avg_score: z.number().default(0),
+  good: z.number().default(0),
+  poor: z.number().default(0),
+  accepted: z.number().default(0),
+  needs_retry: z.number().default(0),
+  wrong: z.number().default(0),
+  last_reviewed_at: z.string().nullable().default(null),
+}).loose();
+
+const AIMeModelRoutingSchema = z.object({
+  default_provider: z.string().default("deepseek"),
+  default_model: z.string().default("deepseek-chat"),
+  draft_provider: z.string().default("deepseek"),
+  draft_model: z.string().default("deepseek-chat"),
+  worker_policy: z.string().default(""),
+  daily_budget_cents: z.number().default(0),
+  budget_status: z.string().default("ok"),
+  recommended_next_actions: z.array(z.string()).default([]),
+}).loose();
+
+const FeishuDogfoodChecklistItemSchema = z.object({
+  key: z.string().default(""),
+  title: z.string().default(""),
+  description: z.string().default(""),
+  completed: z.boolean().default(false),
+}).loose();
+
+const FeishuWebhookEventSchema = z.object({
+  id: z.string().default(""),
+  event_key: z.string().default(""),
+  event_id: z.string().default(""),
+  message_id: z.string().default(""),
+  event_type: z.string().default(""),
+  status: z.string().default(""),
+  reason: z.string().default(""),
+  signature_verified: z.boolean().default(false),
+  token_verified: z.boolean().default(false),
+  replay_protected: z.boolean().default(false),
+  duplicate_count: z.number().default(0),
+  request_timestamp: z.string().nullable().default(null),
+  inbox_item_id: z.string().nullable().default(null),
+  approval_id: z.string().nullable().default(null),
+  created_at: z.string().default(""),
+  updated_at: z.string().default(""),
+}).loose();
+
+const FeishuDeliverySchema = z.object({
+  id: z.string().default(""),
+  approval_id: z.string().nullable().default(null),
+  source_message_id: z.string().default(""),
+  reply_message_id: z.string().default(""),
+  status: z.string().default(""),
+  attempt_count: z.number().default(0),
+  last_error: z.string().default(""),
+  next_retry_at: z.string().nullable().default(null),
+  sent_at: z.string().nullable().default(null),
+  updated_at: z.string().default(""),
+}).loose();
+
 const AIMeOnboardingStepSchema = z.object({
   key: z.string().default(""),
   title: z.string().default(""),
@@ -637,6 +723,7 @@ export const FeishuDogfoodPanelSchema = z.object({
     incoming_configured: false,
     outgoing_configured: false,
     webhook_configured: false,
+    signature_configured: false,
     websocket_configured: false,
     workspace_configured: false,
     workspace_matches: false,
@@ -678,13 +765,57 @@ export const FeishuDogfoodPanelSchema = z.object({
     worker_cache_read_tokens: 0,
     worker_cache_write_tokens: 0,
   }),
+  reliability: FeishuReliabilitySummarySchema.default({
+    webhook_events: 0,
+    duplicate_events: 0,
+    accepted_events: 0,
+    ignored_events: 0,
+    failed_events: 0,
+    rejected_events: 0,
+    signature_verified_events: 0,
+    replay_protected_events: 0,
+    events_today: 0,
+    last_event_at: null,
+  }),
+  delivery: FeishuDeliverySummarySchema.default({
+    deliveries: 0,
+    sending: 0,
+    succeeded: 0,
+    failed: 0,
+    dead_letter: 0,
+    attempts: 0,
+    last_delivery_at: null,
+  }),
+  quality: AIMeQualitySummarySchema.default({
+    reviewed: 0,
+    avg_score: 0,
+    good: 0,
+    poor: 0,
+    accepted: 0,
+    needs_retry: 0,
+    wrong: 0,
+    last_reviewed_at: null,
+  }),
+  model_route: AIMeModelRoutingSchema.default({
+    default_provider: "deepseek",
+    default_model: "deepseek-chat",
+    draft_provider: "deepseek",
+    draft_model: "deepseek-chat",
+    worker_policy: "",
+    daily_budget_cents: 0,
+    budget_status: "ok",
+    recommended_next_actions: [],
+  }),
   onboarding: AIMeOnboardingStatusSchema.default({
     completed: false,
     completed_steps: 0,
     total_steps: 0,
     steps: [],
   }),
+  checklist: z.array(FeishuDogfoodChecklistItemSchema).default([]),
   logs: z.array(FeishuMessageLogSchema).default([]),
+  events: z.array(FeishuWebhookEventSchema).default([]),
+  deliveries: z.array(FeishuDeliverySchema).default([]),
 }).loose();
 
 export const EMPTY_FEISHU_DOGFOOD_PANEL: FeishuDogfoodPanel = {
@@ -719,8 +850,52 @@ export const EMPTY_FEISHU_DOGFOOD_PANEL: FeishuDogfoodPanel = {
     worker_cache_read_tokens: 0,
     worker_cache_write_tokens: 0,
   },
+  reliability: {
+    webhook_events: 0,
+    duplicate_events: 0,
+    accepted_events: 0,
+    ignored_events: 0,
+    failed_events: 0,
+    rejected_events: 0,
+    signature_verified_events: 0,
+    replay_protected_events: 0,
+    events_today: 0,
+    last_event_at: null,
+  },
+  delivery: {
+    deliveries: 0,
+    sending: 0,
+    succeeded: 0,
+    failed: 0,
+    dead_letter: 0,
+    attempts: 0,
+    last_delivery_at: null,
+  },
+  quality: {
+    reviewed: 0,
+    avg_score: 0,
+    good: 0,
+    poor: 0,
+    accepted: 0,
+    needs_retry: 0,
+    wrong: 0,
+    last_reviewed_at: null,
+  },
+  model_route: {
+    default_provider: "deepseek",
+    default_model: "deepseek-chat",
+    draft_provider: "deepseek",
+    draft_model: "deepseek-chat",
+    worker_policy: "",
+    daily_budget_cents: 0,
+    budget_status: "ok",
+    recommended_next_actions: [],
+  },
   onboarding: EMPTY_AIME_ONBOARDING_STATUS,
+  checklist: [],
   logs: [],
+  events: [],
+  deliveries: [],
 };
 
 export const AIMeCockpitSummarySchema = z.object({

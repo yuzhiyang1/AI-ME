@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	channeltypes "github.com/larksuite/oapi-sdk-go/v3/channel/types"
 	"github.com/multica-ai/multica/server/internal/feishu"
@@ -282,6 +284,129 @@ WHERE workspace_id = $1
 	}
 }
 
+func TestFeishuWebhookRejectsInvalidSignatureAndRecordsEvent(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("handler test fixture is not available")
+	}
+
+	const messageID = "om_ai_me_bad_signature_test"
+	ctx := context.Background()
+	cleanupFeishuMessageTestRows(ctx, messageID)
+	t.Cleanup(func() {
+		cleanupFeishuMessageTestRows(ctx, messageID)
+	})
+
+	t.Setenv("FEISHU_WEBHOOK_TOKEN", "test-token")
+	t.Setenv("FEISHU_ENCRYPT_KEY", "encrypt-key")
+	t.Setenv("FEISHU_WORKSPACE_ID", testWorkspaceID)
+	t.Setenv("FEISHU_WORKSPACE_SLUG", "")
+	t.Setenv("FEISHU_OWNER_USER_ID", testUserID)
+
+	payload := feishuEventCallback{
+		Header: feishuHeader{
+			EventID:   "evt_ai_me_bad_signature_test",
+			EventType: "im.message.receive_v1",
+			Token:     "test-token",
+		},
+		Event: feishuEventBody{
+			Message: feishuMessage{
+				MessageID:   messageID,
+				ChatID:      "oc_signature_test",
+				ChatType:    "p2p",
+				MessageType: "text",
+				Content:     `{"text":"签名失败测试"}`,
+			},
+		},
+	}
+
+	req := feishuWebhookRequest(t, payload)
+	req.Header.Set("X-Lark-Request-Timestamp", strconv.FormatInt(time.Now().Unix(), 10))
+	req.Header.Set("X-Lark-Request-Nonce", "nonce")
+	req.Header.Set("X-Lark-Signature", "bad-signature")
+	w := httptest.NewRecorder()
+	testHandler.FeishuWebhook(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("webhook status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	var status, reason string
+	var signatureVerified bool
+	if err := testPool.QueryRow(ctx, `
+SELECT status, reason, signature_verified
+FROM ai_me_feishu_webhook_event
+WHERE event_id = 'evt_ai_me_bad_signature_test'
+`).Scan(&status, &reason, &signatureVerified); err != nil {
+		t.Fatalf("query rejected event: %v", err)
+	}
+	if status != "rejected" || reason != "signature_mismatch" || signatureVerified {
+		t.Fatalf("event = status %q reason %q signature %v", status, reason, signatureVerified)
+	}
+}
+
+func TestFeishuWebhookSignedRequestRecordsReliability(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("handler test fixture is not available")
+	}
+
+	const messageID = "om_ai_me_signed_intake_test"
+	ctx := context.Background()
+	cleanupFeishuMessageTestRows(ctx, messageID)
+	origModel := testHandler.AIModel
+	testHandler.AIModel = nil
+	t.Cleanup(func() {
+		testHandler.AIModel = origModel
+		cleanupFeishuMessageTestRows(ctx, messageID)
+	})
+
+	t.Setenv("FEISHU_WEBHOOK_TOKEN", "test-token")
+	t.Setenv("FEISHU_ENCRYPT_KEY", "encrypt-key")
+	t.Setenv("FEISHU_WORKSPACE_ID", testWorkspaceID)
+	t.Setenv("FEISHU_WORKSPACE_SLUG", "")
+	t.Setenv("FEISHU_OWNER_USER_ID", testUserID)
+	t.Setenv("FEISHU_ALLOWED_CHAT_ID", "")
+	t.Setenv("FEISHU_GROUP_MESSAGE_POLICY", "mention")
+
+	payload := feishuEventCallback{
+		Header: feishuHeader{
+			EventID:   "evt_ai_me_signed_intake_test",
+			EventType: "im.message.receive_v1",
+			Token:     "test-token",
+		},
+		Event: feishuEventBody{
+			Sender: feishuSender{
+				SenderType: "user",
+				SenderID:   feishuSenderID{OpenID: "ou_signed", UserID: "u_signed"},
+			},
+			Message: feishuMessage{
+				MessageID:   messageID,
+				ChatID:      "oc_signature_test",
+				ChatType:    "p2p",
+				MessageType: "text",
+				Content:     `{"text":"签名成功测试"}`,
+			},
+		},
+	}
+
+	w := httptest.NewRecorder()
+	testHandler.FeishuWebhook(w, signedFeishuWebhookRequest(t, payload, "encrypt-key"))
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("webhook status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	var status string
+	var signatureVerified, replayProtected bool
+	if err := testPool.QueryRow(ctx, `
+SELECT status, signature_verified, replay_protected
+FROM ai_me_feishu_webhook_event
+WHERE event_id = 'evt_ai_me_signed_intake_test'
+`).Scan(&status, &signatureVerified, &replayProtected); err != nil {
+		t.Fatalf("query accepted event: %v", err)
+	}
+	if status != "accepted" || !signatureVerified || !replayProtected {
+		t.Fatalf("event = status %q signature %v replay %v", status, signatureVerified, replayProtected)
+	}
+}
+
 func TestFeishuWebhookUsesAIMeModelForReplyDraft(t *testing.T) {
 	if testHandler == nil {
 		t.Skip("handler test fixture is not available")
@@ -485,7 +610,27 @@ func feishuWebhookRequest(t *testing.T, payload feishuEventCallback) *http.Reque
 	return req
 }
 
+func signedFeishuWebhookRequest(t *testing.T, payload feishuEventCallback, encryptKey string) *http.Request {
+	t.Helper()
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal webhook payload: %v", err)
+	}
+	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+	nonce := "test-nonce"
+	signature := sha256Hex(append([]byte(timestamp+nonce+encryptKey), body...))
+	req := httptest.NewRequest(http.MethodPost, "/api/integrations/feishu/webhook", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Lark-Request-Timestamp", timestamp)
+	req.Header.Set("X-Lark-Request-Nonce", nonce)
+	req.Header.Set("X-Lark-Signature", signature)
+	return req
+}
+
 func cleanupFeishuMessageTestRows(ctx context.Context, messageID string) {
+	_, _ = testPool.Exec(ctx, `DELETE FROM ai_me_feishu_delivery WHERE source_message_id = $1`, messageID)
+	_, _ = testPool.Exec(ctx, `DELETE FROM ai_me_feishu_webhook_event WHERE message_id = $1 OR event_id LIKE '%' || $1 || '%'`, messageID)
 	_, _ = testPool.Exec(ctx, `DELETE FROM ai_me_approval WHERE source_type = 'feishu' AND source_ref_id = $1`, messageID)
 	_, _ = testPool.Exec(ctx, `DELETE FROM inbox_item WHERE details->>'message_id' = $1`, messageID)
 }

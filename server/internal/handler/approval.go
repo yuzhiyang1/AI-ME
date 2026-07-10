@@ -1238,12 +1238,18 @@ func (h *Handler) executeApprovalSendExternalMessage(ctx context.Context, approv
 	if content == "" {
 		return approvedAIActionExecution{}, errors.New("text is required for send_external_message")
 	}
+	h.recordFeishuDeliverySending(ctx, approval, messageID)
 	if h.Feishu == nil || !h.Feishu.Enabled() {
-		return approvedAIActionExecution{}, errors.New("feishu client is not configured")
-	}
-	if _, err := h.Feishu.ReplyText(ctx, messageID, content); err != nil {
+		err := errors.New("feishu client is not configured")
+		h.recordFeishuDeliveryFailed(ctx, approval, err)
 		return approvedAIActionExecution{}, err
 	}
+	resp, err := h.Feishu.ReplyText(ctx, messageID, content)
+	if err != nil {
+		h.recordFeishuDeliveryFailed(ctx, approval, err)
+		return approvedAIActionExecution{}, err
+	}
+	h.recordFeishuDeliverySucceeded(ctx, approval, resp.MessageID)
 	return approvedAIActionExecution{Status: "succeeded"}, nil
 }
 

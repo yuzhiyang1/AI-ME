@@ -11,6 +11,178 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const createFeishuWebhookEvent = `-- name: CreateFeishuWebhookEvent :one
+INSERT INTO ai_me_feishu_webhook_event (
+    workspace_id,
+    event_key,
+    event_id,
+    message_id,
+    event_type,
+    status,
+    reason,
+    signature_verified,
+    token_verified,
+    replay_protected,
+    request_timestamp,
+    raw_body_sha256
+) VALUES (
+    $1::uuid,
+    $2::text,
+    $3::text,
+    $4::text,
+    $5::text,
+    $6::text,
+    $7::text,
+    $8::boolean,
+    $9::boolean,
+    $10::boolean,
+    $11::timestamptz,
+    $12::text
+)
+RETURNING id, workspace_id, event_key, event_id, message_id, event_type, status, reason, signature_verified, token_verified, replay_protected, duplicate_count, request_timestamp, raw_body_sha256, inbox_item_id, approval_id, created_at, updated_at
+`
+
+type CreateFeishuWebhookEventParams struct {
+	WorkspaceID       pgtype.UUID        `json:"workspace_id"`
+	EventKey          string             `json:"event_key"`
+	EventID           string             `json:"event_id"`
+	MessageID         string             `json:"message_id"`
+	EventType         string             `json:"event_type"`
+	Status            string             `json:"status"`
+	Reason            string             `json:"reason"`
+	SignatureVerified bool               `json:"signature_verified"`
+	TokenVerified     bool               `json:"token_verified"`
+	ReplayProtected   bool               `json:"replay_protected"`
+	RequestTimestamp  pgtype.Timestamptz `json:"request_timestamp"`
+	RawBodySha256     string             `json:"raw_body_sha256"`
+}
+
+func (q *Queries) CreateFeishuWebhookEvent(ctx context.Context, arg CreateFeishuWebhookEventParams) (AiMeFeishuWebhookEvent, error) {
+	row := q.db.QueryRow(ctx, createFeishuWebhookEvent,
+		arg.WorkspaceID,
+		arg.EventKey,
+		arg.EventID,
+		arg.MessageID,
+		arg.EventType,
+		arg.Status,
+		arg.Reason,
+		arg.SignatureVerified,
+		arg.TokenVerified,
+		arg.ReplayProtected,
+		arg.RequestTimestamp,
+		arg.RawBodySha256,
+	)
+	var i AiMeFeishuWebhookEvent
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.EventKey,
+		&i.EventID,
+		&i.MessageID,
+		&i.EventType,
+		&i.Status,
+		&i.Reason,
+		&i.SignatureVerified,
+		&i.TokenVerified,
+		&i.ReplayProtected,
+		&i.DuplicateCount,
+		&i.RequestTimestamp,
+		&i.RawBodySha256,
+		&i.InboxItemID,
+		&i.ApprovalID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const findFeishuWebhookEventByKey = `-- name: FindFeishuWebhookEventByKey :one
+SELECT id, workspace_id, event_key, event_id, message_id, event_type, status, reason, signature_verified, token_verified, replay_protected, duplicate_count, request_timestamp, raw_body_sha256, inbox_item_id, approval_id, created_at, updated_at
+FROM ai_me_feishu_webhook_event
+WHERE event_key = $1::text
+`
+
+func (q *Queries) FindFeishuWebhookEventByKey(ctx context.Context, eventKey string) (AiMeFeishuWebhookEvent, error) {
+	row := q.db.QueryRow(ctx, findFeishuWebhookEventByKey, eventKey)
+	var i AiMeFeishuWebhookEvent
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.EventKey,
+		&i.EventID,
+		&i.MessageID,
+		&i.EventType,
+		&i.Status,
+		&i.Reason,
+		&i.SignatureVerified,
+		&i.TokenVerified,
+		&i.ReplayProtected,
+		&i.DuplicateCount,
+		&i.RequestTimestamp,
+		&i.RawBodySha256,
+		&i.InboxItemID,
+		&i.ApprovalID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const getAIApprovalQualitySummary = `-- name: GetAIApprovalQualitySummary :one
+WITH latest_quality AS (
+    SELECT DISTINCT ON (approval_id)
+        approval_id,
+        CASE
+            WHEN payload->>'score' ~ '^[1-5]$' THEN (payload->>'score')::int
+            ELSE 0
+        END AS score,
+        COALESCE(payload->>'outcome', '')::text AS outcome,
+        created_at
+    FROM ai_me_approval_event
+    WHERE workspace_id = $1::uuid
+      AND event_type = 'edited'
+      AND payload->>'kind' = 'quality_review'
+    ORDER BY approval_id, created_at DESC, id DESC
+)
+SELECT
+    count(*)::bigint AS reviewed,
+    COALESCE(avg(NULLIF(score, 0)), 0)::float8 AS avg_score,
+    count(*) FILTER (WHERE score >= 4)::bigint AS good,
+    count(*) FILTER (WHERE score BETWEEN 1 AND 2)::bigint AS poor,
+    count(*) FILTER (WHERE outcome = 'accepted')::bigint AS accepted,
+    count(*) FILTER (WHERE outcome = 'needs_retry')::bigint AS needs_retry,
+    count(*) FILTER (WHERE outcome = 'wrong')::bigint AS wrong,
+    max(created_at)::timestamptz AS last_reviewed_at
+FROM latest_quality
+`
+
+type GetAIApprovalQualitySummaryRow struct {
+	Reviewed       int64              `json:"reviewed"`
+	AvgScore       float64            `json:"avg_score"`
+	Good           int64              `json:"good"`
+	Poor           int64              `json:"poor"`
+	Accepted       int64              `json:"accepted"`
+	NeedsRetry     int64              `json:"needs_retry"`
+	Wrong          int64              `json:"wrong"`
+	LastReviewedAt pgtype.Timestamptz `json:"last_reviewed_at"`
+}
+
+func (q *Queries) GetAIApprovalQualitySummary(ctx context.Context, workspaceID pgtype.UUID) (GetAIApprovalQualitySummaryRow, error) {
+	row := q.db.QueryRow(ctx, getAIApprovalQualitySummary, workspaceID)
+	var i GetAIApprovalQualitySummaryRow
+	err := row.Scan(
+		&i.Reviewed,
+		&i.AvgScore,
+		&i.Good,
+		&i.Poor,
+		&i.Accepted,
+		&i.NeedsRetry,
+		&i.Wrong,
+		&i.LastReviewedAt,
+	)
+	return i, err
+}
+
 const getAIMeOnboardingCounts = `-- name: GetAIMeOnboardingCounts :one
 SELECT
     (SELECT count(*) FROM agent WHERE workspace_id = $1::uuid AND archived_at IS NULL)::bigint AS agent_count,
@@ -19,17 +191,27 @@ SELECT
     (SELECT count(*) FROM inbox_item WHERE workspace_id = $1::uuid AND details->>'source_type' = 'feishu')::bigint AS feishu_message_count,
     (SELECT count(*) FROM ai_me_approval WHERE workspace_id = $1::uuid AND source_type = 'feishu')::bigint AS feishu_approval_count,
     (SELECT count(*) FROM ai_me_approval WHERE workspace_id = $1::uuid AND source_type = 'feishu' AND execution_status = 'succeeded')::bigint AS feishu_sent_count,
+    (
+        SELECT count(*)
+        FROM ai_me_approval_event e
+        JOIN ai_me_approval a ON a.id = e.approval_id
+        WHERE e.workspace_id = $1::uuid
+          AND a.source_type = 'feishu'
+          AND e.event_type = 'edited'
+          AND e.payload->>'kind' = 'quality_review'
+    )::bigint AS feishu_quality_review_count,
     (SELECT count(*) FROM memory_entry WHERE workspace_id = $1::uuid AND status = 'active' AND archived_at IS NULL)::bigint AS active_memory_count
 `
 
 type GetAIMeOnboardingCountsRow struct {
-	AgentCount              int64 `json:"agent_count"`
-	ApprovalCount           int64 `json:"approval_count"`
-	ExecutionSucceededCount int64 `json:"execution_succeeded_count"`
-	FeishuMessageCount      int64 `json:"feishu_message_count"`
-	FeishuApprovalCount     int64 `json:"feishu_approval_count"`
-	FeishuSentCount         int64 `json:"feishu_sent_count"`
-	ActiveMemoryCount       int64 `json:"active_memory_count"`
+	AgentCount               int64 `json:"agent_count"`
+	ApprovalCount            int64 `json:"approval_count"`
+	ExecutionSucceededCount  int64 `json:"execution_succeeded_count"`
+	FeishuMessageCount       int64 `json:"feishu_message_count"`
+	FeishuApprovalCount      int64 `json:"feishu_approval_count"`
+	FeishuSentCount          int64 `json:"feishu_sent_count"`
+	FeishuQualityReviewCount int64 `json:"feishu_quality_review_count"`
+	ActiveMemoryCount        int64 `json:"active_memory_count"`
 }
 
 func (q *Queries) GetAIMeOnboardingCounts(ctx context.Context, workspaceID pgtype.UUID) (GetAIMeOnboardingCountsRow, error) {
@@ -42,6 +224,7 @@ func (q *Queries) GetAIMeOnboardingCounts(ctx context.Context, workspaceID pgtyp
 		&i.FeishuMessageCount,
 		&i.FeishuApprovalCount,
 		&i.FeishuSentCount,
+		&i.FeishuQualityReviewCount,
 		&i.ActiveMemoryCount,
 	)
 	return i, err
@@ -78,6 +261,44 @@ func (q *Queries) GetAIMeWorkerUsageSummary(ctx context.Context, workspaceID pgt
 		&i.CacheReadTokens,
 		&i.CacheWriteTokens,
 		&i.TaskCount,
+	)
+	return i, err
+}
+
+const getFeishuDeliverySummary = `-- name: GetFeishuDeliverySummary :one
+SELECT
+    count(*)::bigint AS deliveries,
+    count(*) FILTER (WHERE status = 'sending')::bigint AS sending,
+    count(*) FILTER (WHERE status = 'succeeded')::bigint AS succeeded,
+    count(*) FILTER (WHERE status = 'failed')::bigint AS failed,
+    count(*) FILTER (WHERE status = 'dead_letter')::bigint AS dead_letter,
+    COALESCE(sum(attempt_count), 0)::bigint AS attempts,
+    max(updated_at)::timestamptz AS last_delivery_at
+FROM ai_me_feishu_delivery
+WHERE workspace_id = $1::uuid
+`
+
+type GetFeishuDeliverySummaryRow struct {
+	Deliveries     int64              `json:"deliveries"`
+	Sending        int64              `json:"sending"`
+	Succeeded      int64              `json:"succeeded"`
+	Failed         int64              `json:"failed"`
+	DeadLetter     int64              `json:"dead_letter"`
+	Attempts       int64              `json:"attempts"`
+	LastDeliveryAt pgtype.Timestamptz `json:"last_delivery_at"`
+}
+
+func (q *Queries) GetFeishuDeliverySummary(ctx context.Context, workspaceID pgtype.UUID) (GetFeishuDeliverySummaryRow, error) {
+	row := q.db.QueryRow(ctx, getFeishuDeliverySummary, workspaceID)
+	var i GetFeishuDeliverySummaryRow
+	err := row.Scan(
+		&i.Deliveries,
+		&i.Sending,
+		&i.Succeeded,
+		&i.Failed,
+		&i.DeadLetter,
+		&i.Attempts,
+		&i.LastDeliveryAt,
 	)
 	return i, err
 }
@@ -177,6 +398,100 @@ func (q *Queries) GetFeishuDogfoodSummary(ctx context.Context, arg GetFeishuDogf
 		&i.EstimatedDraftCostCents,
 	)
 	return i, err
+}
+
+const getFeishuReliabilitySummary = `-- name: GetFeishuReliabilitySummary :one
+SELECT
+    count(*)::bigint AS webhook_events,
+    COALESCE(sum(duplicate_count), 0)::bigint AS duplicate_events,
+    count(*) FILTER (WHERE status = 'accepted')::bigint AS accepted_events,
+    count(*) FILTER (WHERE status = 'ignored')::bigint AS ignored_events,
+    count(*) FILTER (WHERE status = 'failed')::bigint AS failed_events,
+    count(*) FILTER (WHERE status = 'rejected')::bigint AS rejected_events,
+    count(*) FILTER (WHERE signature_verified)::bigint AS signature_verified_events,
+    count(*) FILTER (WHERE replay_protected)::bigint AS replay_protected_events,
+    count(*) FILTER (WHERE created_at >= date_trunc('day', now()))::bigint AS events_today,
+    max(updated_at)::timestamptz AS last_event_at
+FROM ai_me_feishu_webhook_event
+WHERE workspace_id = $1::uuid
+`
+
+type GetFeishuReliabilitySummaryRow struct {
+	WebhookEvents           int64              `json:"webhook_events"`
+	DuplicateEvents         int64              `json:"duplicate_events"`
+	AcceptedEvents          int64              `json:"accepted_events"`
+	IgnoredEvents           int64              `json:"ignored_events"`
+	FailedEvents            int64              `json:"failed_events"`
+	RejectedEvents          int64              `json:"rejected_events"`
+	SignatureVerifiedEvents int64              `json:"signature_verified_events"`
+	ReplayProtectedEvents   int64              `json:"replay_protected_events"`
+	EventsToday             int64              `json:"events_today"`
+	LastEventAt             pgtype.Timestamptz `json:"last_event_at"`
+}
+
+func (q *Queries) GetFeishuReliabilitySummary(ctx context.Context, workspaceID pgtype.UUID) (GetFeishuReliabilitySummaryRow, error) {
+	row := q.db.QueryRow(ctx, getFeishuReliabilitySummary, workspaceID)
+	var i GetFeishuReliabilitySummaryRow
+	err := row.Scan(
+		&i.WebhookEvents,
+		&i.DuplicateEvents,
+		&i.AcceptedEvents,
+		&i.IgnoredEvents,
+		&i.FailedEvents,
+		&i.RejectedEvents,
+		&i.SignatureVerifiedEvents,
+		&i.ReplayProtectedEvents,
+		&i.EventsToday,
+		&i.LastEventAt,
+	)
+	return i, err
+}
+
+const listFeishuDeliveries = `-- name: ListFeishuDeliveries :many
+SELECT id, workspace_id, approval_id, source_message_id, reply_message_id, status, attempt_count, last_error, next_retry_at, sent_at, created_at, updated_at
+FROM ai_me_feishu_delivery
+WHERE workspace_id = $1::uuid
+ORDER BY updated_at DESC, id DESC
+LIMIT $3 OFFSET $2
+`
+
+type ListFeishuDeliveriesParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	Offset      int32       `json:"offset"`
+	Limit       int32       `json:"limit"`
+}
+
+func (q *Queries) ListFeishuDeliveries(ctx context.Context, arg ListFeishuDeliveriesParams) ([]AiMeFeishuDelivery, error) {
+	rows, err := q.db.Query(ctx, listFeishuDeliveries, arg.WorkspaceID, arg.Offset, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []AiMeFeishuDelivery{}
+	for rows.Next() {
+		var i AiMeFeishuDelivery
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.ApprovalID,
+			&i.SourceMessageID,
+			&i.ReplyMessageID,
+			&i.Status,
+			&i.AttemptCount,
+			&i.LastError,
+			&i.NextRetryAt,
+			&i.SentAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listFeishuMessageLogs = `-- name: ListFeishuMessageLogs :many
@@ -326,4 +641,282 @@ func (q *Queries) ListFeishuMessageLogs(ctx context.Context, arg ListFeishuMessa
 		return nil, err
 	}
 	return items, nil
+}
+
+const listFeishuWebhookEvents = `-- name: ListFeishuWebhookEvents :many
+SELECT id, workspace_id, event_key, event_id, message_id, event_type, status, reason, signature_verified, token_verified, replay_protected, duplicate_count, request_timestamp, raw_body_sha256, inbox_item_id, approval_id, created_at, updated_at
+FROM ai_me_feishu_webhook_event
+WHERE workspace_id = $1::uuid
+ORDER BY created_at DESC, id DESC
+LIMIT $3 OFFSET $2
+`
+
+type ListFeishuWebhookEventsParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	Offset      int32       `json:"offset"`
+	Limit       int32       `json:"limit"`
+}
+
+func (q *Queries) ListFeishuWebhookEvents(ctx context.Context, arg ListFeishuWebhookEventsParams) ([]AiMeFeishuWebhookEvent, error) {
+	rows, err := q.db.Query(ctx, listFeishuWebhookEvents, arg.WorkspaceID, arg.Offset, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []AiMeFeishuWebhookEvent{}
+	for rows.Next() {
+		var i AiMeFeishuWebhookEvent
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.EventKey,
+			&i.EventID,
+			&i.MessageID,
+			&i.EventType,
+			&i.Status,
+			&i.Reason,
+			&i.SignatureVerified,
+			&i.TokenVerified,
+			&i.ReplayProtected,
+			&i.DuplicateCount,
+			&i.RequestTimestamp,
+			&i.RawBodySha256,
+			&i.InboxItemID,
+			&i.ApprovalID,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const markFeishuDeliveryFailed = `-- name: MarkFeishuDeliveryFailed :one
+UPDATE ai_me_feishu_delivery SET
+    status = CASE WHEN attempt_count >= $1::int THEN 'dead_letter' ELSE 'failed' END,
+    last_error = $2::text,
+    next_retry_at = CASE
+        WHEN attempt_count >= $1::int THEN NULL
+        ELSE now() + make_interval(secs => $3::int)
+    END,
+    updated_at = now()
+WHERE approval_id = $4::uuid
+RETURNING id, workspace_id, approval_id, source_message_id, reply_message_id, status, attempt_count, last_error, next_retry_at, sent_at, created_at, updated_at
+`
+
+type MarkFeishuDeliveryFailedParams struct {
+	MaxAttempts       int32       `json:"max_attempts"`
+	LastError         string      `json:"last_error"`
+	RetryAfterSeconds int32       `json:"retry_after_seconds"`
+	ApprovalID        pgtype.UUID `json:"approval_id"`
+}
+
+func (q *Queries) MarkFeishuDeliveryFailed(ctx context.Context, arg MarkFeishuDeliveryFailedParams) (AiMeFeishuDelivery, error) {
+	row := q.db.QueryRow(ctx, markFeishuDeliveryFailed,
+		arg.MaxAttempts,
+		arg.LastError,
+		arg.RetryAfterSeconds,
+		arg.ApprovalID,
+	)
+	var i AiMeFeishuDelivery
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ApprovalID,
+		&i.SourceMessageID,
+		&i.ReplyMessageID,
+		&i.Status,
+		&i.AttemptCount,
+		&i.LastError,
+		&i.NextRetryAt,
+		&i.SentAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const markFeishuDeliverySucceeded = `-- name: MarkFeishuDeliverySucceeded :one
+UPDATE ai_me_feishu_delivery SET
+    status = 'succeeded',
+    reply_message_id = COALESCE($1::text, reply_message_id),
+    last_error = '',
+    next_retry_at = NULL,
+    sent_at = now(),
+    updated_at = now()
+WHERE approval_id = $2::uuid
+RETURNING id, workspace_id, approval_id, source_message_id, reply_message_id, status, attempt_count, last_error, next_retry_at, sent_at, created_at, updated_at
+`
+
+type MarkFeishuDeliverySucceededParams struct {
+	ReplyMessageID pgtype.Text `json:"reply_message_id"`
+	ApprovalID     pgtype.UUID `json:"approval_id"`
+}
+
+func (q *Queries) MarkFeishuDeliverySucceeded(ctx context.Context, arg MarkFeishuDeliverySucceededParams) (AiMeFeishuDelivery, error) {
+	row := q.db.QueryRow(ctx, markFeishuDeliverySucceeded, arg.ReplyMessageID, arg.ApprovalID)
+	var i AiMeFeishuDelivery
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ApprovalID,
+		&i.SourceMessageID,
+		&i.ReplyMessageID,
+		&i.Status,
+		&i.AttemptCount,
+		&i.LastError,
+		&i.NextRetryAt,
+		&i.SentAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const markFeishuWebhookEventDuplicate = `-- name: MarkFeishuWebhookEventDuplicate :one
+UPDATE ai_me_feishu_webhook_event SET
+    duplicate_count = duplicate_count + 1,
+    updated_at = now()
+WHERE event_key = $1::text
+RETURNING id, workspace_id, event_key, event_id, message_id, event_type, status, reason, signature_verified, token_verified, replay_protected, duplicate_count, request_timestamp, raw_body_sha256, inbox_item_id, approval_id, created_at, updated_at
+`
+
+func (q *Queries) MarkFeishuWebhookEventDuplicate(ctx context.Context, eventKey string) (AiMeFeishuWebhookEvent, error) {
+	row := q.db.QueryRow(ctx, markFeishuWebhookEventDuplicate, eventKey)
+	var i AiMeFeishuWebhookEvent
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.EventKey,
+		&i.EventID,
+		&i.MessageID,
+		&i.EventType,
+		&i.Status,
+		&i.Reason,
+		&i.SignatureVerified,
+		&i.TokenVerified,
+		&i.ReplayProtected,
+		&i.DuplicateCount,
+		&i.RequestTimestamp,
+		&i.RawBodySha256,
+		&i.InboxItemID,
+		&i.ApprovalID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const updateFeishuWebhookEventStatus = `-- name: UpdateFeishuWebhookEventStatus :one
+UPDATE ai_me_feishu_webhook_event SET
+    workspace_id = COALESCE($1::uuid, workspace_id),
+    status = $2::text,
+    reason = COALESCE($3::text, reason),
+    inbox_item_id = COALESCE($4::uuid, inbox_item_id),
+    approval_id = COALESCE($5::uuid, approval_id),
+    updated_at = now()
+WHERE event_key = $6::text
+RETURNING id, workspace_id, event_key, event_id, message_id, event_type, status, reason, signature_verified, token_verified, replay_protected, duplicate_count, request_timestamp, raw_body_sha256, inbox_item_id, approval_id, created_at, updated_at
+`
+
+type UpdateFeishuWebhookEventStatusParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	Status      string      `json:"status"`
+	Reason      pgtype.Text `json:"reason"`
+	InboxItemID pgtype.UUID `json:"inbox_item_id"`
+	ApprovalID  pgtype.UUID `json:"approval_id"`
+	EventKey    string      `json:"event_key"`
+}
+
+func (q *Queries) UpdateFeishuWebhookEventStatus(ctx context.Context, arg UpdateFeishuWebhookEventStatusParams) (AiMeFeishuWebhookEvent, error) {
+	row := q.db.QueryRow(ctx, updateFeishuWebhookEventStatus,
+		arg.WorkspaceID,
+		arg.Status,
+		arg.Reason,
+		arg.InboxItemID,
+		arg.ApprovalID,
+		arg.EventKey,
+	)
+	var i AiMeFeishuWebhookEvent
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.EventKey,
+		&i.EventID,
+		&i.MessageID,
+		&i.EventType,
+		&i.Status,
+		&i.Reason,
+		&i.SignatureVerified,
+		&i.TokenVerified,
+		&i.ReplayProtected,
+		&i.DuplicateCount,
+		&i.RequestTimestamp,
+		&i.RawBodySha256,
+		&i.InboxItemID,
+		&i.ApprovalID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const upsertFeishuDeliverySending = `-- name: UpsertFeishuDeliverySending :one
+INSERT INTO ai_me_feishu_delivery (
+    workspace_id,
+    approval_id,
+    source_message_id,
+    status,
+    attempt_count,
+    last_error,
+    next_retry_at
+) VALUES (
+    $1::uuid,
+    $2::uuid,
+    $3::text,
+    'sending',
+    1,
+    '',
+    NULL
+)
+ON CONFLICT (approval_id) WHERE approval_id IS NOT NULL
+DO UPDATE SET
+    status = 'sending',
+    source_message_id = EXCLUDED.source_message_id,
+    attempt_count = ai_me_feishu_delivery.attempt_count + 1,
+    last_error = '',
+    next_retry_at = NULL,
+    updated_at = now()
+RETURNING id, workspace_id, approval_id, source_message_id, reply_message_id, status, attempt_count, last_error, next_retry_at, sent_at, created_at, updated_at
+`
+
+type UpsertFeishuDeliverySendingParams struct {
+	WorkspaceID     pgtype.UUID `json:"workspace_id"`
+	ApprovalID      pgtype.UUID `json:"approval_id"`
+	SourceMessageID string      `json:"source_message_id"`
+}
+
+func (q *Queries) UpsertFeishuDeliverySending(ctx context.Context, arg UpsertFeishuDeliverySendingParams) (AiMeFeishuDelivery, error) {
+	row := q.db.QueryRow(ctx, upsertFeishuDeliverySending, arg.WorkspaceID, arg.ApprovalID, arg.SourceMessageID)
+	var i AiMeFeishuDelivery
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ApprovalID,
+		&i.SourceMessageID,
+		&i.ReplyMessageID,
+		&i.Status,
+		&i.AttemptCount,
+		&i.LastError,
+		&i.NextRetryAt,
+		&i.SentAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }

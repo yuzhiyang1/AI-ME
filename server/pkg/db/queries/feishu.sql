@@ -56,6 +56,178 @@ WHERE i.workspace_id = sqlc.arg('workspace_id')::uuid
 ORDER BY i.created_at DESC, i.id DESC
 LIMIT sqlc.arg('limit') OFFSET sqlc.arg('offset');
 
+-- name: FindFeishuWebhookEventByKey :one
+SELECT *
+FROM ai_me_feishu_webhook_event
+WHERE event_key = sqlc.arg('event_key')::text;
+
+-- name: CreateFeishuWebhookEvent :one
+INSERT INTO ai_me_feishu_webhook_event (
+    workspace_id,
+    event_key,
+    event_id,
+    message_id,
+    event_type,
+    status,
+    reason,
+    signature_verified,
+    token_verified,
+    replay_protected,
+    request_timestamp,
+    raw_body_sha256
+) VALUES (
+    sqlc.narg('workspace_id')::uuid,
+    sqlc.arg('event_key')::text,
+    sqlc.arg('event_id')::text,
+    sqlc.arg('message_id')::text,
+    sqlc.arg('event_type')::text,
+    sqlc.arg('status')::text,
+    sqlc.arg('reason')::text,
+    sqlc.arg('signature_verified')::boolean,
+    sqlc.arg('token_verified')::boolean,
+    sqlc.arg('replay_protected')::boolean,
+    sqlc.narg('request_timestamp')::timestamptz,
+    sqlc.arg('raw_body_sha256')::text
+)
+RETURNING *;
+
+-- name: MarkFeishuWebhookEventDuplicate :one
+UPDATE ai_me_feishu_webhook_event SET
+    duplicate_count = duplicate_count + 1,
+    updated_at = now()
+WHERE event_key = sqlc.arg('event_key')::text
+RETURNING *;
+
+-- name: UpdateFeishuWebhookEventStatus :one
+UPDATE ai_me_feishu_webhook_event SET
+    workspace_id = COALESCE(sqlc.narg('workspace_id')::uuid, workspace_id),
+    status = sqlc.arg('status')::text,
+    reason = COALESCE(sqlc.narg('reason')::text, reason),
+    inbox_item_id = COALESCE(sqlc.narg('inbox_item_id')::uuid, inbox_item_id),
+    approval_id = COALESCE(sqlc.narg('approval_id')::uuid, approval_id),
+    updated_at = now()
+WHERE event_key = sqlc.arg('event_key')::text
+RETURNING *;
+
+-- name: GetFeishuReliabilitySummary :one
+SELECT
+    count(*)::bigint AS webhook_events,
+    COALESCE(sum(duplicate_count), 0)::bigint AS duplicate_events,
+    count(*) FILTER (WHERE status = 'accepted')::bigint AS accepted_events,
+    count(*) FILTER (WHERE status = 'ignored')::bigint AS ignored_events,
+    count(*) FILTER (WHERE status = 'failed')::bigint AS failed_events,
+    count(*) FILTER (WHERE status = 'rejected')::bigint AS rejected_events,
+    count(*) FILTER (WHERE signature_verified)::bigint AS signature_verified_events,
+    count(*) FILTER (WHERE replay_protected)::bigint AS replay_protected_events,
+    count(*) FILTER (WHERE created_at >= date_trunc('day', now()))::bigint AS events_today,
+    max(updated_at)::timestamptz AS last_event_at
+FROM ai_me_feishu_webhook_event
+WHERE workspace_id = sqlc.arg('workspace_id')::uuid;
+
+-- name: ListFeishuWebhookEvents :many
+SELECT *
+FROM ai_me_feishu_webhook_event
+WHERE workspace_id = sqlc.arg('workspace_id')::uuid
+ORDER BY created_at DESC, id DESC
+LIMIT sqlc.arg('limit') OFFSET sqlc.arg('offset');
+
+-- name: UpsertFeishuDeliverySending :one
+INSERT INTO ai_me_feishu_delivery (
+    workspace_id,
+    approval_id,
+    source_message_id,
+    status,
+    attempt_count,
+    last_error,
+    next_retry_at
+) VALUES (
+    sqlc.arg('workspace_id')::uuid,
+    sqlc.arg('approval_id')::uuid,
+    sqlc.arg('source_message_id')::text,
+    'sending',
+    1,
+    '',
+    NULL
+)
+ON CONFLICT (approval_id) WHERE approval_id IS NOT NULL
+DO UPDATE SET
+    status = 'sending',
+    source_message_id = EXCLUDED.source_message_id,
+    attempt_count = ai_me_feishu_delivery.attempt_count + 1,
+    last_error = '',
+    next_retry_at = NULL,
+    updated_at = now()
+RETURNING *;
+
+-- name: MarkFeishuDeliverySucceeded :one
+UPDATE ai_me_feishu_delivery SET
+    status = 'succeeded',
+    reply_message_id = COALESCE(sqlc.narg('reply_message_id')::text, reply_message_id),
+    last_error = '',
+    next_retry_at = NULL,
+    sent_at = now(),
+    updated_at = now()
+WHERE approval_id = sqlc.arg('approval_id')::uuid
+RETURNING *;
+
+-- name: MarkFeishuDeliveryFailed :one
+UPDATE ai_me_feishu_delivery SET
+    status = CASE WHEN attempt_count >= sqlc.arg('max_attempts')::int THEN 'dead_letter' ELSE 'failed' END,
+    last_error = sqlc.arg('last_error')::text,
+    next_retry_at = CASE
+        WHEN attempt_count >= sqlc.arg('max_attempts')::int THEN NULL
+        ELSE now() + make_interval(secs => sqlc.arg('retry_after_seconds')::int)
+    END,
+    updated_at = now()
+WHERE approval_id = sqlc.arg('approval_id')::uuid
+RETURNING *;
+
+-- name: GetFeishuDeliverySummary :one
+SELECT
+    count(*)::bigint AS deliveries,
+    count(*) FILTER (WHERE status = 'sending')::bigint AS sending,
+    count(*) FILTER (WHERE status = 'succeeded')::bigint AS succeeded,
+    count(*) FILTER (WHERE status = 'failed')::bigint AS failed,
+    count(*) FILTER (WHERE status = 'dead_letter')::bigint AS dead_letter,
+    COALESCE(sum(attempt_count), 0)::bigint AS attempts,
+    max(updated_at)::timestamptz AS last_delivery_at
+FROM ai_me_feishu_delivery
+WHERE workspace_id = sqlc.arg('workspace_id')::uuid;
+
+-- name: ListFeishuDeliveries :many
+SELECT *
+FROM ai_me_feishu_delivery
+WHERE workspace_id = sqlc.arg('workspace_id')::uuid
+ORDER BY updated_at DESC, id DESC
+LIMIT sqlc.arg('limit') OFFSET sqlc.arg('offset');
+
+-- name: GetAIApprovalQualitySummary :one
+WITH latest_quality AS (
+    SELECT DISTINCT ON (approval_id)
+        approval_id,
+        CASE
+            WHEN payload->>'score' ~ '^[1-5]$' THEN (payload->>'score')::int
+            ELSE 0
+        END AS score,
+        COALESCE(payload->>'outcome', '')::text AS outcome,
+        created_at
+    FROM ai_me_approval_event
+    WHERE workspace_id = sqlc.arg('workspace_id')::uuid
+      AND event_type = 'edited'
+      AND payload->>'kind' = 'quality_review'
+    ORDER BY approval_id, created_at DESC, id DESC
+)
+SELECT
+    count(*)::bigint AS reviewed,
+    COALESCE(avg(NULLIF(score, 0)), 0)::float8 AS avg_score,
+    count(*) FILTER (WHERE score >= 4)::bigint AS good,
+    count(*) FILTER (WHERE score BETWEEN 1 AND 2)::bigint AS poor,
+    count(*) FILTER (WHERE outcome = 'accepted')::bigint AS accepted,
+    count(*) FILTER (WHERE outcome = 'needs_retry')::bigint AS needs_retry,
+    count(*) FILTER (WHERE outcome = 'wrong')::bigint AS wrong,
+    max(created_at)::timestamptz AS last_reviewed_at
+FROM latest_quality;
+
 -- name: GetFeishuDogfoodSummary :one
 WITH base AS (
     SELECT
@@ -127,4 +299,13 @@ SELECT
     (SELECT count(*) FROM inbox_item WHERE workspace_id = sqlc.arg('workspace_id')::uuid AND details->>'source_type' = 'feishu')::bigint AS feishu_message_count,
     (SELECT count(*) FROM ai_me_approval WHERE workspace_id = sqlc.arg('workspace_id')::uuid AND source_type = 'feishu')::bigint AS feishu_approval_count,
     (SELECT count(*) FROM ai_me_approval WHERE workspace_id = sqlc.arg('workspace_id')::uuid AND source_type = 'feishu' AND execution_status = 'succeeded')::bigint AS feishu_sent_count,
+    (
+        SELECT count(*)
+        FROM ai_me_approval_event e
+        JOIN ai_me_approval a ON a.id = e.approval_id
+        WHERE e.workspace_id = sqlc.arg('workspace_id')::uuid
+          AND a.source_type = 'feishu'
+          AND e.event_type = 'edited'
+          AND e.payload->>'kind' = 'quality_review'
+    )::bigint AS feishu_quality_review_count,
     (SELECT count(*) FROM memory_entry WHERE workspace_id = sqlc.arg('workspace_id')::uuid AND status = 'active' AND archived_at IS NULL)::bigint AS active_memory_count;

@@ -164,6 +164,42 @@ type AiMeApprovalEvidence struct {
 	CreatedAt    pgtype.Timestamptz `json:"created_at"`
 }
 
+type AiMeFeishuDelivery struct {
+	ID              pgtype.UUID        `json:"id"`
+	WorkspaceID     pgtype.UUID        `json:"workspace_id"`
+	ApprovalID      pgtype.UUID        `json:"approval_id"`
+	SourceMessageID string             `json:"source_message_id"`
+	ReplyMessageID  string             `json:"reply_message_id"`
+	Status          string             `json:"status"`
+	AttemptCount    int32              `json:"attempt_count"`
+	LastError       string             `json:"last_error"`
+	NextRetryAt     pgtype.Timestamptz `json:"next_retry_at"`
+	SentAt          pgtype.Timestamptz `json:"sent_at"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+}
+
+type AiMeFeishuWebhookEvent struct {
+	ID                pgtype.UUID        `json:"id"`
+	WorkspaceID       pgtype.UUID        `json:"workspace_id"`
+	EventKey          string             `json:"event_key"`
+	EventID           string             `json:"event_id"`
+	MessageID         string             `json:"message_id"`
+	EventType         string             `json:"event_type"`
+	Status            string             `json:"status"`
+	Reason            string             `json:"reason"`
+	SignatureVerified bool               `json:"signature_verified"`
+	TokenVerified     bool               `json:"token_verified"`
+	ReplayProtected   bool               `json:"replay_protected"`
+	DuplicateCount    int32              `json:"duplicate_count"`
+	RequestTimestamp  pgtype.Timestamptz `json:"request_timestamp"`
+	RawBodySha256     string             `json:"raw_body_sha256"`
+	InboxItemID       pgtype.UUID        `json:"inbox_item_id"`
+	ApprovalID        pgtype.UUID        `json:"approval_id"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
+}
+
 type Attachment struct {
 	ID           pgtype.UUID        `json:"id"`
 	WorkspaceID  pgtype.UUID        `json:"workspace_id"`
