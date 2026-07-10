@@ -102,6 +102,15 @@ UPDATE ai_me_feishu_webhook_event SET
 WHERE event_key = sqlc.arg('event_key')::text
 RETURNING *;
 
+-- name: ClaimFailedFeishuWebhookEvent :one
+UPDATE ai_me_feishu_webhook_event SET
+    status = 'received',
+    reason = '',
+    updated_at = now()
+WHERE event_key = sqlc.arg('event_key')::text
+  AND status = 'failed'
+RETURNING *;
+
 -- name: UpdateFeishuWebhookEventStatus :one
 UPDATE ai_me_feishu_webhook_event SET
     workspace_id = COALESCE(sqlc.narg('workspace_id')::uuid, workspace_id),

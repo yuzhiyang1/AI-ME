@@ -19,6 +19,20 @@ import (
 	"github.com/multica-ai/multica/server/internal/feishu"
 )
 
+type blockingAIMeModelClient struct{}
+
+func (blockingAIMeModelClient) Configured() bool { return true }
+func (blockingAIMeModelClient) Provider() string { return "fake" }
+func (blockingAIMeModelClient) Model() string    { return "blocking-model" }
+func (blockingAIMeModelClient) Complete(ctx context.Context, _, _ string) (string, error) {
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+func (client blockingAIMeModelClient) CompleteWithUsage(ctx context.Context, systemPrompt, userPrompt string, _ AIModelOptions) (AIModelCompletion, error) {
+	content, err := client.Complete(ctx, systemPrompt, userPrompt)
+	return AIModelCompletion{Content: content}, err
+}
+
 func TestFeishuOwnerMentionedMatchesAllowedOpenID(t *testing.T) {
 	message := feishuMessage{
 		MessageType: "text",
@@ -522,6 +536,117 @@ WHERE event_id = 'evt_ai_me_encrypted_intake_test'
 	}
 	if status != "accepted" || !signatureVerified || !replayProtected {
 		t.Fatalf("encrypted event = status %q signature %v replay %v", status, signatureVerified, replayProtected)
+	}
+}
+
+func TestFeishuWebhookCompletesFallbackAfterRequestCancellation(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("handler test fixture is not available")
+	}
+
+	const messageID = "om_ai_me_cancelled_request_test"
+	ctx := context.Background()
+	cleanupFeishuMessageTestRows(ctx, messageID)
+	origModel := testHandler.AIModel
+	testHandler.AIModel = blockingAIMeModelClient{}
+	t.Cleanup(func() {
+		testHandler.AIModel = origModel
+		cleanupFeishuMessageTestRows(ctx, messageID)
+	})
+
+	t.Setenv("FEISHU_WEBHOOK_TOKEN", "test-token")
+	t.Setenv("FEISHU_ENCRYPT_KEY", "")
+	t.Setenv("FEISHU_WORKSPACE_ID", testWorkspaceID)
+	t.Setenv("FEISHU_WORKSPACE_SLUG", "")
+	t.Setenv("FEISHU_OWNER_USER_ID", testUserID)
+	t.Setenv("FEISHU_ALLOWED_CHAT_ID", "")
+	t.Setenv("FEISHU_GROUP_MESSAGE_POLICY", "mention")
+	t.Setenv("AI_ME_FEISHU_DRAFT_TIMEOUT_MS", "20")
+	payload := feishuEventCallback{
+		Header: feishuHeader{EventID: "evt_ai_me_cancelled_request_test", EventType: "im.message.receive_v1", Token: "test-token"},
+		Event: feishuEventBody{
+			Sender: feishuSender{SenderType: "user", SenderID: feishuSenderID{OpenID: "ou_cancelled_request"}},
+			Message: feishuMessage{
+				MessageID: messageID, ChatID: "oc_cancelled_request", ChatType: "p2p", MessageType: "text", Content: `{"text":"断连后仍需落库"}`,
+			},
+		},
+	}
+
+	req := feishuWebhookRequest(t, payload)
+	cancelledCtx, cancel := context.WithCancel(req.Context())
+	cancel()
+	req = req.WithContext(cancelledCtx)
+	w := httptest.NewRecorder()
+	testHandler.FeishuWebhook(w, req)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("cancelled request status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	var draftSource string
+	if err := testPool.QueryRow(ctx, `SELECT final_payload->>'draft_source' FROM ai_me_approval WHERE source_type = 'feishu' AND source_ref_id = $1`, messageID).Scan(&draftSource); err != nil {
+		t.Fatalf("query fallback approval: %v", err)
+	}
+	if draftSource != "model_error" {
+		t.Fatalf("draft source = %q, want model_error fallback", draftSource)
+	}
+}
+
+func TestFeishuWebhookRetriesPreviouslyFailedEvent(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("handler test fixture is not available")
+	}
+
+	const messageID = "om_ai_me_failed_retry_test"
+	const eventID = "evt_ai_me_failed_retry_test"
+	ctx := context.Background()
+	cleanupFeishuMessageTestRows(ctx, messageID)
+	origModel := testHandler.AIModel
+	testHandler.AIModel = nil
+	t.Cleanup(func() {
+		testHandler.AIModel = origModel
+		cleanupFeishuMessageTestRows(ctx, messageID)
+	})
+	if _, err := testPool.Exec(ctx, `
+INSERT INTO ai_me_feishu_webhook_event (
+    workspace_id, event_key, event_id, message_id, event_type, status, reason, raw_body_sha256
+) VALUES ($1, $2, $2, $3, 'im.message.receive_v1', 'failed', 'context canceled', 'prior-body')
+`, testWorkspaceID, eventID, messageID); err != nil {
+		t.Fatalf("seed failed webhook event: %v", err)
+	}
+
+	t.Setenv("FEISHU_WEBHOOK_TOKEN", "test-token")
+	t.Setenv("FEISHU_ENCRYPT_KEY", "")
+	t.Setenv("FEISHU_WORKSPACE_ID", testWorkspaceID)
+	t.Setenv("FEISHU_WORKSPACE_SLUG", "")
+	t.Setenv("FEISHU_OWNER_USER_ID", testUserID)
+	t.Setenv("FEISHU_ALLOWED_CHAT_ID", "")
+	t.Setenv("FEISHU_GROUP_MESSAGE_POLICY", "mention")
+	payload := feishuEventCallback{
+		Header: feishuHeader{EventID: eventID, EventType: "im.message.receive_v1", Token: "test-token"},
+		Event: feishuEventBody{
+			Sender: feishuSender{SenderType: "user", SenderID: feishuSenderID{OpenID: "ou_failed_retry"}},
+			Message: feishuMessage{
+				MessageID: messageID, ChatID: "oc_failed_retry", ChatType: "p2p", MessageType: "text", Content: `{"text":"失败事件重试"}`,
+			},
+		},
+	}
+
+	w := httptest.NewRecorder()
+	testHandler.FeishuWebhook(w, feishuWebhookRequest(t, payload))
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("failed retry status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	var status string
+	var inboxCount int
+	if err := testPool.QueryRow(ctx, `SELECT status FROM ai_me_feishu_webhook_event WHERE event_id = $1`, eventID).Scan(&status); err != nil {
+		t.Fatalf("query retried webhook event: %v", err)
+	}
+	if err := testPool.QueryRow(ctx, `SELECT count(*) FROM inbox_item WHERE details->>'message_id' = $1`, messageID).Scan(&inboxCount); err != nil {
+		t.Fatalf("count retried inbox item: %v", err)
+	}
+	if status != "accepted" || inboxCount != 1 {
+		t.Fatalf("retried event status = %q, inbox count = %d", status, inboxCount)
 	}
 }
 

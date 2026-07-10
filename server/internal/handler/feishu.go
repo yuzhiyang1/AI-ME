@@ -38,6 +38,8 @@ type feishuEncryptedEnvelope struct {
 	Encrypt string `json:"encrypt"`
 }
 
+const feishuWebhookProcessingTimeout = 10 * time.Second
+
 type feishuHeader struct {
 	EventID    string `json:"event_id"`
 	EventType  string `json:"event_type"`
@@ -1098,6 +1100,17 @@ func int32FromEnv(key string, fallback int32) int32 {
 	return int32(parsed)
 }
 
+func feishuDraftTimeout() time.Duration {
+	milliseconds := int64FromEnv("AI_ME_FEISHU_DRAFT_TIMEOUT_MS", 1200)
+	if milliseconds < 10 {
+		milliseconds = 10
+	}
+	if milliseconds > 5000 {
+		milliseconds = 5000
+	}
+	return time.Duration(milliseconds) * time.Millisecond
+}
+
 func (h *Handler) FeishuWebhook(w http.ResponseWriter, r *http.Request) {
 	config := feishuConfigFromEnv()
 	if config.WebhookToken == "" {
@@ -1171,11 +1184,23 @@ func (h *Handler) FeishuWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	record, duplicate, err := h.recordFeishuWebhookReceived(r.Context(), payload, config, security)
+	processingCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), feishuWebhookProcessingTimeout)
+	defer cancel()
+	record, duplicate, err := h.recordFeishuWebhookReceived(processingCtx, payload, config, security)
 	if err != nil {
 		slog.Warn("飞书事件可靠性记录失败", append(logAttrs, "error", err)...)
 		writeError(w, http.StatusInternalServerError, "failed to record feishu webhook event")
 		return
+	}
+	if duplicate && record.Status == "failed" {
+		record, err = h.Queries.ClaimFailedFeishuWebhookEvent(processingCtx, record.EventKey)
+		if err == nil {
+			duplicate = false
+		} else if !isNotFound(err) {
+			slog.Warn("飞书失败事件重试抢占失败", append(logAttrs, "error", err)...)
+			writeError(w, http.StatusInternalServerError, "failed to claim feishu webhook retry")
+			return
+		}
 	}
 	if duplicate {
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -1186,20 +1211,20 @@ func (h *Handler) FeishuWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := h.ingestFeishuMessage(r.Context(), payload, config, logAttrs)
+	result, err := h.ingestFeishuMessage(processingCtx, payload, config, logAttrs)
 	if err != nil {
 		slog.Warn("飞书消息进入 AI-Me 收件箱失败", append(logAttrs, "error", err)...)
-		h.updateFeishuWebhookEventFromResult(r.Context(), payload, config, "failed", err.Error(), result)
+		h.updateFeishuWebhookEventFromResult(processingCtx, payload, config, "failed", err.Error(), result)
 		writeError(w, http.StatusInternalServerError, "failed to ingest feishu message")
 		return
 	}
 	if result.Status == "ignored" {
-		h.updateFeishuWebhookEventFromResult(r.Context(), payload, config, "ignored", result.Reason, result)
+		h.updateFeishuWebhookEventFromResult(processingCtx, payload, config, "ignored", result.Reason, result)
 		writeJSON(w, http.StatusOK, map[string]string{"status": result.Status, "reason": result.Reason})
 		return
 	}
 	if result.Status == "duplicate" {
-		h.updateFeishuWebhookEventFromResult(r.Context(), payload, config, "duplicate", "message_duplicate", result)
+		h.updateFeishuWebhookEventFromResult(processingCtx, payload, config, "duplicate", "message_duplicate", result)
 		writeJSON(w, http.StatusOK, map[string]any{
 			"status":        result.Status,
 			"inbox_item_id": result.InboxItemID,
@@ -1207,7 +1232,7 @@ func (h *Handler) FeishuWebhook(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	h.updateFeishuWebhookEventFromResult(r.Context(), payload, config, "accepted", "", result)
+	h.updateFeishuWebhookEventFromResult(processingCtx, payload, config, "accepted", "", result)
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"status":        result.Status,
 		"inbox_item_id": result.InboxItemID,
@@ -1506,7 +1531,9 @@ func (h *Handler) generateFeishuReplyDraft(ctx context.Context, workspace db.Wor
 		draft.Error = err.Error()
 		return draft
 	}
-	completion, model, err := completeAIMeModelWithUsage(ctx, h.AIModel, systemPrompt, userPrompt, settings)
+	modelCtx, cancel := context.WithTimeout(ctx, feishuDraftTimeout())
+	defer cancel()
+	completion, model, err := completeAIMeModelWithUsage(modelCtx, h.AIModel, systemPrompt, userPrompt, settings)
 	if err != nil {
 		draft.Source = "model_error"
 		draft.Provider = h.AIModel.Provider()
@@ -1938,7 +1965,7 @@ func (h *Handler) updateFeishuWebhookEventFromResult(ctx context.Context, payloa
 	_, err := h.Queries.UpdateFeishuWebhookEventStatus(ctx, db.UpdateFeishuWebhookEventStatusParams{
 		WorkspaceID: workspaceID,
 		Status:      status,
-		Reason:      pgtype.Text{String: strings.TrimSpace(reason), Valid: strings.TrimSpace(reason) != ""},
+		Reason:      pgtype.Text{String: strings.TrimSpace(reason), Valid: true},
 		InboxItemID: feishuOptionalUUID(result.InboxItemID),
 		ApprovalID:  feishuOptionalUUID(result.ApprovalID),
 		EventKey:    eventKey,

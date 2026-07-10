@@ -78,6 +78,42 @@ func (q *Queries) ClaimDueFeishuDeliveries(ctx context.Context, arg ClaimDueFeis
 	return items, nil
 }
 
+const claimFailedFeishuWebhookEvent = `-- name: ClaimFailedFeishuWebhookEvent :one
+UPDATE ai_me_feishu_webhook_event SET
+    status = 'received',
+    reason = '',
+    updated_at = now()
+WHERE event_key = $1::text
+  AND status = 'failed'
+RETURNING id, workspace_id, event_key, event_id, message_id, event_type, status, reason, signature_verified, token_verified, replay_protected, duplicate_count, request_timestamp, raw_body_sha256, inbox_item_id, approval_id, created_at, updated_at
+`
+
+func (q *Queries) ClaimFailedFeishuWebhookEvent(ctx context.Context, eventKey string) (AiMeFeishuWebhookEvent, error) {
+	row := q.db.QueryRow(ctx, claimFailedFeishuWebhookEvent, eventKey)
+	var i AiMeFeishuWebhookEvent
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.EventKey,
+		&i.EventID,
+		&i.MessageID,
+		&i.EventType,
+		&i.Status,
+		&i.Reason,
+		&i.SignatureVerified,
+		&i.TokenVerified,
+		&i.ReplayProtected,
+		&i.DuplicateCount,
+		&i.RequestTimestamp,
+		&i.RawBodySha256,
+		&i.InboxItemID,
+		&i.ApprovalID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const createFeishuWebhookEvent = `-- name: CreateFeishuWebhookEvent :one
 INSERT INTO ai_me_feishu_webhook_event (
     workspace_id,
