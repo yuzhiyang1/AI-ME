@@ -101,6 +101,14 @@ Codex、Claude Code 等 AI 员工 CLI
 make dev
 ```
 
+Windows PowerShell 可以直接运行：
+
+```powershell
+.\scripts\dev.ps1
+```
+
+该脚本会显式加载仓库根目录 `.env`、确认 PostgreSQL 服务、执行迁移并启动前后端，避免手工 `go run` 误用其他进程环境中的数据库配置。
+
 常用检查：
 
 ```bash

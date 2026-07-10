@@ -379,6 +379,12 @@ WITH base AS (
         a.status AS approval_status,
         a.execution_status,
         a.final_payload,
+        CASE
+            WHEN COALESCE(a.final_payload->>'draft_source', '') <> 'ai_model' THEN 0
+            WHEN a.final_payload#>>'{draft_usage,cost_microusd}' ~ '^\d+$'
+                THEN (a.final_payload#>>'{draft_usage,cost_microusd}')::bigint
+            ELSE $1::bigint * 10000
+        END AS draft_cost_microusd,
         q.quality_score
     FROM inbox_item i
     LEFT JOIN ai_me_approval a
@@ -411,6 +417,10 @@ SELECT
     count(*) FILTER (WHERE execution_status = 'succeeded')::bigint AS sent,
     count(*) FILTER (WHERE execution_status = 'failed')::bigint AS send_failed,
     count(*) FILTER (WHERE final_payload->>'draft_source' = 'ai_model')::bigint AS ai_drafted,
+    count(*) FILTER (
+        WHERE received_at >= date_trunc('day', now())
+          AND final_payload->>'draft_source' = 'ai_model'
+    )::bigint AS draft_call_count_today,
     count(*) FILTER (WHERE quality_score > 0)::bigint AS quality_reviewed,
     COALESCE(avg(NULLIF(quality_score, 0)), 0)::float8 AS avg_quality_score,
     LEAST(count(*) FILTER (
@@ -423,7 +433,8 @@ SELECT
     ), 0)::bigint AS dogfood_remaining,
     min(received_at)::timestamptz AS first_received_at,
     max(received_at)::timestamptz AS last_received_at,
-    (count(*) FILTER (WHERE final_payload->>'draft_source' = 'ai_model') * $1::bigint)::bigint AS estimated_draft_cost_cents
+    COALESCE(sum(draft_cost_microusd) FILTER (WHERE received_at >= date_trunc('day', now())), 0)::bigint AS draft_cost_microusd,
+    CEIL(COALESCE(sum(draft_cost_microusd) FILTER (WHERE received_at >= date_trunc('day', now())), 0)::numeric / 10000)::bigint AS estimated_draft_cost_cents
 FROM base
 `
 
@@ -441,12 +452,14 @@ type GetFeishuDogfoodSummaryRow struct {
 	Sent                    int64              `json:"sent"`
 	SendFailed              int64              `json:"send_failed"`
 	AiDrafted               int64              `json:"ai_drafted"`
+	DraftCallCountToday     int64              `json:"draft_call_count_today"`
 	QualityReviewed         int64              `json:"quality_reviewed"`
 	AvgQualityScore         float64            `json:"avg_quality_score"`
 	DogfoodCompleted        int64              `json:"dogfood_completed"`
 	DogfoodRemaining        int64              `json:"dogfood_remaining"`
 	FirstReceivedAt         pgtype.Timestamptz `json:"first_received_at"`
 	LastReceivedAt          pgtype.Timestamptz `json:"last_received_at"`
+	DraftCostMicrousd       int64              `json:"draft_cost_microusd"`
 	EstimatedDraftCostCents int64              `json:"estimated_draft_cost_cents"`
 }
 
@@ -462,12 +475,14 @@ func (q *Queries) GetFeishuDogfoodSummary(ctx context.Context, arg GetFeishuDogf
 		&i.Sent,
 		&i.SendFailed,
 		&i.AiDrafted,
+		&i.DraftCallCountToday,
 		&i.QualityReviewed,
 		&i.AvgQualityScore,
 		&i.DogfoodCompleted,
 		&i.DogfoodRemaining,
 		&i.FirstReceivedAt,
 		&i.LastReceivedAt,
+		&i.DraftCostMicrousd,
 		&i.EstimatedDraftCostCents,
 	)
 	return i, err
@@ -611,6 +626,10 @@ SELECT
     COALESCE(a.final_payload->>'draft_source', '')::text AS draft_source,
     COALESCE(a.final_payload->>'draft_provider', '')::text AS draft_provider,
     COALESCE(a.final_payload->>'draft_model', '')::text AS draft_model,
+    (CASE WHEN a.final_payload#>>'{draft_usage,input_tokens}' ~ '^\d+$' THEN (a.final_payload#>>'{draft_usage,input_tokens}')::bigint ELSE 0 END)::bigint AS draft_input_tokens,
+    (CASE WHEN a.final_payload#>>'{draft_usage,output_tokens}' ~ '^\d+$' THEN (a.final_payload#>>'{draft_usage,output_tokens}')::bigint ELSE 0 END)::bigint AS draft_output_tokens,
+    (CASE WHEN a.final_payload#>>'{draft_usage,cache_read_tokens}' ~ '^\d+$' THEN (a.final_payload#>>'{draft_usage,cache_read_tokens}')::bigint ELSE 0 END)::bigint AS draft_cache_read_tokens,
+    (CASE WHEN a.final_payload#>>'{draft_usage,cost_microusd}' ~ '^\d+$' THEN (a.final_payload#>>'{draft_usage,cost_microusd}')::bigint ELSE 0 END)::bigint AS draft_cost_microusd,
     COALESCE(q.quality_score, 0)::int AS quality_score,
     COALESCE(q.quality_note, '')::text AS quality_note,
     q.quality_scored_at
@@ -633,36 +652,40 @@ type ListFeishuMessageLogsParams struct {
 }
 
 type ListFeishuMessageLogsRow struct {
-	InboxItemID     pgtype.UUID        `json:"inbox_item_id"`
-	WorkspaceID     pgtype.UUID        `json:"workspace_id"`
-	RecipientID     pgtype.UUID        `json:"recipient_id"`
-	InboxTitle      string             `json:"inbox_title"`
-	InboundText     string             `json:"inbound_text"`
-	Read            bool               `json:"read"`
-	Archived        bool               `json:"archived"`
-	ReceivedAt      pgtype.Timestamptz `json:"received_at"`
-	MessageID       string             `json:"message_id"`
-	EventID         string             `json:"event_id"`
-	ChatID          string             `json:"chat_id"`
-	ChatType        string             `json:"chat_type"`
-	SenderOpenID    string             `json:"sender_open_id"`
-	SenderUserID    string             `json:"sender_user_id"`
-	SenderUnionID   string             `json:"sender_union_id"`
-	GateReason      string             `json:"gate_reason"`
-	ApprovalID      string             `json:"approval_id"`
-	ApprovalStatus  string             `json:"approval_status"`
-	RiskLevel       string             `json:"risk_level"`
-	ExecutionStatus string             `json:"execution_status"`
-	ExecutionError  string             `json:"execution_error"`
-	ApprovedAt      pgtype.Timestamptz `json:"approved_at"`
-	ExecutedAt      pgtype.Timestamptz `json:"executed_at"`
-	ReplyText       string             `json:"reply_text"`
-	DraftSource     string             `json:"draft_source"`
-	DraftProvider   string             `json:"draft_provider"`
-	DraftModel      string             `json:"draft_model"`
-	QualityScore    int32              `json:"quality_score"`
-	QualityNote     string             `json:"quality_note"`
-	QualityScoredAt pgtype.Timestamptz `json:"quality_scored_at"`
+	InboxItemID          pgtype.UUID        `json:"inbox_item_id"`
+	WorkspaceID          pgtype.UUID        `json:"workspace_id"`
+	RecipientID          pgtype.UUID        `json:"recipient_id"`
+	InboxTitle           string             `json:"inbox_title"`
+	InboundText          string             `json:"inbound_text"`
+	Read                 bool               `json:"read"`
+	Archived             bool               `json:"archived"`
+	ReceivedAt           pgtype.Timestamptz `json:"received_at"`
+	MessageID            string             `json:"message_id"`
+	EventID              string             `json:"event_id"`
+	ChatID               string             `json:"chat_id"`
+	ChatType             string             `json:"chat_type"`
+	SenderOpenID         string             `json:"sender_open_id"`
+	SenderUserID         string             `json:"sender_user_id"`
+	SenderUnionID        string             `json:"sender_union_id"`
+	GateReason           string             `json:"gate_reason"`
+	ApprovalID           string             `json:"approval_id"`
+	ApprovalStatus       string             `json:"approval_status"`
+	RiskLevel            string             `json:"risk_level"`
+	ExecutionStatus      string             `json:"execution_status"`
+	ExecutionError       string             `json:"execution_error"`
+	ApprovedAt           pgtype.Timestamptz `json:"approved_at"`
+	ExecutedAt           pgtype.Timestamptz `json:"executed_at"`
+	ReplyText            string             `json:"reply_text"`
+	DraftSource          string             `json:"draft_source"`
+	DraftProvider        string             `json:"draft_provider"`
+	DraftModel           string             `json:"draft_model"`
+	DraftInputTokens     int64              `json:"draft_input_tokens"`
+	DraftOutputTokens    int64              `json:"draft_output_tokens"`
+	DraftCacheReadTokens int64              `json:"draft_cache_read_tokens"`
+	DraftCostMicrousd    int64              `json:"draft_cost_microusd"`
+	QualityScore         int32              `json:"quality_score"`
+	QualityNote          string             `json:"quality_note"`
+	QualityScoredAt      pgtype.Timestamptz `json:"quality_scored_at"`
 }
 
 func (q *Queries) ListFeishuMessageLogs(ctx context.Context, arg ListFeishuMessageLogsParams) ([]ListFeishuMessageLogsRow, error) {
@@ -702,6 +725,10 @@ func (q *Queries) ListFeishuMessageLogs(ctx context.Context, arg ListFeishuMessa
 			&i.DraftSource,
 			&i.DraftProvider,
 			&i.DraftModel,
+			&i.DraftInputTokens,
+			&i.DraftOutputTokens,
+			&i.DraftCacheReadTokens,
+			&i.DraftCostMicrousd,
 			&i.QualityScore,
 			&i.QualityNote,
 			&i.QualityScoredAt,

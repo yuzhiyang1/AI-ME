@@ -147,6 +147,10 @@ export interface FeishuMessageLog {
   draft_source: string;
   draft_provider: string;
   draft_model: string;
+  draft_input_tokens: number;
+  draft_output_tokens: number;
+  draft_cache_read_tokens: number;
+  draft_cost_microusd: number;
   quality_score: number;
   quality_note: string;
   quality_scored_at: string | null;
@@ -174,8 +178,12 @@ export interface AIMeCostControl {
   currency: string;
   draft_call_count: number;
   estimated_draft_cost_cents: number;
+  draft_cost_microusd: number;
   daily_budget_cents: number;
+  daily_budget_microusd: number;
   remaining_budget_cents: number;
+  remaining_budget_microusd: number;
+  budget_configured: boolean;
   budget_status: string;
   worker_task_count: number;
   worker_input_tokens: number;

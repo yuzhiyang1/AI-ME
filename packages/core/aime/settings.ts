@@ -40,7 +40,7 @@ export const DEFAULT_AIME_WORKSPACE_SETTINGS: AIMeWorkspaceSettings = {
     end: "18:00",
   },
   model_provider: "deepseek",
-  model_name: "deepseek-chat",
+  model_name: "deepseek-v4-flash",
   memory_retention_days: 180,
   data_retention_days: 365,
   updated_at: null,

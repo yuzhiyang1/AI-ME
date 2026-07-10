@@ -95,7 +95,7 @@
       },
       "model_name": {
         "label": "Model name",
-        "description": "For example deepseek-chat, gpt-4.1, or claude-sonnet."
+        "description": "For example deepseek-v4-flash, gpt-5-codex, or claude-sonnet-4-6."
       },
       "memory_retention": {
         "label": "Memory retention days",

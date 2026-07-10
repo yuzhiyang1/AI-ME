@@ -169,7 +169,6 @@ func TestFeishuWebhookCreatesAIMeInboxItemAndDeduplicates(t *testing.T) {
 	t.Setenv("FEISHU_OWNER_USER_ID", testUserID)
 	t.Setenv("FEISHU_ALLOWED_CHAT_ID", "")
 	t.Setenv("FEISHU_GROUP_MESSAGE_POLICY", "mention")
-
 	payload := feishuEventCallback{
 		Header: feishuHeader{
 			EventID:   "evt_ai_me_intake_test",
@@ -365,7 +364,6 @@ func TestFeishuWebhookSignedRequestRecordsReliability(t *testing.T) {
 	t.Setenv("FEISHU_OWNER_USER_ID", testUserID)
 	t.Setenv("FEISHU_ALLOWED_CHAT_ID", "")
 	t.Setenv("FEISHU_GROUP_MESSAGE_POLICY", "mention")
-
 	payload := feishuEventCallback{
 		Header: feishuHeader{
 			EventID:   "evt_ai_me_signed_intake_test",
@@ -430,6 +428,11 @@ func TestFeishuWebhookUsesAIMeModelForReplyDraft(t *testing.T) {
 		onComplete: func(_ string, userPrompt string) {
 			capturedPrompt = userPrompt
 		},
+		usage: AIModelUsage{
+			InputTokens:     120,
+			OutputTokens:    30,
+			CacheReadTokens: 40,
+		},
 	}
 	t.Cleanup(func() {
 		testHandler.AIModel = origModel
@@ -442,6 +445,10 @@ func TestFeishuWebhookUsesAIMeModelForReplyDraft(t *testing.T) {
 	t.Setenv("FEISHU_OWNER_USER_ID", testUserID)
 	t.Setenv("FEISHU_ALLOWED_CHAT_ID", "")
 	t.Setenv("FEISHU_GROUP_MESSAGE_POLICY", "mention")
+
+	t.Setenv("AI_ME_LLM_INPUT_PRICE_PER_MILLION_USD", "0.14")
+	t.Setenv("AI_ME_LLM_CACHE_READ_PRICE_PER_MILLION_USD", "0.0028")
+	t.Setenv("AI_ME_LLM_OUTPUT_PRICE_PER_MILLION_USD", "0.28")
 
 	payload := feishuEventCallback{
 		Header: feishuHeader{
@@ -514,6 +521,112 @@ WHERE id = $1
 	}
 	if finalPayload["draft_source"] != "ai_model" || finalPayload["draft_provider"] != "fake" || finalPayload["draft_model"] != "fake-model" {
 		t.Fatalf("final payload draft metadata = %#v", finalPayload)
+	}
+	draftUsage, ok := finalPayload["draft_usage"].(map[string]any)
+	if !ok || draftUsage["input_tokens"] != float64(120) || draftUsage["output_tokens"] != float64(30) || draftUsage["cost_microusd"] != float64(20) {
+		t.Fatalf("final payload draft usage = %#v", finalPayload["draft_usage"])
+	}
+
+	logsReq := newRequest(http.MethodGet, "/api/integrations/feishu/logs?workspace_id="+testWorkspaceID+"&limit=20", nil)
+	logsRecorder := httptest.NewRecorder()
+	testHandler.ListFeishuLogs(logsRecorder, logsReq)
+	if logsRecorder.Code != http.StatusOK {
+		t.Fatalf("ListFeishuLogs: expected 200, got %d: %s", logsRecorder.Code, logsRecorder.Body.String())
+	}
+	var panel FeishuDogfoodPanelResponse
+	if err := json.NewDecoder(logsRecorder.Body).Decode(&panel); err != nil {
+		t.Fatalf("decode panel: %v", err)
+	}
+	var matched *FeishuMessageLogResponse
+	for i := range panel.Logs {
+		if panel.Logs[i].MessageID == messageID {
+			matched = &panel.Logs[i]
+			break
+		}
+	}
+	if matched == nil || matched.DraftInputTokens != 120 || matched.DraftOutputTokens != 30 || matched.DraftCostMicrousd != 20 {
+		t.Fatalf("metered log = %#v", matched)
+	}
+	if panel.Cost.DraftCallCount < 1 || panel.Cost.DraftCostMicrousd < 20 {
+		t.Fatalf("metered cost panel = %+v", panel.Cost)
+	}
+}
+
+func TestFeishuWebhookSkipsModelWhenDailyBudgetIsExhausted(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("handler test fixture is not available")
+	}
+
+	const messageID = "om_ai_me_budget_exhausted_test"
+	ctx := context.Background()
+	cleanupFeishuMessageTestRows(ctx, messageID)
+	modelCalled := false
+	origModel := testHandler.AIModel
+	testHandler.AIModel = fakeAIMeModelClient{
+		content: `{"summary":"should not run","reply_draft":"should not run"}`,
+		onComplete: func(_, _ string) {
+			modelCalled = true
+		},
+	}
+	t.Cleanup(func() {
+		testHandler.AIModel = origModel
+		cleanupFeishuMessageTestRows(ctx, messageID)
+	})
+
+	t.Setenv("FEISHU_WEBHOOK_TOKEN", "test-token")
+	t.Setenv("FEISHU_WORKSPACE_ID", testWorkspaceID)
+	t.Setenv("FEISHU_WORKSPACE_SLUG", "")
+	t.Setenv("FEISHU_OWNER_USER_ID", testUserID)
+	t.Setenv("FEISHU_ALLOWED_CHAT_ID", "")
+	t.Setenv("FEISHU_GROUP_MESSAGE_POLICY", "mention")
+	t.Setenv("AI_ME_DAILY_BUDGET_CENTS", "0")
+
+	payload := feishuEventCallback{
+		Header: feishuHeader{EventID: "evt_ai_me_budget_exhausted_test", EventType: "im.message.receive_v1", Token: "test-token"},
+		Event: feishuEventBody{
+			Sender: feishuSender{SenderType: "user", SenderID: feishuSenderID{OpenID: "ou_budget_colleague"}},
+			Message: feishuMessage{
+				MessageID: messageID, ChatID: "oc_budget_test", ChatType: "p2p", MessageType: "text", Content: `{"text":"预算阻断测试"}`,
+			},
+		},
+	}
+
+	w := httptest.NewRecorder()
+	testHandler.FeishuWebhook(w, feishuWebhookRequest(t, payload))
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("webhook status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if modelCalled {
+		t.Fatal("model should not be called after the explicit daily budget is exhausted")
+	}
+	var draftSource string
+	if err := testPool.QueryRow(ctx, `SELECT final_payload->>'draft_source' FROM ai_me_approval WHERE source_type = 'feishu' AND source_ref_id = $1`, messageID).Scan(&draftSource); err != nil {
+		t.Fatalf("query approval: %v", err)
+	}
+	if draftSource != "budget_exceeded" {
+		t.Fatalf("draft source = %q, want budget_exceeded", draftSource)
+	}
+}
+
+func TestAIMeDailyBudgetRequiresExplicitConfiguration(t *testing.T) {
+	t.Setenv("AI_ME_DAILY_BUDGET_CENTS", "")
+	budget, configured := aimeDailyBudgetCentsConfig()
+	if budget != 200 || configured {
+		t.Fatalf("budget = %d configured = %v, want fallback without configured state", budget, configured)
+	}
+
+	t.Setenv("AI_ME_DAILY_BUDGET_CENTS", "75")
+	budget, configured = aimeDailyBudgetCentsConfig()
+	if budget != 75 || !configured {
+		t.Fatalf("budget = %d configured = %v, want explicit configuration", budget, configured)
+	}
+}
+
+func TestEstimateAIMeModelCostUsesDeepSeekCachePricing(t *testing.T) {
+	usage := AIModelUsage{InputTokens: 120, OutputTokens: 30, CacheReadTokens: 40}
+	got := estimateAIMeModelCostMicrousd("deepseek", "deepseek-v4-flash", usage)
+	if got != 20 {
+		t.Fatalf("cost = %d microusd, want 20", got)
 	}
 }
 
@@ -603,8 +716,8 @@ func TestListFeishuLogsReturnsDogfoodPanel(t *testing.T) {
 	if matchedCase == nil || matchedCase.Stage != "pending_approval" || matchedCase.Completed {
 		t.Fatalf("dogfood case = %#v, want pending approval", matchedCase)
 	}
-	if resp.Onboarding.TotalSteps == 0 || resp.Onboarding.CompletedSteps == 0 {
-		t.Fatalf("onboarding = %+v, want at least configured workspace steps", resp.Onboarding)
+	if resp.Onboarding.TotalSteps != 10 || resp.Onboarding.CompletedSteps == 0 {
+		t.Fatalf("onboarding = %+v, want ten first-closure steps", resp.Onboarding)
 	}
 	if resp.Cost.DailyBudgetCents != 20 || resp.Cost.BudgetStatus == "" {
 		t.Fatalf("cost = %+v, want configured budget", resp.Cost)

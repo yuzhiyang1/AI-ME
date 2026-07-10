@@ -48,7 +48,7 @@ func defaultAIMeWorkspaceSettings() AIMeWorkspaceSettings {
 		Timezone:            "Asia/Shanghai",
 		WorkingHours:        AIMeWorkingHours{Start: "09:00", End: "18:00"},
 		ModelProvider:       "deepseek",
-		ModelName:           "deepseek-chat",
+		ModelName:           deepSeekDefaultModel,
 		MemoryRetentionDays: 180,
 		DataRetentionDays:   365,
 	}
@@ -250,6 +250,20 @@ func completeAIMeModel(ctx context.Context, client AIModelClient, systemPrompt, 
 	}
 	raw, err := client.Complete(ctx, systemPrompt, userPrompt)
 	return raw, client.Model(), err
+}
+
+func completeAIMeModelWithUsage(ctx context.Context, client AIModelClient, systemPrompt, userPrompt string, settings AIMeWorkspaceSettings) (AIModelCompletion, string, error) {
+	options := aimeModelOptionsFromSettings(settings)
+	if metered, ok := client.(AIModelClientWithUsage); ok {
+		completion, err := metered.CompleteWithUsage(ctx, systemPrompt, userPrompt, options)
+		model := client.Model()
+		if configurable, ok := client.(AIModelClientWithOptions); ok {
+			model = configurable.EffectiveModel(options)
+		}
+		return completion, model, err
+	}
+	raw, model, err := completeAIMeModel(ctx, client, systemPrompt, userPrompt, settings)
+	return AIModelCompletion{Content: raw}, model, err
 }
 
 func pickBool(value any, fallback bool) bool {

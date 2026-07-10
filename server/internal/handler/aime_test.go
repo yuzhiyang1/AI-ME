@@ -16,6 +16,7 @@ import (
 type fakeAIMeModelClient struct {
 	content    string
 	onComplete func(systemPrompt, userPrompt string)
+	usage      AIModelUsage
 }
 
 func (f fakeAIMeModelClient) Configured() bool { return true }
@@ -26,6 +27,11 @@ func (f fakeAIMeModelClient) Complete(_ context.Context, systemPrompt, userPromp
 		f.onComplete(systemPrompt, userPrompt)
 	}
 	return f.content, nil
+}
+
+func (f fakeAIMeModelClient) CompleteWithUsage(_ context.Context, systemPrompt, userPrompt string, _ AIModelOptions) (AIModelCompletion, error) {
+	content, err := f.Complete(context.Background(), systemPrompt, userPrompt)
+	return AIModelCompletion{Content: content, Usage: f.usage}, err
 }
 
 func TestParseAIMeDecisionExtractsJSONFromMarkdown(t *testing.T) {
@@ -1334,6 +1340,42 @@ func TestAIModelClientDeepSeekRequestShape(t *testing.T) {
 	}
 	if gotPayload["thinking"].(map[string]any)["type"] != "disabled" {
 		t.Fatalf("thinking = %#v", gotPayload["thinking"])
+	}
+}
+
+func TestAIModelClientReportsTokenUsage(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"choices":[{"message":{"content":"{\"summary\":\"ok\"}"}}],
+			"usage":{
+				"prompt_tokens":120,
+				"completion_tokens":30,
+				"prompt_cache_hit_tokens":40,
+				"prompt_cache_miss_tokens":80
+			}
+		}`))
+	}))
+	t.Cleanup(server.Close)
+
+	client := NewAIModelClient(Config{
+		AIModelProvider: "deepseek",
+		AIModelBaseURL:  server.URL,
+		AIModelAPIKey:   "sk-test",
+	})
+	withUsage, ok := client.(AIModelClientWithUsage)
+	if !ok {
+		t.Fatal("client should expose model usage")
+	}
+	completion, err := withUsage.CompleteWithUsage(context.Background(), "system", "user", AIModelOptions{})
+	if err != nil {
+		t.Fatalf("CompleteWithUsage() error = %v", err)
+	}
+	if completion.Content != `{"summary":"ok"}` {
+		t.Fatalf("content = %q", completion.Content)
+	}
+	if completion.Usage.InputTokens != 120 || completion.Usage.OutputTokens != 30 || completion.Usage.CacheReadTokens != 40 {
+		t.Fatalf("usage = %+v", completion.Usage)
 	}
 }
 

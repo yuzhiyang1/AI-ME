@@ -171,7 +171,13 @@ export function FeishuDogfoodPage() {
               <aside className="flex min-h-0 flex-col gap-4">
                 <ConnectionPanel status={data.status} />
                 <ChecklistPanel checklist={data.checklist} />
-                <OnboardingPanel steps={data.onboarding.steps} />
+                <OnboardingPanel
+                  steps={data.onboarding.steps}
+                  settingsPath={paths.settings()}
+                  agentsPath={paths.agents()}
+                  approvalsPath={paths.approvals()}
+                  feishuPath={paths.feishu()}
+                />
                 <WebhookEventsPanel events={data.events} />
                 <DeliveryListPanel
                   deliveries={data.deliveries}
@@ -371,9 +377,9 @@ function CostPanel({ cost }: { cost: AIMeCostControl }) {
       </div>
       <div className="mt-4 grid grid-cols-2 gap-3">
         <InfoCell label="草稿调用" value={String(cost.draft_call_count)} />
-        <InfoCell label="草稿成本" value={formatMoney(cost.estimated_draft_cost_cents, cost.currency)} />
-        <InfoCell label="日预算" value={formatMoney(cost.daily_budget_cents, cost.currency)} />
-        <InfoCell label="剩余额度" value={formatMoney(cost.remaining_budget_cents, cost.currency)} />
+        <InfoCell label="草稿成本" value={formatMicroMoney(cost.draft_cost_microusd, cost.currency)} />
+        <InfoCell label="日预算" value={cost.budget_configured ? formatMoney(cost.daily_budget_cents, cost.currency) : "未设置"} />
+        <InfoCell label="剩余额度" value={cost.budget_configured ? formatMicroMoney(cost.remaining_budget_microusd, cost.currency) : "待配置"} />
       </div>
       <div className="mt-3 rounded-lg border border-[var(--aime-border)] bg-[var(--aime-surface-subtle)] px-3 py-2">
         <div className="flex items-center justify-between gap-3">
@@ -617,6 +623,11 @@ function LogRow({
               {log.draft_model ? ` / ${log.draft_model}` : ""}
             </span>
           )}
+          {log.draft_input_tokens + log.draft_output_tokens > 0 && (
+            <span className="rounded-md bg-[var(--aime-info-bg)] px-1.5 py-0.5 text-[11px] text-[var(--aime-info)]">
+              {formatNumber(log.draft_input_tokens + log.draft_output_tokens)} Token · {formatMicroMoney(log.draft_cost_microusd, "USD")}
+            </span>
+          )}
           {log.quality_score > 0 ? (
             <span className="rounded-md bg-[var(--aime-success-bg)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--aime-success)]">
               评分 {log.quality_score}/5
@@ -717,7 +728,19 @@ function ChecklistPanel({ checklist }: { checklist: FeishuDogfoodChecklistItem[]
   );
 }
 
-function OnboardingPanel({ steps }: { steps: AIMeOnboardingStep[] }) {
+function OnboardingPanel({
+  steps,
+  settingsPath,
+  agentsPath,
+  approvalsPath,
+  feishuPath,
+}: {
+  steps: AIMeOnboardingStep[];
+  settingsPath: string;
+  agentsPath: string;
+  approvalsPath: string;
+  feishuPath: string;
+}) {
   const completed = steps.filter((step) => step.completed).length;
   return (
     <section className="min-h-0 flex-1 rounded-xl border border-[var(--aime-border)] bg-[var(--aime-surface)] p-4 shadow-[var(--aime-shadow-xs)]">
@@ -742,7 +765,11 @@ function OnboardingPanel({ steps }: { steps: AIMeOnboardingStep[] }) {
           </p>
         ) : (
           steps.map((step) => (
-            <OnboardingStepRow key={step.key} step={step} />
+            <OnboardingStepRow
+              key={step.key}
+              step={step}
+              href={onboardingStepPath(step.key, { settingsPath, agentsPath, approvalsPath, feishuPath })}
+            />
           ))
         )}
       </div>
@@ -848,7 +875,7 @@ function DeliveryListPanel({
   );
 }
 
-function OnboardingStepRow({ step }: { step: AIMeOnboardingStep }) {
+function OnboardingStepRow({ step, href }: { step: AIMeOnboardingStep; href: string }) {
   return (
     <div className="flex gap-3 rounded-lg border border-[var(--aime-border)] px-3 py-3">
       {step.completed ? (
@@ -861,9 +888,27 @@ function OnboardingStepRow({ step }: { step: AIMeOnboardingStep }) {
         <p className="mt-1 text-xs leading-5 text-[var(--aime-text-tertiary)]">
           {step.description}
         </p>
+        {!step.completed && (
+          <AppLink href={href} className="mt-2 inline-flex items-center gap-1 text-xs font-medium text-[var(--aime-brand-600)] hover:underline">
+            去处理
+            <ExternalLink className="size-3" />
+          </AppLink>
+        )}
       </div>
     </div>
   );
+}
+
+function onboardingStepPath(
+  key: string,
+  paths: { settingsPath: string; agentsPath: string; approvalsPath: string; feishuPath: string },
+) {
+  if (key === "llm_configured" || key === "budget_configured") return paths.settingsPath;
+  if (key === "workers_ready") return paths.agentsPath;
+  if (key === "first_approval" || key === "first_reply_sent" || key === "quality_reviewed") {
+    return paths.approvalsPath;
+  }
+  return paths.feishuPath;
 }
 
 function MetricCard({
@@ -924,14 +969,15 @@ function StatusPill({ ready }: { ready: boolean }) {
 }
 
 function BudgetBadge({ status }: { status: string }) {
-  const label = status === "exceeded" ? "已超预算" : status === "warning" ? "接近预算" : "预算正常";
+  const label = status === "exceeded" ? "已超预算" : status === "warning" ? "接近预算" : status === "unconfigured" ? "预算未设置" : "预算正常";
   return (
     <span
       className={cn(
         "rounded-full px-2 py-0.5 text-[11px] font-semibold",
         status === "exceeded" && "bg-[var(--aime-danger-bg)] text-[var(--aime-danger)]",
         status === "warning" && "bg-[var(--aime-warning-bg)] text-[var(--aime-warning)]",
-        status !== "exceeded" && status !== "warning" && "bg-[var(--aime-success-bg)] text-[var(--aime-success)]",
+        status === "unconfigured" && "bg-[var(--aime-surface-muted)] text-[var(--aime-text-tertiary)]",
+        status !== "exceeded" && status !== "warning" && status !== "unconfigured" && "bg-[var(--aime-success-bg)] text-[var(--aime-success)]",
       )}
     >
       {label}
@@ -1070,6 +1116,16 @@ function formatMoney(cents: number, currency: string) {
     style: "currency",
     currency: currency || "USD",
     maximumFractionDigits: amount >= 10 ? 2 : 4,
+  }).format(amount);
+}
+
+function formatMicroMoney(microusd: number, currency: string) {
+  const amount = microusd / 1_000_000;
+  return new Intl.NumberFormat("zh-CN", {
+    style: "currency",
+    currency: currency || "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: amount >= 1 ? 4 : 6,
   }).format(amount);
 }
 

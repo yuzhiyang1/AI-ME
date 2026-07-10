@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"os"
 	"strconv"
@@ -99,36 +100,40 @@ type FeishuIntegrationStatusResponse struct {
 }
 
 type FeishuMessageLogResponse struct {
-	InboxItemID     string  `json:"inbox_item_id"`
-	WorkspaceID     string  `json:"workspace_id"`
-	RecipientID     string  `json:"recipient_id"`
-	InboxTitle      string  `json:"inbox_title"`
-	InboundText     string  `json:"inbound_text"`
-	Read            bool    `json:"read"`
-	Archived        bool    `json:"archived"`
-	ReceivedAt      string  `json:"received_at"`
-	MessageID       string  `json:"message_id"`
-	EventID         string  `json:"event_id"`
-	ChatID          string  `json:"chat_id"`
-	ChatType        string  `json:"chat_type"`
-	SenderOpenID    string  `json:"sender_open_id"`
-	SenderUserID    string  `json:"sender_user_id"`
-	SenderUnionID   string  `json:"sender_union_id"`
-	GateReason      string  `json:"gate_reason"`
-	ApprovalID      string  `json:"approval_id"`
-	ApprovalStatus  string  `json:"approval_status"`
-	RiskLevel       string  `json:"risk_level"`
-	ExecutionStatus string  `json:"execution_status"`
-	ExecutionError  string  `json:"execution_error"`
-	ApprovedAt      *string `json:"approved_at"`
-	ExecutedAt      *string `json:"executed_at"`
-	ReplyText       string  `json:"reply_text"`
-	DraftSource     string  `json:"draft_source"`
-	DraftProvider   string  `json:"draft_provider"`
-	DraftModel      string  `json:"draft_model"`
-	QualityScore    int32   `json:"quality_score"`
-	QualityNote     string  `json:"quality_note"`
-	QualityScoredAt *string `json:"quality_scored_at"`
+	InboxItemID          string  `json:"inbox_item_id"`
+	WorkspaceID          string  `json:"workspace_id"`
+	RecipientID          string  `json:"recipient_id"`
+	InboxTitle           string  `json:"inbox_title"`
+	InboundText          string  `json:"inbound_text"`
+	Read                 bool    `json:"read"`
+	Archived             bool    `json:"archived"`
+	ReceivedAt           string  `json:"received_at"`
+	MessageID            string  `json:"message_id"`
+	EventID              string  `json:"event_id"`
+	ChatID               string  `json:"chat_id"`
+	ChatType             string  `json:"chat_type"`
+	SenderOpenID         string  `json:"sender_open_id"`
+	SenderUserID         string  `json:"sender_user_id"`
+	SenderUnionID        string  `json:"sender_union_id"`
+	GateReason           string  `json:"gate_reason"`
+	ApprovalID           string  `json:"approval_id"`
+	ApprovalStatus       string  `json:"approval_status"`
+	RiskLevel            string  `json:"risk_level"`
+	ExecutionStatus      string  `json:"execution_status"`
+	ExecutionError       string  `json:"execution_error"`
+	ApprovedAt           *string `json:"approved_at"`
+	ExecutedAt           *string `json:"executed_at"`
+	ReplyText            string  `json:"reply_text"`
+	DraftSource          string  `json:"draft_source"`
+	DraftProvider        string  `json:"draft_provider"`
+	DraftModel           string  `json:"draft_model"`
+	DraftInputTokens     int64   `json:"draft_input_tokens"`
+	DraftOutputTokens    int64   `json:"draft_output_tokens"`
+	DraftCacheReadTokens int64   `json:"draft_cache_read_tokens"`
+	DraftCostMicrousd    int64   `json:"draft_cost_microusd"`
+	QualityScore         int32   `json:"quality_score"`
+	QualityNote          string  `json:"quality_note"`
+	QualityScoredAt      *string `json:"quality_scored_at"`
 }
 
 type FeishuDogfoodSummaryResponse struct {
@@ -153,8 +158,12 @@ type AIMeCostControlResponse struct {
 	Currency                string `json:"currency"`
 	DraftCallCount          int64  `json:"draft_call_count"`
 	EstimatedDraftCostCents int64  `json:"estimated_draft_cost_cents"`
+	DraftCostMicrousd       int64  `json:"draft_cost_microusd"`
 	DailyBudgetCents        int64  `json:"daily_budget_cents"`
+	DailyBudgetMicrousd     int64  `json:"daily_budget_microusd"`
 	RemainingBudgetCents    int64  `json:"remaining_budget_cents"`
+	RemainingBudgetMicrousd int64  `json:"remaining_budget_microusd"`
+	BudgetConfigured        bool   `json:"budget_configured"`
 	BudgetStatus            string `json:"budget_status"`
 	WorkerTaskCount         int64  `json:"worker_task_count"`
 	WorkerInputTokens       int64  `json:"worker_input_tokens"`
@@ -556,36 +565,40 @@ func feishuLogsToResponse(rows []db.ListFeishuMessageLogsRow) []FeishuMessageLog
 	resp := make([]FeishuMessageLogResponse, len(rows))
 	for i, row := range rows {
 		resp[i] = FeishuMessageLogResponse{
-			InboxItemID:     uuidToString(row.InboxItemID),
-			WorkspaceID:     uuidToString(row.WorkspaceID),
-			RecipientID:     uuidToString(row.RecipientID),
-			InboxTitle:      row.InboxTitle,
-			InboundText:     row.InboundText,
-			Read:            row.Read,
-			Archived:        row.Archived,
-			ReceivedAt:      timestampToString(row.ReceivedAt),
-			MessageID:       row.MessageID,
-			EventID:         row.EventID,
-			ChatID:          row.ChatID,
-			ChatType:        row.ChatType,
-			SenderOpenID:    row.SenderOpenID,
-			SenderUserID:    row.SenderUserID,
-			SenderUnionID:   row.SenderUnionID,
-			GateReason:      row.GateReason,
-			ApprovalID:      row.ApprovalID,
-			ApprovalStatus:  row.ApprovalStatus,
-			RiskLevel:       row.RiskLevel,
-			ExecutionStatus: row.ExecutionStatus,
-			ExecutionError:  row.ExecutionError,
-			ApprovedAt:      timestampToPtr(row.ApprovedAt),
-			ExecutedAt:      timestampToPtr(row.ExecutedAt),
-			ReplyText:       row.ReplyText,
-			DraftSource:     row.DraftSource,
-			DraftProvider:   row.DraftProvider,
-			DraftModel:      row.DraftModel,
-			QualityScore:    row.QualityScore,
-			QualityNote:     row.QualityNote,
-			QualityScoredAt: timestampToPtr(row.QualityScoredAt),
+			InboxItemID:          uuidToString(row.InboxItemID),
+			WorkspaceID:          uuidToString(row.WorkspaceID),
+			RecipientID:          uuidToString(row.RecipientID),
+			InboxTitle:           row.InboxTitle,
+			InboundText:          row.InboundText,
+			Read:                 row.Read,
+			Archived:             row.Archived,
+			ReceivedAt:           timestampToString(row.ReceivedAt),
+			MessageID:            row.MessageID,
+			EventID:              row.EventID,
+			ChatID:               row.ChatID,
+			ChatType:             row.ChatType,
+			SenderOpenID:         row.SenderOpenID,
+			SenderUserID:         row.SenderUserID,
+			SenderUnionID:        row.SenderUnionID,
+			GateReason:           row.GateReason,
+			ApprovalID:           row.ApprovalID,
+			ApprovalStatus:       row.ApprovalStatus,
+			RiskLevel:            row.RiskLevel,
+			ExecutionStatus:      row.ExecutionStatus,
+			ExecutionError:       row.ExecutionError,
+			ApprovedAt:           timestampToPtr(row.ApprovedAt),
+			ExecutedAt:           timestampToPtr(row.ExecutedAt),
+			ReplyText:            row.ReplyText,
+			DraftSource:          row.DraftSource,
+			DraftProvider:        row.DraftProvider,
+			DraftModel:           row.DraftModel,
+			DraftInputTokens:     row.DraftInputTokens,
+			DraftOutputTokens:    row.DraftOutputTokens,
+			DraftCacheReadTokens: row.DraftCacheReadTokens,
+			DraftCostMicrousd:    row.DraftCostMicrousd,
+			QualityScore:         row.QualityScore,
+			QualityNote:          row.QualityNote,
+			QualityScoredAt:      timestampToPtr(row.QualityScoredAt),
 		}
 	}
 	return resp
@@ -612,24 +625,36 @@ func feishuDogfoodSummaryToResponse(row db.GetFeishuDogfoodSummaryRow) FeishuDog
 }
 
 func aimeCostControlToResponse(summary db.GetFeishuDogfoodSummaryRow, worker db.GetAIMeWorkerUsageSummaryRow) AIMeCostControlResponse {
-	budget := aimeDailyBudgetCentsFromEnv()
-	used := summary.EstimatedDraftCostCents
-	remaining := budget - used
+	budget, configured := aimeDailyBudgetCentsConfig()
+	budgetMicrousd := budget * 10_000
+	usedMicrousd := summary.DraftCostMicrousd
+	remainingMicrousd := budgetMicrousd - usedMicrousd
+	if remainingMicrousd < 0 {
+		remainingMicrousd = 0
+	}
+	remaining := remainingMicrousd / 10_000
 	if remaining < 0 {
 		remaining = 0
 	}
-	status := "ok"
-	if budget > 0 && used >= budget {
+	status := "unconfigured"
+	if configured {
+		status = "ok"
+	}
+	if configured && usedMicrousd >= budgetMicrousd {
 		status = "exceeded"
-	} else if budget > 0 && used*100 >= budget*80 {
+	} else if configured && budgetMicrousd > 0 && usedMicrousd*100 >= budgetMicrousd*80 {
 		status = "warning"
 	}
 	return AIMeCostControlResponse{
 		Currency:                "USD",
-		DraftCallCount:          summary.AiDrafted,
-		EstimatedDraftCostCents: used,
+		DraftCallCount:          summary.DraftCallCountToday,
+		EstimatedDraftCostCents: summary.EstimatedDraftCostCents,
+		DraftCostMicrousd:       usedMicrousd,
 		DailyBudgetCents:        budget,
+		DailyBudgetMicrousd:     budgetMicrousd,
 		RemainingBudgetCents:    remaining,
+		RemainingBudgetMicrousd: remainingMicrousd,
+		BudgetConfigured:        configured,
 		BudgetStatus:            status,
 		WorkerTaskCount:         worker.TaskCount,
 		WorkerInputTokens:       worker.InputTokens,
@@ -681,13 +706,16 @@ func aimeQualitySummaryToResponse(row db.GetAIApprovalQualitySummaryRow) AIMeQua
 
 func buildAIMeModelRoutingResponse(status FeishuIntegrationStatusResponse, cost AIMeCostControlResponse) AIMeModelRoutingResponse {
 	provider := firstNonEmpty(os.Getenv("AI_ME_LLM_PROVIDER"), os.Getenv("AI_MODEL_PROVIDER"), "deepseek")
-	model := firstNonEmpty(os.Getenv("AI_ME_LLM_MODEL"), os.Getenv("AI_MODEL_MODEL"), "deepseek-chat")
+	model := firstNonEmpty(os.Getenv("AI_ME_LLM_MODEL"), os.Getenv("AI_MODEL_MODEL"), deepSeekDefaultModel)
 	actions := make([]string, 0, 4)
 	if !status.OutgoingConfigured {
 		actions = append(actions, "配置 FEISHU_APP_ID / FEISHU_APP_SECRET 后才能发送审批通过的回复")
 	}
 	if !status.SignatureConfigured {
 		actions = append(actions, "配置 FEISHU_ENCRYPT_KEY 以启用飞书 Webhook 签名和重放保护")
+	}
+	if !cost.BudgetConfigured {
+		actions = append(actions, "配置 AI_ME_DAILY_BUDGET_CENTS 后启用真实预算阻断")
 	}
 	if cost.BudgetStatus == "warning" || cost.BudgetStatus == "exceeded" {
 		actions = append(actions, "降低草稿模型成本或提高 AI_ME_DAILY_BUDGET_CENTS")
@@ -934,8 +962,7 @@ func (h *Handler) buildAIMeOnboardingResponse(ctx context.Context, workspaceUUID
 		{Key: "first_approval", Title: "生成第一次审批", Description: "飞书消息已进入 AI 回复审批闭环。", Completed: counts.FeishuApprovalCount > 0},
 		{Key: "first_reply_sent", Title: "完成第一次发送", Description: "审批通过后，AI-Me 已成功通过飞书回复。", Completed: counts.FeishuSentCount > 0},
 		{Key: "quality_reviewed", Title: "完成第一次复盘", Description: "至少为一条 AI-Me 飞书回复打分，留下质量评估。", Completed: counts.FeishuQualityReviewCount > 0},
-		{Key: "budget_configured", Title: "设置每日预算", Description: "配置 AI_ME_DAILY_BUDGET_CENTS，让 AI-Me 有成本边界。", Completed: aimeDailyBudgetCentsFromEnv() > 0},
-		{Key: "dogfood_20", Title: "跑满 20 条真实狗粮", Description: "用真实同事消息验证连续工作稳定性。", Completed: counts.FeishuMessageCount >= 20},
+		{Key: "budget_configured", Title: "设置每日预算", Description: "配置 AI_ME_DAILY_BUDGET_CENTS，让 AI-Me 有成本边界。", Completed: aimeDailyBudgetConfigured()},
 	}
 	completed := 0
 	for _, step := range steps {
@@ -956,7 +983,88 @@ func aimeDraftCostCentsFromEnv() int64 {
 }
 
 func aimeDailyBudgetCentsFromEnv() int64 {
-	return int64FromEnv("AI_ME_DAILY_BUDGET_CENTS", 200)
+	budget, _ := aimeDailyBudgetCentsConfig()
+	return budget
+}
+
+func aimeDailyBudgetCentsConfig() (int64, bool) {
+	value := strings.TrimSpace(os.Getenv("AI_ME_DAILY_BUDGET_CENTS"))
+	if value == "" {
+		return 200, false
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed < 0 {
+		return 200, false
+	}
+	return parsed, true
+}
+
+func aimeDailyBudgetConfigured() bool {
+	_, configured := aimeDailyBudgetCentsConfig()
+	return configured
+}
+
+type aimeModelPricing struct {
+	InputPerMillionUSD     float64
+	CacheReadPerMillionUSD float64
+	OutputPerMillionUSD    float64
+}
+
+func estimateAIMeModelCostMicrousd(provider, model string, usage AIModelUsage) int64 {
+	pricing := aimeModelPricingFor(provider, model)
+	cacheRead := usage.CacheReadTokens
+	if cacheRead > usage.InputTokens {
+		cacheRead = usage.InputTokens
+	}
+	inputMiss := usage.InputTokens - cacheRead
+	cost := float64(inputMiss)*pricing.InputPerMillionUSD +
+		float64(cacheRead)*pricing.CacheReadPerMillionUSD +
+		float64(usage.OutputTokens)*pricing.OutputPerMillionUSD
+	return int64(math.Ceil(cost))
+}
+
+func aimeModelPricingFor(provider, model string) aimeModelPricing {
+	pricing := aimeModelPricing{}
+	if strings.EqualFold(strings.TrimSpace(provider), "deepseek") {
+		switch strings.ToLower(strings.TrimSpace(model)) {
+		case "deepseek-v4-pro":
+			pricing = aimeModelPricing{InputPerMillionUSD: 0.435, CacheReadPerMillionUSD: 0.003625, OutputPerMillionUSD: 0.87}
+		default:
+			pricing = aimeModelPricing{InputPerMillionUSD: 0.14, CacheReadPerMillionUSD: 0.0028, OutputPerMillionUSD: 0.28}
+		}
+	}
+	pricing.InputPerMillionUSD = float64FromEnv("AI_ME_LLM_INPUT_PRICE_PER_MILLION_USD", pricing.InputPerMillionUSD)
+	pricing.CacheReadPerMillionUSD = float64FromEnv("AI_ME_LLM_CACHE_READ_PRICE_PER_MILLION_USD", pricing.CacheReadPerMillionUSD)
+	pricing.OutputPerMillionUSD = float64FromEnv("AI_ME_LLM_OUTPUT_PRICE_PER_MILLION_USD", pricing.OutputPerMillionUSD)
+	return pricing
+}
+
+func float64FromEnv(key string, fallback float64) float64 {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil || parsed < 0 {
+		return fallback
+	}
+	return parsed
+}
+
+func (h *Handler) aimeDraftBudgetExceeded(ctx context.Context, workspaceID pgtype.UUID) bool {
+	budgetCents, configured := aimeDailyBudgetCentsConfig()
+	if !configured {
+		return false
+	}
+	summary, err := h.Queries.GetFeishuDogfoodSummary(ctx, db.GetFeishuDogfoodSummaryParams{
+		WorkspaceID:    workspaceID,
+		DraftCostCents: aimeDraftCostCentsFromEnv(),
+	})
+	if err != nil {
+		slog.Warn("failed to check AI-Me draft budget", "error", err)
+		return false
+	}
+	return summary.DraftCostMicrousd >= budgetCents*10_000
 }
 
 func int64FromEnv(key string, fallback int64) int64 {
@@ -1328,6 +1436,8 @@ type feishuReplyDraft struct {
 	Source           string
 	Provider         string
 	Model            string
+	Usage            AIModelUsage
+	CostMicrousd     int64
 	Error            string
 }
 
@@ -1355,6 +1465,11 @@ func (h *Handler) generateFeishuReplyDraft(ctx context.Context, workspace db.Wor
 		draft.Source = "model_unconfigured"
 		return draft
 	}
+	if h.aimeDraftBudgetExceeded(ctx, workspace.ID) {
+		draft.Source = "budget_exceeded"
+		draft.Error = "AI-Me daily LLM budget is exhausted"
+		return draft
+	}
 	workspaceID := uuidToString(workspace.ID)
 	recipientID := uuidToString(recipient.UserID)
 	policy := buildAIMePolicyContext(settings, time.Now())
@@ -1371,7 +1486,7 @@ func (h *Handler) generateFeishuReplyDraft(ctx context.Context, workspace db.Wor
 		draft.Error = err.Error()
 		return draft
 	}
-	raw, model, err := completeAIMeModel(ctx, h.AIModel, systemPrompt, userPrompt, settings)
+	completion, model, err := completeAIMeModelWithUsage(ctx, h.AIModel, systemPrompt, userPrompt, settings)
 	if err != nil {
 		draft.Source = "model_error"
 		draft.Provider = h.AIModel.Provider()
@@ -1379,7 +1494,7 @@ func (h *Handler) generateFeishuReplyDraft(ctx context.Context, workspace db.Wor
 		draft.Error = err.Error()
 		return draft
 	}
-	decision, ok := parseAIMeDecision(raw)
+	decision, ok := parseAIMeDecision(completion.Content)
 	if !ok || strings.TrimSpace(decision.ReplyDraft) == "" {
 		draft.Source = "model_parse_error"
 		draft.Provider = h.AIModel.Provider()
@@ -1403,6 +1518,8 @@ func (h *Handler) generateFeishuReplyDraft(ctx context.Context, workspace db.Wor
 		Source:           "ai_model",
 		Provider:         h.AIModel.Provider(),
 		Model:            model,
+		Usage:            completion.Usage,
+		CostMicrousd:     estimateAIMeModelCostMicrousd(h.AIModel.Provider(), model, completion.Usage),
 	}
 }
 
@@ -1512,6 +1629,14 @@ func feishuReplyApprovalRequest(item db.InboxItem, payload feishuEventCallback, 
 	}
 	if draft.Model != "" {
 		finalPayload["draft_model"] = draft.Model
+	}
+	if draft.Source == "ai_model" {
+		finalPayload["draft_usage"] = map[string]any{
+			"input_tokens":      draft.Usage.InputTokens,
+			"output_tokens":     draft.Usage.OutputTokens,
+			"cache_read_tokens": draft.Usage.CacheReadTokens,
+			"cost_microusd":     draft.CostMicrousd,
+		}
 	}
 	return CreateAIApprovalRequest{
 		SourceType:         "feishu",

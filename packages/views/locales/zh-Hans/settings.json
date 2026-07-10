@@ -95,7 +95,7 @@
       },
       "model_name": {
         "label": "模型名称",
-        "description": "例如 deepseek-chat、gpt-4.1 或 claude-sonnet。"
+        "description": "例如 deepseek-v4-flash、gpt-5-codex 或 claude-sonnet-4-6。"
       },
       "memory_retention": {
         "label": "记忆保留天数",

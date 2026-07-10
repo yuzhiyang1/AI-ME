@@ -31,10 +31,27 @@ type AIModelOptions struct {
 	Model string
 }
 
+type AIModelUsage struct {
+	InputTokens     int64 `json:"input_tokens"`
+	OutputTokens    int64 `json:"output_tokens"`
+	CacheReadTokens int64 `json:"cache_read_tokens"`
+}
+
+type AIModelCompletion struct {
+	Content string       `json:"content"`
+	Usage   AIModelUsage `json:"usage"`
+}
+
 type AIModelClientWithOptions interface {
 	ConfiguredWithOptions(options AIModelOptions) bool
 	EffectiveModel(options AIModelOptions) string
 	CompleteWithOptions(ctx context.Context, systemPrompt, userPrompt string, options AIModelOptions) (string, error)
+}
+
+// AIModelClientWithUsage preserves provider token accounting without forcing
+// test doubles and alternate clients to change the base AIModelClient contract.
+type AIModelClientWithUsage interface {
+	CompleteWithUsage(ctx context.Context, systemPrompt, userPrompt string, options AIModelOptions) (AIModelCompletion, error)
 }
 
 type openAICompatibleAIModelClient struct {
@@ -108,8 +125,13 @@ func (c *openAICompatibleAIModelClient) Complete(ctx context.Context, systemProm
 }
 
 func (c *openAICompatibleAIModelClient) CompleteWithOptions(ctx context.Context, systemPrompt, userPrompt string, options AIModelOptions) (string, error) {
+	completion, err := c.CompleteWithUsage(ctx, systemPrompt, userPrompt, options)
+	return completion.Content, err
+}
+
+func (c *openAICompatibleAIModelClient) CompleteWithUsage(ctx context.Context, systemPrompt, userPrompt string, options AIModelOptions) (AIModelCompletion, error) {
 	if !c.ConfiguredWithOptions(options) {
-		return "", errors.New("AI-Me LLM is not configured")
+		return AIModelCompletion{}, errors.New("AI-Me LLM is not configured")
 	}
 	model := c.EffectiveModel(options)
 	payload := map[string]any{
@@ -126,11 +148,11 @@ func (c *openAICompatibleAIModelClient) CompleteWithOptions(ctx context.Context,
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return "", err
+		return AIModelCompletion{}, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
-		return "", err
+		return AIModelCompletion{}, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	req.Header.Set("Content-Type", "application/json")
@@ -138,15 +160,15 @@ func (c *openAICompatibleAIModelClient) CompleteWithOptions(ctx context.Context,
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", err
+		return AIModelCompletion{}, err
 	}
 	defer resp.Body.Close()
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if err != nil {
-		return "", err
+		return AIModelCompletion{}, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("LLM request failed with status %d: %s", resp.StatusCode, truncateText(string(respBody), 400))
+		return AIModelCompletion{}, fmt.Errorf("LLM request failed with status %d: %s", resp.StatusCode, truncateText(string(respBody), 400))
 	}
 	var parsed struct {
 		Choices []struct {
@@ -154,14 +176,38 @@ func (c *openAICompatibleAIModelClient) CompleteWithOptions(ctx context.Context,
 				Content string `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
+		Usage struct {
+			PromptTokens          int64 `json:"prompt_tokens"`
+			CompletionTokens      int64 `json:"completion_tokens"`
+			PromptCacheHitTokens  int64 `json:"prompt_cache_hit_tokens"`
+			PromptCacheMissTokens int64 `json:"prompt_cache_miss_tokens"`
+			PromptTokensDetails   struct {
+				CachedTokens int64 `json:"cached_tokens"`
+			} `json:"prompt_tokens_details"`
+		} `json:"usage"`
 	}
 	if err := json.Unmarshal(respBody, &parsed); err != nil {
-		return "", err
+		return AIModelCompletion{}, err
 	}
 	if len(parsed.Choices) == 0 || strings.TrimSpace(parsed.Choices[0].Message.Content) == "" {
-		return "", errors.New("LLM returned no content")
+		return AIModelCompletion{}, errors.New("LLM returned no content")
 	}
-	return parsed.Choices[0].Message.Content, nil
+	cacheReadTokens := parsed.Usage.PromptCacheHitTokens
+	if cacheReadTokens == 0 {
+		cacheReadTokens = parsed.Usage.PromptTokensDetails.CachedTokens
+	}
+	inputTokens := parsed.Usage.PromptTokens
+	if inputTokens == 0 {
+		inputTokens = parsed.Usage.PromptCacheMissTokens + cacheReadTokens
+	}
+	return AIModelCompletion{
+		Content: parsed.Choices[0].Message.Content,
+		Usage: AIModelUsage{
+			InputTokens:     inputTokens,
+			OutputTokens:    parsed.Usage.CompletionTokens,
+			CacheReadTokens: cacheReadTokens,
+		},
+	}, nil
 }
 
 type AIMeThinkRequest struct {
@@ -805,6 +851,8 @@ func buildAIMeSystemPrompt(policy AIMePolicyContext) string {
 - 记忆的 external_use_policy=never 时，不得把该记忆内容写进对外回复。
 - 记忆的 external_use_policy=with_approval 时，任何使用该记忆生成的对外回复都必须 need_approval=true，并在 evidence 中引用对应 memory id。
 - 对外发送、退款、删除、合并、部署、权限、生产数据修改，一律 need_approval=true。
+- 分类、总结、信息提取和回复草稿由 AI-Me 当前低成本模型完成，不要为这些动作分配员工。
+- Codex / Claude Code 仅用于代码修改、仓库操作、调试、测试或其他必须真实执行的复杂任务。
 - 只推荐现有 agents 中的员工，不要编造员工。
 - 如果 type=assign_worker，必须填 target_agent_id，且只能使用 context.agents 中已经存在的 id。
 - 如果信息不足，优先 ask_user，而不是假设事实。

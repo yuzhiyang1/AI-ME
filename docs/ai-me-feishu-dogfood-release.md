@@ -39,11 +39,16 @@ Codex、Claude Code 等高成本工具继续作为可调度员工。AI-ME 自己
 | 变量 | 说明 |
 | --- | --- |
 | `AI_ME_LLM_PROVIDER` | LLM provider 名称，例如 `deepseek` |
-| `AI_ME_LLM_MODEL` | AI-ME 草稿和判断使用的模型 |
+| `AI_ME_LLM_MODEL` | AI-ME 草稿和判断使用的模型，DeepSeek 默认使用 `deepseek-v4-flash` |
 | `AI_ME_LLM_API_KEY` | OpenAI-compatible API key |
 | `DEEPSEEK_API_KEY` | DeepSeek key，可作为本地便捷配置 |
-| `AI_ME_DAILY_BUDGET_CENTS` | 每日预算上限，单位为 cents |
-| `AI_ME_LLM_DRAFT_COST_CENTS` | 单次草稿预估成本，单位为 cents |
+| `AI_ME_DAILY_BUDGET_CENTS` | 每日预算上限，单位为 cents；明确配置后才启用预算阻断 |
+| `AI_ME_LLM_DRAFT_COST_CENTS` | Provider 未返回 Token usage 时的单次草稿兼容估值 |
+| `AI_ME_LLM_INPUT_PRICE_PER_MILLION_USD` | 可选，覆盖每百万未缓存输入 Token 单价 |
+| `AI_ME_LLM_CACHE_READ_PRICE_PER_MILLION_USD` | 可选，覆盖每百万缓存命中 Token 单价 |
+| `AI_ME_LLM_OUTPUT_PRICE_PER_MILLION_USD` | 可选，覆盖每百万输出 Token 单价 |
+
+DeepSeek 草稿会优先使用 API 返回的 Token usage 计算逐条成本；每日预算只统计当天调用，不再把历史累计成本误算进今日预算。内置价格以 DeepSeek 官方模型价格为基准，也可以通过上述变量覆盖。
 
 ### 飞书入站
 
