@@ -3,6 +3,10 @@ package handler
 import (
 	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -405,6 +409,122 @@ WHERE event_id = 'evt_ai_me_signed_intake_test'
 	}
 }
 
+func TestFeishuWebhookDecryptsEncryptedChallenge(t *testing.T) {
+	t.Setenv("FEISHU_WEBHOOK_TOKEN", "test-token")
+	t.Setenv("FEISHU_ENCRYPT_KEY", "encrypt-key")
+
+	payload := feishuEventCallback{
+		Challenge: "challenge-code",
+		Token:     "test-token",
+		Type:      "url_verification",
+	}
+	w := httptest.NewRecorder()
+	(&Handler{}).FeishuWebhook(w, encryptedFeishuWebhookRequest(t, payload, "encrypt-key"))
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("encrypted challenge status = %d, body = %s", w.Code, w.Body.String())
+	}
+	var response map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+		t.Fatalf("decode encrypted challenge response: %v", err)
+	}
+	if response["challenge"] != payload.Challenge {
+		t.Fatalf("challenge = %q, want %q", response["challenge"], payload.Challenge)
+	}
+}
+
+func TestFeishuWebhookRejectsMalformedEncryptedPayload(t *testing.T) {
+	t.Setenv("FEISHU_WEBHOOK_TOKEN", "test-token")
+	t.Setenv("FEISHU_ENCRYPT_KEY", "encrypt-key")
+
+	body := []byte(`{"encrypt":"not-base64"}`)
+	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+	nonce := "malformed-encrypted-nonce"
+	signature := sha256Hex(append([]byte(timestamp+nonce+"encrypt-key"), body...))
+	req := httptest.NewRequest(http.MethodPost, "/api/integrations/feishu/webhook", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Lark-Request-Timestamp", timestamp)
+	req.Header.Set("X-Lark-Request-Nonce", nonce)
+	req.Header.Set("X-Lark-Signature", signature)
+
+	w := httptest.NewRecorder()
+	(&Handler{}).FeishuWebhook(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("malformed encrypted webhook status = %d, body = %s", w.Code, w.Body.String())
+	}
+}
+
+func TestFeishuWebhookDecryptsEncryptedMessage(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("handler test fixture is not available")
+	}
+
+	const messageID = "om_ai_me_encrypted_intake_test"
+	ctx := context.Background()
+	cleanupFeishuMessageTestRows(ctx, messageID)
+	origModel := testHandler.AIModel
+	testHandler.AIModel = nil
+	t.Cleanup(func() {
+		testHandler.AIModel = origModel
+		cleanupFeishuMessageTestRows(ctx, messageID)
+	})
+
+	t.Setenv("FEISHU_WEBHOOK_TOKEN", "test-token")
+	t.Setenv("FEISHU_ENCRYPT_KEY", "encrypt-key")
+	t.Setenv("FEISHU_WORKSPACE_ID", testWorkspaceID)
+	t.Setenv("FEISHU_WORKSPACE_SLUG", "")
+	t.Setenv("FEISHU_OWNER_USER_ID", testUserID)
+	t.Setenv("FEISHU_ALLOWED_CHAT_ID", "")
+	t.Setenv("FEISHU_GROUP_MESSAGE_POLICY", "mention")
+	payload := feishuEventCallback{
+		Header: feishuHeader{
+			EventID:   "evt_ai_me_encrypted_intake_test",
+			EventType: "im.message.receive_v1",
+			Token:     "test-token",
+		},
+		Event: feishuEventBody{
+			Sender: feishuSender{
+				SenderType: "user",
+				SenderID:   feishuSenderID{OpenID: "ou_encrypted", UserID: "u_encrypted"},
+			},
+			Message: feishuMessage{
+				MessageID:   messageID,
+				ChatID:      "oc_encrypted_test",
+				ChatType:    "p2p",
+				MessageType: "text",
+				Content:     `{"text":"加密事件测试"}`,
+			},
+		},
+	}
+
+	w := httptest.NewRecorder()
+	testHandler.FeishuWebhook(w, encryptedFeishuWebhookRequest(t, payload, "encrypt-key"))
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("encrypted webhook status = %d, body = %s", w.Code, w.Body.String())
+	}
+
+	var inboxCount int
+	if err := testPool.QueryRow(ctx, `SELECT count(*) FROM inbox_item WHERE details->>'message_id' = $1`, messageID).Scan(&inboxCount); err != nil {
+		t.Fatalf("count encrypted inbox item: %v", err)
+	}
+	if inboxCount != 1 {
+		t.Fatalf("encrypted webhook created %d inbox items, want 1", inboxCount)
+	}
+
+	var status string
+	var signatureVerified, replayProtected bool
+	if err := testPool.QueryRow(ctx, `
+SELECT status, signature_verified, replay_protected
+FROM ai_me_feishu_webhook_event
+WHERE event_id = 'evt_ai_me_encrypted_intake_test'
+`).Scan(&status, &signatureVerified, &replayProtected); err != nil {
+		t.Fatalf("query encrypted webhook event: %v", err)
+	}
+	if status != "accepted" || !signatureVerified || !replayProtected {
+		t.Fatalf("encrypted event = status %q signature %v replay %v", status, signatureVerified, replayProtected)
+	}
+}
+
 func TestFeishuWebhookUsesAIMeModelForReplyDraft(t *testing.T) {
 	if testHandler == nil {
 		t.Skip("handler test fixture is not available")
@@ -745,6 +865,39 @@ func signedFeishuWebhookRequest(t *testing.T, payload feishuEventCallback, encry
 	}
 	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
 	nonce := "test-nonce"
+	signature := sha256Hex(append([]byte(timestamp+nonce+encryptKey), body...))
+	req := httptest.NewRequest(http.MethodPost, "/api/integrations/feishu/webhook", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Lark-Request-Timestamp", timestamp)
+	req.Header.Set("X-Lark-Request-Nonce", nonce)
+	req.Header.Set("X-Lark-Signature", signature)
+	return req
+}
+
+func encryptedFeishuWebhookRequest(t *testing.T, payload feishuEventCallback, encryptKey string) *http.Request {
+	t.Helper()
+
+	plaintext, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal encrypted webhook payload: %v", err)
+	}
+	key := sha256.Sum256([]byte(encryptKey))
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		t.Fatalf("create webhook cipher: %v", err)
+	}
+	padding := aes.BlockSize - len(plaintext)%aes.BlockSize
+	padded := append(append([]byte{}, plaintext...), bytes.Repeat([]byte{byte(padding)}, padding)...)
+	iv := []byte("0123456789abcdef")
+	ciphertext := make([]byte, len(padded))
+	cipher.NewCBCEncrypter(block, iv).CryptBlocks(ciphertext, padded)
+	encrypted := base64.StdEncoding.EncodeToString(append(append([]byte{}, iv...), ciphertext...))
+	body, err := json.Marshal(map[string]string{"encrypt": encrypted})
+	if err != nil {
+		t.Fatalf("marshal encrypted webhook envelope: %v", err)
+	}
+	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+	nonce := "encrypted-test-nonce"
 	signature := sha256Hex(append([]byte(timestamp+nonce+encryptKey), body...))
 	req := httptest.NewRequest(http.MethodPost, "/api/integrations/feishu/webhook", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")

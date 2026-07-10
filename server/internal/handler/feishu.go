@@ -2,8 +2,11 @@ package handler
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -29,6 +32,10 @@ type feishuEventCallback struct {
 	Type      string          `json:"type"`
 	Header    feishuHeader    `json:"header"`
 	Event     feishuEventBody `json:"event"`
+}
+
+type feishuEncryptedEnvelope struct {
+	Encrypt string `json:"encrypt"`
 }
 
 type feishuHeader struct {
@@ -1105,16 +1112,36 @@ func (h *Handler) FeishuWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var payload feishuEventCallback
-	if err := json.Unmarshal(body, &payload); err != nil {
+	var envelope feishuEncryptedEnvelope
+	if err := json.Unmarshal(body, &envelope); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	security := verifyFeishuWebhookSecurity(r, body, config)
+	if config.EncryptKey != "" && !security.SignatureVerified {
+		var payload feishuEventCallback
+		if strings.TrimSpace(envelope.Encrypt) == "" {
+			_ = json.Unmarshal(body, &payload)
+		}
+		logAttrs := feishuLogAttrs(r, payload)
+		slog.Warn("飞书事件签名校验失败", append(logAttrs, "reason", security.Reason)...)
+		h.recordFeishuWebhookRejected(r.Context(), payload, config, security)
+		writeError(w, http.StatusUnauthorized, "invalid feishu signature")
+		return
+	}
+
+	payload, err := decodeFeishuWebhookPayload(body, envelope, config)
+	if err != nil {
+		security.Reason = "decrypt_failed"
+		slog.Warn("飞书事件解密失败", append(logger.RequestAttrs(r), "reason", security.Reason)...)
+		h.recordFeishuWebhookRejected(r.Context(), feishuEventCallback{}, config, security)
+		writeError(w, http.StatusBadRequest, "invalid encrypted feishu payload")
 		return
 	}
 
 	logAttrs := feishuLogAttrs(r, payload)
 	slog.Info("收到飞书回调", logAttrs...)
-	security := verifyFeishuWebhookSecurity(r, body, config)
-
 	if payload.Challenge != "" {
 		if !secureEqual(firstNonEmpty(payload.Token, payload.Header.Token), config.WebhookToken) {
 			slog.Warn("飞书 Challenge 校验失败", append(logAttrs, "reason", "invalid_token")...)
@@ -1123,13 +1150,6 @@ func (h *Handler) FeishuWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 		slog.Info("飞书 Challenge 校验通过", logAttrs...)
 		writeJSON(w, http.StatusOK, map[string]string{"challenge": payload.Challenge})
-		return
-	}
-
-	if config.EncryptKey != "" && !security.SignatureVerified {
-		slog.Warn("飞书事件签名校验失败", append(logAttrs, "reason", security.Reason)...)
-		h.recordFeishuWebhookRejected(r.Context(), payload, config, security)
-		writeError(w, http.StatusUnauthorized, "invalid feishu signature")
 		return
 	}
 
@@ -1787,6 +1807,56 @@ func verifyFeishuWebhookSecurity(r *http.Request, body []byte, cfg feishuConfig)
 	result.ReplayProtected = true
 	result.Reason = ""
 	return result
+}
+
+func decodeFeishuWebhookPayload(body []byte, envelope feishuEncryptedEnvelope, cfg feishuConfig) (feishuEventCallback, error) {
+	payloadBody := body
+	if encrypted := strings.TrimSpace(envelope.Encrypt); encrypted != "" {
+		if cfg.EncryptKey == "" {
+			return feishuEventCallback{}, fmt.Errorf("feishu encrypt key is not configured")
+		}
+		decrypted, err := decryptFeishuWebhookPayload(encrypted, cfg.EncryptKey)
+		if err != nil {
+			return feishuEventCallback{}, err
+		}
+		payloadBody = decrypted
+	}
+
+	var payload feishuEventCallback
+	if err := json.Unmarshal(payloadBody, &payload); err != nil {
+		return feishuEventCallback{}, fmt.Errorf("decode feishu payload: %w", err)
+	}
+	return payload, nil
+}
+
+func decryptFeishuWebhookPayload(encrypted, encryptKey string) ([]byte, error) {
+	ciphertext, err := base64.StdEncoding.DecodeString(encrypted)
+	if err != nil {
+		return nil, fmt.Errorf("decode feishu ciphertext: %w", err)
+	}
+	if len(ciphertext) <= aes.BlockSize || (len(ciphertext)-aes.BlockSize)%aes.BlockSize != 0 {
+		return nil, fmt.Errorf("invalid feishu ciphertext length")
+	}
+
+	key := sha256.Sum256([]byte(encryptKey))
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		return nil, fmt.Errorf("create feishu cipher: %w", err)
+	}
+	iv := ciphertext[:aes.BlockSize]
+	plaintext := append([]byte(nil), ciphertext[aes.BlockSize:]...)
+	cipher.NewCBCDecrypter(block, iv).CryptBlocks(plaintext, plaintext)
+
+	padding := int(plaintext[len(plaintext)-1])
+	if padding == 0 || padding > aes.BlockSize || padding > len(plaintext) {
+		return nil, fmt.Errorf("invalid feishu payload padding")
+	}
+	for _, value := range plaintext[len(plaintext)-padding:] {
+		if int(value) != padding {
+			return nil, fmt.Errorf("invalid feishu payload padding")
+		}
+	}
+	return plaintext[:len(plaintext)-padding], nil
 }
 
 func sha256Hex(body []byte) string {
