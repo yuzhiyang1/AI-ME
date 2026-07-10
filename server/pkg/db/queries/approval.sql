@@ -42,6 +42,17 @@ SELECT *
 FROM ai_me_approval
 WHERE id = $1 AND workspace_id = $2;
 
+-- name: ClaimAIApprovalExecutionRetry :one
+UPDATE ai_me_approval SET
+    execution_status = 'running',
+    execution_error = '',
+    updated_at = now()
+WHERE id = sqlc.arg('id')::uuid
+  AND workspace_id = sqlc.arg('workspace_id')::uuid
+  AND status = 'approved'
+  AND execution_status = 'failed'
+RETURNING *;
+
 -- name: CreateAIApproval :one
 INSERT INTO ai_me_approval (
     workspace_id,

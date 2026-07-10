@@ -215,6 +215,17 @@ type FeishuDogfoodChecklistItemResponse struct {
 	Completed   bool   `json:"completed"`
 }
 
+type FeishuDogfoodCaseResponse struct {
+	Slot           int32   `json:"slot"`
+	MessageID      string  `json:"message_id"`
+	ApprovalID     string  `json:"approval_id"`
+	Title          string  `json:"title"`
+	Stage          string  `json:"stage"`
+	Completed      bool    `json:"completed"`
+	BlockingReason string  `json:"blocking_reason"`
+	ReceivedAt     *string `json:"received_at"`
+}
+
 type FeishuWebhookEventResponse struct {
 	ID                string  `json:"id"`
 	EventKey          string  `json:"event_key"`
@@ -271,6 +282,7 @@ type FeishuDogfoodPanelResponse struct {
 	ModelRoute  AIMeModelRoutingResponse             `json:"model_route"`
 	Onboarding  AIMeOnboardingResponse               `json:"onboarding"`
 	Checklist   []FeishuDogfoodChecklistItemResponse `json:"checklist"`
+	Cases       []FeishuDogfoodCaseResponse          `json:"cases"`
 	Logs        []FeishuMessageLogResponse           `json:"logs"`
 	Events      []FeishuWebhookEventResponse         `json:"events"`
 	Deliveries  []FeishuDeliveryResponse             `json:"deliveries"`
@@ -356,6 +368,15 @@ func (h *Handler) ListFeishuLogs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to list feishu logs")
 		return
 	}
+	caseRows, err := h.Queries.ListFeishuMessageLogs(r.Context(), db.ListFeishuMessageLogsParams{
+		WorkspaceID: workspaceUUID,
+		Limit:       20,
+		Offset:      0,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load feishu dogfood cases")
+		return
+	}
 	summary, err := h.Queries.GetFeishuDogfoodSummary(r.Context(), db.GetFeishuDogfoodSummaryParams{
 		WorkspaceID:    workspaceUUID,
 		DraftCostCents: aimeDraftCostCentsFromEnv(),
@@ -423,10 +444,81 @@ func (h *Handler) ListFeishuLogs(w http.ResponseWriter, r *http.Request) {
 		ModelRoute:  buildAIMeModelRoutingResponse(status, costResp),
 		Onboarding:  onboarding,
 		Checklist:   buildFeishuDogfoodChecklist(status, summaryResp, reliabilityResp, deliveryResp, qualityResp),
+		Cases:       buildFeishuDogfoodCases(feishuLogsToResponse(caseRows), 20),
 		Logs:        feishuLogsToResponse(logs),
 		Events:      feishuWebhookEventsToResponse(events),
 		Deliveries:  feishuDeliveriesToResponse(deliveries),
 	})
+}
+
+func buildFeishuDogfoodCases(logs []FeishuMessageLogResponse, target int) []FeishuDogfoodCaseResponse {
+	if target <= 0 {
+		return []FeishuDogfoodCaseResponse{}
+	}
+	if len(logs) > target {
+		logs = logs[:target]
+	}
+	ordered := make([]FeishuMessageLogResponse, len(logs))
+	for i := range logs {
+		ordered[len(logs)-1-i] = logs[i]
+	}
+	cases := make([]FeishuDogfoodCaseResponse, target)
+	for i := 0; i < target; i++ {
+		caseResp := FeishuDogfoodCaseResponse{
+			Slot:           int32(i + 1),
+			Title:          "等待真实飞书消息",
+			Stage:          "awaiting_message",
+			BlockingReason: "等待同事从飞书发送真实消息",
+		}
+		if i < len(ordered) {
+			log := ordered[i]
+			stage, completed, blockingReason := feishuDogfoodCaseStatus(log)
+			receivedAt := log.ReceivedAt
+			caseResp = FeishuDogfoodCaseResponse{
+				Slot:           int32(i + 1),
+				MessageID:      log.MessageID,
+				ApprovalID:     log.ApprovalID,
+				Title:          firstNonEmpty(log.InboxTitle, "飞书消息"),
+				Stage:          stage,
+				Completed:      completed,
+				BlockingReason: blockingReason,
+				ReceivedAt:     &receivedAt,
+			}
+		}
+		cases[i] = caseResp
+	}
+	return cases
+}
+
+func feishuDogfoodCaseStatus(log FeishuMessageLogResponse) (string, bool, string) {
+	if log.ApprovalID == "" {
+		return "received", false, "等待 AI-Me 创建审批"
+	}
+	if log.ApprovalStatus == "pending" || log.ApprovalStatus == "observing" {
+		return "pending_approval", false, "等待人工审批"
+	}
+	if log.ApprovalStatus == "rejected" {
+		if log.QualityScore > 0 {
+			return "reviewed", true, ""
+		}
+		return "awaiting_review", false, "已驳回，等待质量复盘"
+	}
+	if log.ExecutionStatus == "failed" {
+		return "send_failed", false, firstNonEmpty(log.ExecutionError, "发送失败，等待自动重试或人工恢复")
+	}
+	if log.ExecutionStatus == "running" {
+		return "sending", false, "飞书回复发送中"
+	}
+	if log.ExecutionStatus == "succeeded" {
+		if log.QualityScore > 0 {
+			return "reviewed", true, ""
+		}
+		return "awaiting_review", false, "发送成功，等待质量复盘"
+	}
+	if log.ApprovalStatus == "approved" {
+		return "awaiting_send", false, "审批已通过，等待发送"
+	}
+	return "received", false, "等待 AI-Me 推进"
 }
 
 func (h *Handler) GetAIMeOnboardingStatus(w http.ResponseWriter, r *http.Request) {
@@ -629,7 +721,7 @@ func buildFeishuDogfoodChecklist(
 		{Key: "approval_created", Title: "生成审批", Description: "AI-Me 已为飞书消息创建可编辑审批。", Completed: summary.ApprovalsCreated > 0},
 		{Key: "edited_or_approved", Title: "完成审批动作", Description: "至少有一条飞书审批被批准或拒绝。", Completed: summary.Sent > 0 || summary.Rejected > 0},
 		{Key: "reply_sent", Title: "发送成功", Description: "审批通过后已通过飞书机器人回复。", Completed: delivery.Succeeded > 0 || summary.Sent > 0},
-		{Key: "retry_observed", Title: "验证失败重试", Description: "发送失败会留下失败原因，并可从审批中心重试。", Completed: delivery.Failed > 0 || delivery.DeadLetter > 0 || delivery.Attempts > delivery.Deliveries},
+		{Key: "retry_observed", Title: "验证失败重试", Description: "发送失败会自动重试，也可从狗粮面板或审批中心人工恢复。", Completed: delivery.Failed > 0 || delivery.DeadLetter > 0 || delivery.Attempts > delivery.Deliveries},
 		{Key: "quality_reviewed", Title: "完成质量复盘", Description: "至少为一条 AI-Me 回复打分并记录复盘意见。", Completed: quality.Reviewed > 0},
 		{Key: "twenty_messages", Title: "跑满 20 条真实狗粮", Description: "用真实飞书消息连续验证 AI-Me 闭环。", Completed: summary.DogfoodCompleted >= summary.DogfoodTarget},
 	}
@@ -677,6 +769,106 @@ func feishuDeliveriesToResponse(rows []db.AiMeFeishuDelivery) []FeishuDeliveryRe
 		}
 	}
 	return resp
+}
+
+// RetryDueFeishuDeliveries claims and retries due Feishu deliveries once.
+// The database claim prevents multiple API nodes from sending the same reply.
+func (h *Handler) RetryDueFeishuDeliveries(ctx context.Context, limit int32) (int, error) {
+	if h.Queries == nil {
+		return 0, fmt.Errorf("database queries are not configured")
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	deliveries, err := h.Queries.ClaimDueFeishuDeliveries(ctx, db.ClaimDueFeishuDeliveriesParams{
+		StaleAfterSeconds: int32FromEnv("AI_ME_FEISHU_SENDING_LEASE_SECONDS", 60),
+		Limit:             limit,
+	})
+	if err != nil {
+		return 0, fmt.Errorf("claim due feishu deliveries: %w", err)
+	}
+	processed := 0
+	for _, delivery := range deliveries {
+		if !delivery.ApprovalID.Valid {
+			slog.Warn("飞书自动重试跳过无审批记录", "delivery_id", uuidToString(delivery.ID))
+			h.releaseClaimedFeishuDelivery(ctx, delivery, "approval is missing")
+			continue
+		}
+		approval, err := h.Queries.GetAIApprovalInWorkspace(ctx, db.GetAIApprovalInWorkspaceParams{
+			ID: delivery.ApprovalID, WorkspaceID: delivery.WorkspaceID,
+		})
+		if err != nil {
+			slog.Warn("飞书自动重试加载审批失败", "delivery_id", uuidToString(delivery.ID), "error", err)
+			h.releaseClaimedFeishuDelivery(ctx, delivery, err.Error())
+			continue
+		}
+		result, err := h.retryAIApprovalExecution(ctx, aiApprovalRetryOptions{
+			WorkspaceID: delivery.WorkspaceID,
+			ApprovalID:  delivery.ApprovalID,
+			ActorType:   "ai_me",
+			ActorID:     approval.RequesterUserID,
+			Note:        "automatic delivery retry",
+			Automatic:   true,
+		})
+		if err != nil {
+			slog.Warn("飞书自动重试执行失败", "delivery_id", uuidToString(delivery.ID), "approval_id", uuidToString(delivery.ApprovalID), "error", err)
+			h.releaseClaimedFeishuDelivery(ctx, delivery, err.Error())
+			continue
+		}
+		processed++
+		h.publishAIApprovalRetryResult(
+			ctx,
+			result,
+			uuidToString(delivery.WorkspaceID),
+			"ai_me",
+			uuidToString(approval.RequesterUserID),
+		)
+	}
+	return processed, nil
+}
+
+// RunFeishuDeliveryRetryScheduler retries due deliveries until the context is cancelled.
+func (h *Handler) RunFeishuDeliveryRetryScheduler(ctx context.Context) {
+	interval := time.Duration(int32FromEnv("AI_ME_FEISHU_RETRY_POLL_SECONDS", 15)) * time.Second
+	if interval < time.Second {
+		interval = time.Second
+	}
+	batchSize := int32FromEnv("AI_ME_FEISHU_RETRY_BATCH_SIZE", 20)
+	retry := func() {
+		processed, err := h.RetryDueFeishuDeliveries(ctx, batchSize)
+		if err != nil && ctx.Err() == nil {
+			slog.Warn("飞书自动重试轮询失败", "error", err)
+			return
+		}
+		if processed > 0 {
+			slog.Info("飞书自动重试已处理", "count", processed)
+		}
+	}
+	retry()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			retry()
+		}
+	}
+}
+
+func (h *Handler) releaseClaimedFeishuDelivery(ctx context.Context, delivery db.AiMeFeishuDelivery, reason string) {
+	_, err := h.Queries.ReleaseClaimedFeishuDelivery(ctx, db.ReleaseClaimedFeishuDeliveryParams{
+		LastError:         truncateText(reason, 800),
+		RetryAfterSeconds: int32FromEnv("AI_ME_FEISHU_RETRY_AFTER_SECONDS", 300),
+		ID:                delivery.ID,
+	})
+	if err != nil && !isNotFound(err) {
+		slog.Warn("飞书自动重试释放发送记录失败", "delivery_id", uuidToString(delivery.ID), "error", err)
+	}
 }
 
 func (h *Handler) recordFeishuDeliverySending(ctx context.Context, approval db.AiMeApproval, messageID string) {

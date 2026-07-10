@@ -11,6 +11,73 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const claimDueFeishuDeliveries = `-- name: ClaimDueFeishuDeliveries :many
+WITH due AS (
+    SELECT d.id
+    FROM ai_me_feishu_delivery d
+    JOIN ai_me_approval a ON a.id = d.approval_id
+    WHERE (
+        (d.status = 'failed' AND d.next_retry_at <= now())
+        OR (
+            d.status = 'sending'
+            AND d.updated_at <= now() - make_interval(secs => $1::int)
+        )
+      )
+      AND a.status = 'approved'
+      AND a.execution_status = 'failed'
+      AND a.action_type = 'send_external_message'
+      AND a.source_type = 'feishu'
+    ORDER BY d.next_retry_at ASC, d.id ASC
+    FOR UPDATE OF d SKIP LOCKED
+    LIMIT $2
+)
+UPDATE ai_me_feishu_delivery d SET
+    status = 'sending',
+    next_retry_at = NULL,
+    updated_at = now()
+FROM due
+WHERE d.id = due.id
+RETURNING d.id, d.workspace_id, d.approval_id, d.source_message_id, d.reply_message_id, d.status, d.attempt_count, d.last_error, d.next_retry_at, d.sent_at, d.created_at, d.updated_at
+`
+
+type ClaimDueFeishuDeliveriesParams struct {
+	StaleAfterSeconds int32 `json:"stale_after_seconds"`
+	Limit             int32 `json:"limit"`
+}
+
+func (q *Queries) ClaimDueFeishuDeliveries(ctx context.Context, arg ClaimDueFeishuDeliveriesParams) ([]AiMeFeishuDelivery, error) {
+	rows, err := q.db.Query(ctx, claimDueFeishuDeliveries, arg.StaleAfterSeconds, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []AiMeFeishuDelivery{}
+	for rows.Next() {
+		var i AiMeFeishuDelivery
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.ApprovalID,
+			&i.SourceMessageID,
+			&i.ReplyMessageID,
+			&i.Status,
+			&i.AttemptCount,
+			&i.LastError,
+			&i.NextRetryAt,
+			&i.SentAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const createFeishuWebhookEvent = `-- name: CreateFeishuWebhookEvent :one
 INSERT INTO ai_me_feishu_webhook_event (
     workspace_id,
@@ -346,8 +413,14 @@ SELECT
     count(*) FILTER (WHERE final_payload->>'draft_source' = 'ai_model')::bigint AS ai_drafted,
     count(*) FILTER (WHERE quality_score > 0)::bigint AS quality_reviewed,
     COALESCE(avg(NULLIF(quality_score, 0)), 0)::float8 AS avg_quality_score,
-    LEAST(count(*), 20)::bigint AS dogfood_completed,
-    GREATEST(20 - count(*), 0)::bigint AS dogfood_remaining,
+    LEAST(count(*) FILTER (
+        WHERE quality_score > 0
+          AND (execution_status = 'succeeded' OR approval_status = 'rejected')
+    ), 20)::bigint AS dogfood_completed,
+    GREATEST(20 - count(*) FILTER (
+        WHERE quality_score > 0
+          AND (execution_status = 'succeeded' OR approval_status = 'rejected')
+    ), 0)::bigint AS dogfood_remaining,
     min(received_at)::timestamptz AS first_received_at,
     max(received_at)::timestamptz AS last_received_at,
     (count(*) FILTER (WHERE final_payload->>'draft_source' = 'ai_model') * $1::bigint)::bigint AS estimated_draft_cost_cents
@@ -806,6 +879,43 @@ func (q *Queries) MarkFeishuWebhookEventDuplicate(ctx context.Context, eventKey 
 		&i.RawBodySha256,
 		&i.InboxItemID,
 		&i.ApprovalID,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const releaseClaimedFeishuDelivery = `-- name: ReleaseClaimedFeishuDelivery :one
+UPDATE ai_me_feishu_delivery SET
+    status = 'failed',
+    last_error = $1::text,
+    next_retry_at = now() + make_interval(secs => $2::int),
+    updated_at = now()
+WHERE id = $3::uuid
+  AND status = 'sending'
+RETURNING id, workspace_id, approval_id, source_message_id, reply_message_id, status, attempt_count, last_error, next_retry_at, sent_at, created_at, updated_at
+`
+
+type ReleaseClaimedFeishuDeliveryParams struct {
+	LastError         string      `json:"last_error"`
+	RetryAfterSeconds int32       `json:"retry_after_seconds"`
+	ID                pgtype.UUID `json:"id"`
+}
+
+func (q *Queries) ReleaseClaimedFeishuDelivery(ctx context.Context, arg ReleaseClaimedFeishuDeliveryParams) (AiMeFeishuDelivery, error) {
+	row := q.db.QueryRow(ctx, releaseClaimedFeishuDelivery, arg.LastError, arg.RetryAfterSeconds, arg.ID)
+	var i AiMeFeishuDelivery
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.ApprovalID,
+		&i.SourceMessageID,
+		&i.ReplyMessageID,
+		&i.Status,
+		&i.AttemptCount,
+		&i.LastError,
+		&i.NextRetryAt,
+		&i.SentAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)

@@ -879,54 +879,100 @@ func (h *Handler) RetryAIApprovalExecution(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	userUUID := parseUUID(userID)
-	tx, err := h.TxStarter.Begin(r.Context())
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to start transaction")
+	result, err := h.retryAIApprovalExecution(r.Context(), aiApprovalRetryOptions{
+		WorkspaceID: workspaceUUID,
+		ApprovalID:  approvalID,
+		ActorType:   "member",
+		ActorID:     userUUID,
+		Note:        "manual retry",
+	})
+	if errors.Is(err, errAIApprovalRetryNotAllowed) {
+		writeError(w, http.StatusConflict, err.Error())
 		return
 	}
-	defer tx.Rollback(r.Context())
-	qtx := h.Queries.WithTx(tx)
-	existing, err := qtx.GetAIApprovalInWorkspace(r.Context(), db.GetAIApprovalInWorkspaceParams{
-		ID: approvalID, WorkspaceID: workspaceUUID,
-	})
-	if err != nil {
+	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "approval not found")
 		return
 	}
-	if existing.Status != "approved" || existing.ExecutionStatus != "failed" {
-		writeError(w, http.StatusConflict, "only failed approved executions can be retried")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to retry approval execution")
 		return
 	}
-	if _, err := createAIApprovalEvent(r.Context(), qtx, existing, "member", userUUID, "execution_started", existing.Status, existing.Status, map[string]any{
+	h.publishAIApprovalRetryResult(r.Context(), result, workspaceID, "member", userID)
+	writeJSON(w, http.StatusOK, aiApprovalToResponse(result.Approval))
+}
+
+var errAIApprovalRetryNotAllowed = errors.New("only failed approved executions can be retried")
+
+type aiApprovalRetryOptions struct {
+	WorkspaceID pgtype.UUID
+	ApprovalID  pgtype.UUID
+	ActorType   string
+	ActorID     pgtype.UUID
+	Note        string
+	Automatic   bool
+}
+
+type aiApprovalRetryResult struct {
+	Approval            db.AiMeApproval
+	Execution           approvedAIActionExecution
+	ApprovalActivity    db.ActivityLog
+	HasApprovalActivity bool
+}
+
+func (h *Handler) retryAIApprovalExecution(ctx context.Context, opts aiApprovalRetryOptions) (aiApprovalRetryResult, error) {
+	tx, err := h.TxStarter.Begin(ctx)
+	if err != nil {
+		return aiApprovalRetryResult{}, fmt.Errorf("start retry transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	qtx := h.Queries.WithTx(tx)
+	existing, err := qtx.ClaimAIApprovalExecutionRetry(ctx, db.ClaimAIApprovalExecutionRetryParams{
+		ID: opts.ApprovalID, WorkspaceID: opts.WorkspaceID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		if _, loadErr := qtx.GetAIApprovalInWorkspace(ctx, db.GetAIApprovalInWorkspaceParams{
+			ID: opts.ApprovalID, WorkspaceID: opts.WorkspaceID,
+		}); loadErr != nil {
+			return aiApprovalRetryResult{}, loadErr
+		}
+		return aiApprovalRetryResult{}, errAIApprovalRetryNotAllowed
+	}
+	if err != nil {
+		return aiApprovalRetryResult{}, err
+	}
+	startPayload := map[string]any{
 		"retry": true,
-		"note":  "manual retry",
-	}); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to create retry event")
-		return
+		"note":  opts.Note,
 	}
-	execution := h.executeApprovedAIActionInSavepoint(r.Context(), tx, existing, workspaceUUID, userUUID, approvalEffectivePayload(existing, nil))
+	if opts.Automatic {
+		startPayload["automatic"] = true
+	}
+	if _, err := createAIApprovalEvent(ctx, qtx, existing, opts.ActorType, opts.ActorID, "execution_started", existing.Status, existing.Status, startPayload); err != nil {
+		return aiApprovalRetryResult{}, fmt.Errorf("create retry event: %w", err)
+	}
+	execution := h.executeApprovedAIActionInSavepoint(ctx, tx, existing, opts.WorkspaceID, opts.ActorID, approvalEffectivePayload(existing, nil))
 	var updated db.AiMeApproval
 	if execution.Status == "succeeded" {
-		updated, err = qtx.MarkAIApprovalExecutionSucceeded(r.Context(), db.MarkAIApprovalExecutionSucceededParams{
+		updated, err = qtx.MarkAIApprovalExecutionSucceeded(ctx, db.MarkAIApprovalExecutionSucceededParams{
 			CreatedIssueID:   execution.CreatedIssueID,
 			CreatedTaskID:    execution.CreatedTaskID,
 			CreatedCommentID: execution.CreatedCommentID,
-			ID:               approvalID,
-			WorkspaceID:      workspaceUUID,
+			ID:               opts.ApprovalID,
+			WorkspaceID:      opts.WorkspaceID,
 		})
 	} else {
 		if execution.Status == "" {
 			execution.Status = "failed"
 		}
-		updated, err = qtx.MarkAIApprovalExecutionFailed(r.Context(), db.MarkAIApprovalExecutionFailedParams{
+		updated, err = qtx.MarkAIApprovalExecutionFailed(ctx, db.MarkAIApprovalExecutionFailedParams{
 			ExecutionError: execution.ExecutionError,
-			ID:             approvalID,
-			WorkspaceID:    workspaceUUID,
+			ID:             opts.ApprovalID,
+			WorkspaceID:    opts.WorkspaceID,
 		})
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to update retry result")
-		return
+		return aiApprovalRetryResult{}, fmt.Errorf("update retry result: %w", err)
 	}
 	executionEventType := "execution_succeeded"
 	if execution.Status == "failed" {
@@ -934,50 +980,63 @@ func (h *Handler) RetryAIApprovalExecution(w http.ResponseWriter, r *http.Reques
 	}
 	payload := approvalExecutionEventPayload(updated, execution)
 	payload["retry"] = true
-	if _, err := createAIApprovalEvent(r.Context(), qtx, updated, "member", userUUID, executionEventType, updated.Status, updated.Status, payload); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to create retry result event")
-		return
+	payload["note"] = opts.Note
+	if opts.Automatic {
+		payload["automatic"] = true
 	}
-	if err := createAIApprovalEvidence(r.Context(), qtx, updated.WorkspaceID, updated.ID, approvalExecutionEvidenceRequest(updated, execution, payload)); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to create retry evidence")
-		return
+	if _, err := createAIApprovalEvent(ctx, qtx, updated, opts.ActorType, opts.ActorID, executionEventType, updated.Status, updated.Status, payload); err != nil {
+		return aiApprovalRetryResult{}, fmt.Errorf("create retry result event: %w", err)
 	}
-	approvalActivity, hasApprovalActivity, err := recordAIApprovalActivity(r.Context(), qtx, updated, userUUID, "ai_me_approval_execution_retried", payload)
+	if err := createAIApprovalEvidence(ctx, qtx, updated.WorkspaceID, updated.ID, approvalExecutionEvidenceRequest(updated, execution, payload)); err != nil {
+		return aiApprovalRetryResult{}, fmt.Errorf("create retry evidence: %w", err)
+	}
+	activityAction := "ai_me_approval_execution_retried"
+	if opts.Automatic {
+		activityAction = "ai_me_approval_execution_auto_retried"
+	}
+	approvalActivity, hasApprovalActivity, err := recordAIApprovalActivity(ctx, qtx, updated, opts.ActorID, activityAction, payload)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to record retry activity")
-		return
+		return aiApprovalRetryResult{}, fmt.Errorf("record retry activity: %w", err)
 	}
-	if err := tx.Commit(r.Context()); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to commit")
-		return
+	if err := tx.Commit(ctx); err != nil {
+		return aiApprovalRetryResult{}, fmt.Errorf("commit retry: %w", err)
 	}
-	resp := aiApprovalToResponse(updated)
+	return aiApprovalRetryResult{
+		Approval:            updated,
+		Execution:           execution,
+		ApprovalActivity:    approvalActivity,
+		HasApprovalActivity: hasApprovalActivity,
+	}, nil
+}
+
+func (h *Handler) publishAIApprovalRetryResult(ctx context.Context, result aiApprovalRetryResult, workspaceID, actorType, actorID string) {
+	execution := result.Execution
+	resp := aiApprovalToResponse(result.Approval)
 	if execution.UpdatedIssue != nil {
-		h.publishApprovalIssueUpdated(r.Context(), *execution.UpdatedIssue, execution.PreviousIssue, workspaceID, userID)
+		h.publishApprovalIssueUpdated(ctx, *execution.UpdatedIssue, execution.PreviousIssue, workspaceID, actorID)
 	}
 	if h.TaskService != nil && len(execution.CancelledTasks) > 0 {
-		h.TaskService.BroadcastCancelledTasks(r.Context(), execution.CancelledTasks)
+		h.TaskService.BroadcastCancelledTasks(ctx, execution.CancelledTasks)
 	}
 	if execution.QueuedTask != nil {
-		h.publishApprovalTaskQueued(r.Context(), *execution.QueuedTask, workspaceID)
+		h.publishApprovalTaskQueued(ctx, *execution.QueuedTask, workspaceID)
 	}
 	if execution.CreatedComment != nil && execution.CommentIssue != nil {
-		h.publishApprovalCommentCreated(*execution.CreatedComment, *execution.CommentIssue, workspaceID, userID)
+		h.publishApprovalCommentCreated(*execution.CreatedComment, *execution.CommentIssue, workspaceID, actorID)
 	}
 	for _, activity := range execution.Activities {
-		h.publishApprovalActivityCreated(activity, workspaceID, userID)
+		h.publishApprovalActivityCreated(activity, workspaceID, actorID)
 	}
-	if hasApprovalActivity {
-		h.publishApprovalActivityCreated(approvalActivity, workspaceID, userID)
+	if result.HasApprovalActivity {
+		h.publishApprovalActivityCreated(result.ApprovalActivity, workspaceID, actorID)
 	}
-	h.publish(protocol.EventApprovalUpdated, workspaceID, "member", userID, map[string]any{"approval": resp})
+	h.publish(protocol.EventApprovalUpdated, workspaceID, actorType, actorID, map[string]any{"approval": resp})
 	if execution.Status == "succeeded" {
-		h.publish(protocol.EventApprovalExecutionSucceeded, workspaceID, "member", userID, map[string]any{"approval": resp})
+		h.publish(protocol.EventApprovalExecutionSucceeded, workspaceID, actorType, actorID, map[string]any{"approval": resp})
 	}
 	if execution.Status == "failed" {
-		h.publish(protocol.EventApprovalExecutionFailed, workspaceID, "member", userID, map[string]any{"approval": resp})
+		h.publish(protocol.EventApprovalExecutionFailed, workspaceID, actorType, actorID, map[string]any{"approval": resp})
 	}
-	writeJSON(w, http.StatusOK, resp)
 }
 
 func (h *Handler) RateAIApproval(w http.ResponseWriter, r *http.Request) {
@@ -1244,13 +1303,20 @@ func (h *Handler) executeApprovalSendExternalMessage(ctx context.Context, approv
 		h.recordFeishuDeliveryFailed(ctx, approval, err)
 		return approvedAIActionExecution{}, err
 	}
-	resp, err := h.Feishu.ReplyText(ctx, messageID, content)
+	resp, err := h.Feishu.ReplyText(ctx, messageID, content, feishuReplyIdempotencyKey(approval, messageID, content))
 	if err != nil {
 		h.recordFeishuDeliveryFailed(ctx, approval, err)
 		return approvedAIActionExecution{}, err
 	}
 	h.recordFeishuDeliverySucceeded(ctx, approval, resp.MessageID)
 	return approvedAIActionExecution{Status: "succeeded"}, nil
+}
+
+func feishuReplyIdempotencyKey(approval db.AiMeApproval, messageID, content string) string {
+	if approvalID := uuidToString(approval.ID); approvalID != "" {
+		return approvalID
+	}
+	return "aime-" + sha256Hex([]byte(messageID + "\n" + content))[:45]
 }
 
 func (h *Handler) executeApprovalComment(ctx context.Context, q *db.Queries, approval db.AiMeApproval, workspaceID, userID pgtype.UUID, payload []byte) (approvedAIActionExecution, error) {

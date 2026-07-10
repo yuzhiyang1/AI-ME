@@ -30,11 +30,12 @@ func TestExecuteApprovalSendExternalMessageSendsFeishuReply(t *testing.T) {
 			var body struct {
 				MsgType string `json:"msg_type"`
 				Content string `json:"content"`
+				UUID    string `json:"uuid"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Fatalf("decode reply body: %v", err)
 			}
-			if body.MsgType != "text" || body.Content == "" {
+			if body.MsgType != "text" || body.Content == "" || body.UUID == "" {
 				t.Fatalf("unexpected reply body: %+v", body)
 			}
 			sawReply = true
@@ -223,6 +224,188 @@ func TestRetryAIApprovalExecutionRetriesFailedFeishuSend(t *testing.T) {
 	}
 	if retryEvents < 2 {
 		t.Fatalf("retry events = %d, want start and result", retryEvents)
+	}
+}
+
+func TestRetryDueFeishuDeliveriesAutomaticallyRecoversFailedSend(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("handler test fixture is not available")
+	}
+
+	const messageID = "om_ai_me_auto_retry_test"
+	ctx := context.Background()
+	cleanupFeishuMessageTestRows(ctx, messageID)
+	origFeishu := testHandler.Feishu
+	testHandler.Feishu = nil
+	t.Setenv("AI_ME_FEISHU_SEND_MAX_ATTEMPTS", "3")
+	t.Cleanup(func() {
+		testHandler.Feishu = origFeishu
+		cleanupFeishuMessageTestRows(ctx, messageID)
+	})
+
+	createReq := newRequest("POST", "/api/ai-me/approvals?workspace_id="+testWorkspaceID, CreateAIApprovalRequest{
+		SourceType:         "feishu",
+		SourceRefID:        messageID,
+		Title:              "自动重试飞书回复",
+		Summary:            "测试到期发送自动恢复。",
+		RiskLevel:          "high",
+		Reversibility:      "irreversible",
+		ActionType:         "send_external_message",
+		ActionTitle:        "回复飞书消息",
+		ActionDescription:  "批准后通过飞书回复。",
+		OriginalPayload:    map[string]any{"channel": "feishu", "message_id": messageID, "text": "收到。"},
+		FinalPayload:       map[string]any{"channel": "feishu", "message_id": messageID, "text": "自动重试已恢复。"},
+		AIReasoningSummary: "外部发送动作必须先审批。",
+	})
+	w := httptest.NewRecorder()
+	testHandler.CreateAIApproval(w, createReq)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateAIApproval: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var approval AIApprovalResponse
+	if err := json.NewDecoder(w.Body).Decode(&approval); err != nil {
+		t.Fatalf("decode approval: %v", err)
+	}
+
+	approveReq := withURLParam(
+		newRequest("POST", "/api/ai-me/approvals/"+approval.ID+"/approve?workspace_id="+testWorkspaceID, AIApprovalTransitionRequest{Note: "允许发送"}),
+		"id",
+		approval.ID,
+	)
+	w = httptest.NewRecorder()
+	testHandler.ApproveAIApproval(w, approveReq)
+	if w.Code != http.StatusOK {
+		t.Fatalf("ApproveAIApproval: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if _, err := testPool.Exec(ctx, `
+		UPDATE ai_me_feishu_delivery
+		SET next_retry_at = now() - interval '1 second'
+		WHERE approval_id = $1
+	`, approval.ID); err != nil {
+		t.Fatalf("make delivery due: %v", err)
+	}
+
+	var sentText string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/auth/v3/tenant_access_token/internal":
+			_, _ = w.Write([]byte(`{"code":0,"msg":"ok","tenant_access_token":"tenant-token","expire":3600}`))
+		case "/im/v1/messages/" + messageID + "/reply":
+			var body struct {
+				Content string `json:"content"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode feishu body: %v", err)
+			}
+			var content struct {
+				Text string `json:"text"`
+			}
+			if err := json.Unmarshal([]byte(body.Content), &content); err != nil {
+				t.Fatalf("decode feishu content: %v", err)
+			}
+			sentText = content.Text
+			_, _ = w.Write([]byte(`{"code":0,"msg":"ok","data":{"message_id":"om_auto_retry_sent"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	testHandler.Feishu = feishu.NewClient(feishu.Config{
+		AppID:      "app",
+		AppSecret:  "secret",
+		BaseURL:    server.URL,
+		HTTPClient: server.Client(),
+	})
+
+	processed, err := testHandler.RetryDueFeishuDeliveries(ctx, 10)
+	if err != nil {
+		t.Fatalf("RetryDueFeishuDeliveries: %v", err)
+	}
+	if processed != 1 || sentText != "自动重试已恢复。" {
+		t.Fatalf("processed=%d sentText=%q, want one recovered delivery", processed, sentText)
+	}
+
+	var deliveryStatus, executionStatus string
+	var automaticEvents int
+	if err := testPool.QueryRow(ctx, `
+		SELECT d.status, a.execution_status,
+		       (SELECT count(*) FROM ai_me_approval_event e
+		        WHERE e.approval_id = a.id
+		          AND e.actor_type = 'ai_me'
+		          AND e.payload->>'automatic' = 'true')
+		FROM ai_me_feishu_delivery d
+		JOIN ai_me_approval a ON a.id = d.approval_id
+		WHERE d.approval_id = $1
+	`, approval.ID).Scan(&deliveryStatus, &executionStatus, &automaticEvents); err != nil {
+		t.Fatalf("load automatic retry result: %v", err)
+	}
+	if deliveryStatus != "succeeded" || executionStatus != "succeeded" || automaticEvents < 2 {
+		t.Fatalf("delivery=%s approval=%s automatic_events=%d", deliveryStatus, executionStatus, automaticEvents)
+	}
+}
+
+func TestRetryDueFeishuDeliveriesLeavesDeadLettersForManualRecovery(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("handler test fixture is not available")
+	}
+
+	const messageID = "om_ai_me_dead_letter_test"
+	ctx := context.Background()
+	cleanupFeishuMessageTestRows(ctx, messageID)
+	t.Cleanup(func() { cleanupFeishuMessageTestRows(ctx, messageID) })
+
+	createReq := newRequest("POST", "/api/ai-me/approvals?workspace_id="+testWorkspaceID, CreateAIApprovalRequest{
+		SourceType:         "feishu",
+		SourceRefID:        messageID,
+		Title:              "死信人工恢复",
+		Summary:            "死信不得继续自动发送。",
+		RiskLevel:          "high",
+		Reversibility:      "irreversible",
+		ActionType:         "send_external_message",
+		ActionTitle:        "回复飞书消息",
+		ActionDescription:  "批准后通过飞书回复。",
+		OriginalPayload:    map[string]any{"channel": "feishu", "message_id": messageID, "text": "收到。"},
+		FinalPayload:       map[string]any{"channel": "feishu", "message_id": messageID, "text": "需要人工恢复。"},
+		AIReasoningSummary: "超过自动重试上限后转入死信。",
+	})
+	w := httptest.NewRecorder()
+	testHandler.CreateAIApproval(w, createReq)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateAIApproval: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var approval AIApprovalResponse
+	if err := json.NewDecoder(w.Body).Decode(&approval); err != nil {
+		t.Fatalf("decode approval: %v", err)
+	}
+	if _, err := testPool.Exec(ctx, `
+		UPDATE ai_me_approval
+		SET status = 'approved', execution_status = 'failed', execution_error = 'retry limit reached'
+		WHERE id = $1
+	`, approval.ID); err != nil {
+		t.Fatalf("prepare failed approval: %v", err)
+	}
+	if _, err := testPool.Exec(ctx, `
+		INSERT INTO ai_me_feishu_delivery (
+			workspace_id, approval_id, source_message_id, status, attempt_count, last_error
+		) VALUES ($2, $1, $3, 'dead_letter', 3, 'retry limit reached')
+	`, approval.ID, testWorkspaceID, messageID); err != nil {
+		t.Fatalf("prepare dead letter: %v", err)
+	}
+
+	processed, err := testHandler.RetryDueFeishuDeliveries(ctx, 10)
+	if err != nil {
+		t.Fatalf("RetryDueFeishuDeliveries: %v", err)
+	}
+	if processed != 0 {
+		t.Fatalf("processed=%d, want dead letter to require manual recovery", processed)
+	}
+	var status string
+	if err := testPool.QueryRow(ctx, `SELECT status FROM ai_me_feishu_delivery WHERE approval_id = $1`, approval.ID).Scan(&status); err != nil {
+		t.Fatalf("load dead letter: %v", err)
+	}
+	if status != "dead_letter" {
+		t.Fatalf("delivery status=%q, want dead_letter", status)
 	}
 }
 

@@ -1,6 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
+import { toast } from "sonner";
 import {
   AlertCircle,
   CheckCircle2,
@@ -17,6 +18,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { feishuDogfoodPanelOptions } from "@multica/core/aime";
+import { useRetryAIApprovalExecution } from "@multica/core/approvals";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { useWorkspacePaths } from "@multica/core/paths";
 import type {
@@ -26,6 +28,7 @@ import type {
   AIMeQualitySummary,
   FeishuDelivery,
   FeishuDeliverySummary,
+  FeishuDogfoodCase,
   FeishuDogfoodChecklistItem,
   FeishuIntegrationStatus,
   FeishuMessageLog,
@@ -45,12 +48,23 @@ export function FeishuDogfoodPage() {
   const wsId = useWorkspaceId();
   const paths = useWorkspacePaths();
   const panelQuery = useQuery(feishuDogfoodPanelOptions(wsId, PANEL_PARAMS));
+  const retryApprovalExecution = useRetryAIApprovalExecution();
   const data = panelQuery.data;
   const summary = data?.summary;
   const progress = summary
     ? percentage(summary.dogfood_completed, summary.dogfood_target)
     : 0;
   const connectionReady = data?.status.incoming_configured && data.status.outgoing_configured;
+
+  const retryDelivery = async (delivery: FeishuDelivery) => {
+    if (!delivery.approval_id || retryApprovalExecution.isPending) return;
+    try {
+      await retryApprovalExecution.mutateAsync({ id: delivery.approval_id });
+      toast.success(delivery.status === "dead_letter" ? "死信已恢复并重新发送" : "已立即重试飞书发送");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "飞书发送重试失败");
+    }
+  };
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-[var(--aime-bg)] text-[var(--aime-text)]">
@@ -146,6 +160,8 @@ export function FeishuDogfoodPage() {
 
             <ModelRoutePanel route={data.model_route} />
 
+            <DogfoodCasesPanel cases={data.cases} />
+
             <section className="grid min-h-[560px] flex-1 gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
               <LogsPanel
                 logs={data.logs}
@@ -157,7 +173,11 @@ export function FeishuDogfoodPage() {
                 <ChecklistPanel checklist={data.checklist} />
                 <OnboardingPanel steps={data.onboarding.steps} />
                 <WebhookEventsPanel events={data.events} />
-                <DeliveryListPanel deliveries={data.deliveries} />
+                <DeliveryListPanel
+                  deliveries={data.deliveries}
+                  retryingApprovalId={retryApprovalExecution.isPending ? retryApprovalExecution.variables?.id ?? null : null}
+                  onRetry={retryDelivery}
+                />
               </aside>
             </section>
           </>
@@ -225,7 +245,7 @@ function ProgressPanel({
         <div>
           <h2 className="text-sm font-semibold">真实狗粮 20 条</h2>
           <p className="mt-1 text-xs leading-5 text-[var(--aime-text-tertiary)]">
-            只统计真实飞书消息，不把系统内手动测试混进去。
+            真实消息完成发送或驳回，并记录质量复盘后才计入进度。
           </p>
         </div>
         <div className="text-right">
@@ -250,6 +270,83 @@ function ProgressPanel({
       </p>
     </section>
   );
+}
+
+function DogfoodCasesPanel({ cases }: { cases: FeishuDogfoodCase[] }) {
+  const completed = cases.filter((item) => item.completed).length;
+  return (
+    <section className="shrink-0 overflow-hidden rounded-xl border border-[var(--aime-border)] bg-[var(--aime-surface)] shadow-[var(--aime-shadow-xs)]">
+      <div className="flex min-h-12 flex-wrap items-center justify-between gap-3 border-b border-[var(--aime-border)] px-4 py-3">
+        <div>
+          <h2 className="text-sm font-semibold">20 条真实狗粮用例</h2>
+          <p className="mt-0.5 text-xs text-[var(--aime-text-tertiary)]">逐条核对接收、审批、发送和质量复盘，未闭环项会显示当前阻塞点。</p>
+        </div>
+        <span className="font-mono text-xs font-semibold tabular-nums text-[var(--aime-text-tertiary)]">{completed}/{cases.length || 20}</span>
+      </div>
+      <div className="grid md:grid-cols-2">
+        {(cases.length > 0 ? cases : emptyDogfoodCases()).map((item, index) => (
+          <div
+            key={`${item.slot}-${item.message_id || "empty"}`}
+            className={cn(
+              "grid min-h-16 grid-cols-[36px_minmax(0,1fr)_auto] items-center gap-3 border-b border-[var(--aime-border)] px-4 py-2.5",
+              index % 2 === 0 && "md:border-r",
+            )}
+          >
+            <span className="font-mono text-xs font-semibold tabular-nums text-[var(--aime-text-tertiary)]">
+              {String(item.slot).padStart(2, "0")}
+            </span>
+            <div className="min-w-0">
+              <p className="truncate text-xs font-semibold">{item.title || "等待真实飞书消息"}</p>
+              <p className={cn(
+                "mt-1 truncate text-[11px] text-[var(--aime-text-tertiary)]",
+                item.stage === "send_failed" && "text-[var(--aime-danger)]",
+              )}>
+                {item.blocking_reason || (item.completed ? "已完成闭环" : "等待推进")}
+              </p>
+            </div>
+            <CaseStageBadge stage={item.stage} completed={item.completed} />
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function CaseStageBadge({ stage, completed }: { stage: string; completed: boolean }) {
+  const labels: Record<string, string> = {
+    awaiting_message: "待消息",
+    received: "已接收",
+    pending_approval: "待审批",
+    awaiting_send: "待发送",
+    sending: "发送中",
+    send_failed: "发送失败",
+    awaiting_review: "待复盘",
+    reviewed: "已闭环",
+  };
+  return (
+    <span className={cn(
+      "inline-flex shrink-0 rounded-full px-2 py-0.5 text-[11px] font-semibold",
+      completed && "bg-[var(--aime-success-bg)] text-[var(--aime-success)]",
+      !completed && stage === "send_failed" && "bg-[var(--aime-danger-bg)] text-[var(--aime-danger)]",
+      !completed && stage !== "send_failed" && stage !== "awaiting_message" && "bg-[var(--aime-warning-bg)] text-[var(--aime-warning)]",
+      stage === "awaiting_message" && "bg-[var(--aime-surface-muted)] text-[var(--aime-text-tertiary)]",
+    )}>
+      {labels[stage] ?? stage ?? "未知"}
+    </span>
+  );
+}
+
+function emptyDogfoodCases(): FeishuDogfoodCase[] {
+  return Array.from({ length: 20 }, (_, index) => ({
+    slot: index + 1,
+    message_id: "",
+    approval_id: "",
+    title: "等待真实飞书消息",
+    stage: "awaiting_message",
+    completed: false,
+    blocking_reason: "等待同事从飞书发送真实消息",
+    received_at: null,
+  }));
 }
 
 function CostPanel({ cost }: { cost: AIMeCostControl }) {
@@ -338,7 +435,7 @@ function DeliveryPanel({ delivery }: { delivery: FeishuDeliverySummary }) {
         <InfoCell label="发送记录" value={String(delivery.deliveries)} />
         <InfoCell label="总尝试" value={String(delivery.attempts)} />
         <InfoCell label="成功" value={String(delivery.succeeded)} />
-        <InfoCell label="重试中" value={String(delivery.failed)} tone={delivery.failed > 0 ? "danger" : "neutral"} />
+        <InfoCell label="待重试 / 发送中" value={`${delivery.failed} / ${delivery.sending}`} tone={delivery.failed > 0 ? "danger" : "neutral"} />
         <InfoCell label="死信" value={String(delivery.dead_letter)} tone={delivery.dead_letter > 0 ? "danger" : "neutral"} />
         <InfoCell label="最近发送" value={delivery.last_delivery_at ? formatDateTime(delivery.last_delivery_at) : "暂无"} />
       </div>
@@ -688,7 +785,15 @@ function WebhookEventsPanel({ events }: { events: FeishuWebhookEvent[] }) {
   );
 }
 
-function DeliveryListPanel({ deliveries }: { deliveries: FeishuDelivery[] }) {
+function DeliveryListPanel({
+  deliveries,
+  retryingApprovalId,
+  onRetry,
+}: {
+  deliveries: FeishuDelivery[];
+  retryingApprovalId: string | null;
+  onRetry: (delivery: FeishuDelivery) => Promise<void>;
+}) {
   return (
     <section className="rounded-xl border border-[var(--aime-border)] bg-[var(--aime-surface)] p-4 shadow-[var(--aime-shadow-xs)]">
       <div className="flex items-center justify-between gap-3">
@@ -701,7 +806,10 @@ function DeliveryListPanel({ deliveries }: { deliveries: FeishuDelivery[] }) {
             暂无发送尝试。
           </p>
         ) : (
-          deliveries.slice(0, 6).map((delivery) => (
+          deliveries.slice(0, 6).map((delivery) => {
+            const canRetry = (delivery.status === "failed" || delivery.status === "dead_letter") && !!delivery.approval_id;
+            const isRetrying = retryingApprovalId === delivery.approval_id;
+            return (
             <div key={delivery.id} className="rounded-lg border border-[var(--aime-border)] px-3 py-2">
               <div className="flex items-center justify-between gap-2">
                 <span className="truncate font-mono text-[11px] text-[var(--aime-text-tertiary)]">
@@ -715,8 +823,25 @@ function DeliveryListPanel({ deliveries }: { deliveries: FeishuDelivery[] }) {
               {delivery.last_error && (
                 <p className="mt-1 line-clamp-2 text-[11px] leading-5 text-[var(--aime-danger)]">{delivery.last_error}</p>
               )}
+              {delivery.status === "failed" && delivery.next_retry_at && (
+                <p className="mt-1 text-[11px] text-[var(--aime-text-tertiary)]">自动重试：{formatDateTime(delivery.next_retry_at)}</p>
+              )}
+              {canRetry && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="mt-2 h-7 w-full text-xs"
+                  disabled={isRetrying}
+                  onClick={() => void onRetry(delivery)}
+                >
+                  <RefreshCcw className={cn("size-3.5", isRetrying && "animate-spin")} />
+                  {delivery.status === "dead_letter" ? "恢复并重发" : "立即重试"}
+                </Button>
+              )}
             </div>
-          ))
+            );
+          })
         )}
       </div>
     </section>

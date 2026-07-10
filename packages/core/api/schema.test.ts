@@ -117,6 +117,15 @@ describe("ApiClient schema fallback", () => {
       expect(res).toEqual({ issues: [] });
     });
   });
+
+  describe("getFeishuDogfoodPanel", () => {
+    it("falls back safely when dogfood cases have the wrong shape", async () => {
+      stubFetchJson({ cases: null });
+      const client = new ApiClient("https://api.example.test");
+      const panel = await client.getFeishuDogfoodPanel();
+      expect(panel.cases).toEqual([]);
+    });
+  });
 });
 
 // Direct tests for the helper, decoupled from any specific endpoint —

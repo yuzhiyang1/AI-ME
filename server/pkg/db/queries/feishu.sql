@@ -201,6 +201,44 @@ WHERE workspace_id = sqlc.arg('workspace_id')::uuid
 ORDER BY updated_at DESC, id DESC
 LIMIT sqlc.arg('limit') OFFSET sqlc.arg('offset');
 
+-- name: ClaimDueFeishuDeliveries :many
+WITH due AS (
+    SELECT d.id
+    FROM ai_me_feishu_delivery d
+    JOIN ai_me_approval a ON a.id = d.approval_id
+    WHERE (
+        (d.status = 'failed' AND d.next_retry_at <= now())
+        OR (
+            d.status = 'sending'
+            AND d.updated_at <= now() - make_interval(secs => sqlc.arg('stale_after_seconds')::int)
+        )
+      )
+      AND a.status = 'approved'
+      AND a.execution_status = 'failed'
+      AND a.action_type = 'send_external_message'
+      AND a.source_type = 'feishu'
+    ORDER BY d.next_retry_at ASC, d.id ASC
+    FOR UPDATE OF d SKIP LOCKED
+    LIMIT sqlc.arg('limit')
+)
+UPDATE ai_me_feishu_delivery d SET
+    status = 'sending',
+    next_retry_at = NULL,
+    updated_at = now()
+FROM due
+WHERE d.id = due.id
+RETURNING d.*;
+
+-- name: ReleaseClaimedFeishuDelivery :one
+UPDATE ai_me_feishu_delivery SET
+    status = 'failed',
+    last_error = sqlc.arg('last_error')::text,
+    next_retry_at = now() + make_interval(secs => sqlc.arg('retry_after_seconds')::int),
+    updated_at = now()
+WHERE id = sqlc.arg('id')::uuid
+  AND status = 'sending'
+RETURNING *;
+
 -- name: GetAIApprovalQualitySummary :one
 WITH latest_quality AS (
     SELECT DISTINCT ON (approval_id)
@@ -271,8 +309,14 @@ SELECT
     count(*) FILTER (WHERE final_payload->>'draft_source' = 'ai_model')::bigint AS ai_drafted,
     count(*) FILTER (WHERE quality_score > 0)::bigint AS quality_reviewed,
     COALESCE(avg(NULLIF(quality_score, 0)), 0)::float8 AS avg_quality_score,
-    LEAST(count(*), 20)::bigint AS dogfood_completed,
-    GREATEST(20 - count(*), 0)::bigint AS dogfood_remaining,
+    LEAST(count(*) FILTER (
+        WHERE quality_score > 0
+          AND (execution_status = 'succeeded' OR approval_status = 'rejected')
+    ), 20)::bigint AS dogfood_completed,
+    GREATEST(20 - count(*) FILTER (
+        WHERE quality_score > 0
+          AND (execution_status = 'succeeded' OR approval_status = 'rejected')
+    ), 0)::bigint AS dogfood_remaining,
     min(received_at)::timestamptz AS first_received_at,
     max(received_at)::timestamptz AS last_received_at,
     (count(*) FILTER (WHERE final_payload->>'draft_source' = 'ai_model') * sqlc.arg('draft_cost_cents')::bigint)::bigint AS estimated_draft_cost_cents

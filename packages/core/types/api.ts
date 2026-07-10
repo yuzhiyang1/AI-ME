@@ -268,6 +268,17 @@ export interface FeishuDelivery {
   updated_at: string;
 }
 
+export interface FeishuDogfoodCase {
+  slot: number;
+  message_id: string;
+  approval_id: string;
+  title: string;
+  stage: string;
+  completed: boolean;
+  blocking_reason: string;
+  received_at: string | null;
+}
+
 export interface AIMeOnboardingStep {
   key: string;
   title: string;
@@ -292,6 +303,7 @@ export interface FeishuDogfoodPanel {
   model_route: AIMeModelRouting;
   onboarding: AIMeOnboardingStatus;
   checklist: FeishuDogfoodChecklistItem[];
+  cases: FeishuDogfoodCase[];
   logs: FeishuMessageLog[];
   events: FeishuWebhookEvent[];
   deliveries: FeishuDelivery[];

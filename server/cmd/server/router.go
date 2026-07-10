@@ -93,9 +93,10 @@ func NewRouter(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus, analytics
 }
 
 type RouterOptions struct {
-	HTTPMetrics  *obsmetrics.HTTPMetrics
-	DaemonHub    *daemonws.Hub
-	DaemonWakeup service.TaskWakeupNotifier
+	HTTPMetrics        *obsmetrics.HTTPMetrics
+	DaemonHub          *daemonws.Hub
+	DaemonWakeup       service.TaskWakeupNotifier
+	FeishuRetryContext context.Context
 	// HeartbeatScheduler, when non-nil, replaces the default synchronous
 	// passthrough scheduler on the constructed Handler. main.go injects a
 	// BatchedHeartbeatScheduler here so the caller can also drive Run/Stop;
@@ -144,6 +145,9 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 		AppSecret: os.Getenv("FEISHU_APP_SECRET"),
 		BaseURL:   os.Getenv("FEISHU_OPENAPI_BASE_URL"),
 	})
+	if opts.FeishuRetryContext != nil {
+		go h.RunFeishuDeliveryRetryScheduler(opts.FeishuRetryContext)
+	}
 	if handler.FeishuWebSocketIntakeEnabled() {
 		go h.StartFeishuWebSocketIntake(context.Background())
 	}

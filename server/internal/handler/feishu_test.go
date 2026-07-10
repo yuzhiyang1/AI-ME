@@ -587,8 +587,21 @@ func TestListFeishuLogsReturnsDogfoodPanel(t *testing.T) {
 	if resp.Logs[0].ApprovalID == "" || resp.Logs[0].ExecutionStatus != "not_started" {
 		t.Fatalf("log approval metadata = %#v", resp.Logs[0])
 	}
-	if resp.Summary.TotalReceived < 1 || resp.Summary.DogfoodCompleted < 1 || resp.Summary.DogfoodTarget != 20 {
+	if resp.Summary.TotalReceived < 1 || resp.Summary.DogfoodCompleted != 0 || resp.Summary.DogfoodTarget != 20 {
 		t.Fatalf("summary = %+v, want dogfood progress", resp.Summary)
+	}
+	if len(resp.Cases) != 20 {
+		t.Fatalf("dogfood cases = %d, want 20 executable slots", len(resp.Cases))
+	}
+	var matchedCase *FeishuDogfoodCaseResponse
+	for i := range resp.Cases {
+		if resp.Cases[i].MessageID == messageID {
+			matchedCase = &resp.Cases[i]
+			break
+		}
+	}
+	if matchedCase == nil || matchedCase.Stage != "pending_approval" || matchedCase.Completed {
+		t.Fatalf("dogfood case = %#v, want pending approval", matchedCase)
 	}
 	if resp.Onboarding.TotalSteps == 0 || resp.Onboarding.CompletedSteps == 0 {
 		t.Fatalf("onboarding = %+v, want at least configured workspace steps", resp.Onboarding)

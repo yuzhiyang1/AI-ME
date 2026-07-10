@@ -695,6 +695,17 @@ const FeishuDeliverySchema = z.object({
   updated_at: z.string().default(""),
 }).loose();
 
+const FeishuDogfoodCaseSchema = z.object({
+  slot: z.number().default(0),
+  message_id: z.string().default(""),
+  approval_id: z.string().default(""),
+  title: z.string().default(""),
+  stage: z.string().default("awaiting_message"),
+  completed: z.boolean().default(false),
+  blocking_reason: z.string().default(""),
+  received_at: z.string().nullable().default(null),
+}).loose();
+
 const AIMeOnboardingStepSchema = z.object({
   key: z.string().default(""),
   title: z.string().default(""),
@@ -813,6 +824,7 @@ export const FeishuDogfoodPanelSchema = z.object({
     steps: [],
   }),
   checklist: z.array(FeishuDogfoodChecklistItemSchema).default([]),
+  cases: z.array(FeishuDogfoodCaseSchema).default([]),
   logs: z.array(FeishuMessageLogSchema).default([]),
   events: z.array(FeishuWebhookEventSchema).default([]),
   deliveries: z.array(FeishuDeliverySchema).default([]),
@@ -893,6 +905,7 @@ export const EMPTY_FEISHU_DOGFOOD_PANEL: FeishuDogfoodPanel = {
   },
   onboarding: EMPTY_AIME_ONBOARDING_STATUS,
   checklist: [],
+  cases: [],
   logs: [],
   events: [],
   deliveries: [],

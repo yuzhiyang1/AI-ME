@@ -56,7 +56,7 @@ func (c *Client) Enabled() bool {
 	return c != nil && c.appID != "" && c.appSecret != ""
 }
 
-func (c *Client) ReplyText(ctx context.Context, messageID, text string) (ReplyResponse, error) {
+func (c *Client) ReplyText(ctx context.Context, messageID, text, idempotencyKey string) (ReplyResponse, error) {
 	if !c.Enabled() {
 		return ReplyResponse{}, fmt.Errorf("feishu client is not configured")
 	}
@@ -76,6 +76,13 @@ func (c *Client) ReplyText(ctx context.Context, messageID, text string) (ReplyRe
 	body := map[string]string{
 		"msg_type": "text",
 		"content":  string(content),
+	}
+	idempotencyKey = strings.TrimSpace(idempotencyKey)
+	if len(idempotencyKey) > 50 {
+		return ReplyResponse{}, fmt.Errorf("feishu idempotency key exceeds 50 characters")
+	}
+	if idempotencyKey != "" {
+		body["uuid"] = idempotencyKey
 	}
 	var resp struct {
 		Code int    `json:"code"`
