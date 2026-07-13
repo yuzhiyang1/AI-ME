@@ -31,7 +31,7 @@ UPDATE ai_me_approval SET
 WHERE id = $9::uuid
   AND workspace_id = $10::uuid
   AND status IN ('pending', 'observing')
-RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id
+RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id, run_id
 `
 
 type ApproveAIApprovalParams struct {
@@ -104,6 +104,7 @@ func (q *Queries) ApproveAIApproval(ctx context.Context, arg ApproveAIApprovalPa
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.ToolCallID,
+		&i.RunID,
 	)
 	return i, err
 }
@@ -117,7 +118,7 @@ WHERE id = $1::uuid
   AND workspace_id = $2::uuid
   AND status = 'approved'
   AND execution_status = 'failed'
-RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id
+RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id, run_id
 `
 
 type ClaimAIApprovalExecutionRetryParams struct {
@@ -171,6 +172,7 @@ func (q *Queries) ClaimAIApprovalExecutionRetry(ctx context.Context, arg ClaimAI
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.ToolCallID,
+		&i.RunID,
 	)
 	return i, err
 }
@@ -209,6 +211,19 @@ func (q *Queries) CountAIApprovals(ctx context.Context, arg CountAIApprovalsPara
 	return column_1, err
 }
 
+const countAIMeDecisions = `-- name: CountAIMeDecisions :one
+SELECT count(*)::bigint
+FROM ai_me_approval
+WHERE workspace_id = $1::uuid
+`
+
+func (q *Queries) CountAIMeDecisions(ctx context.Context, workspaceID pgtype.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, countAIMeDecisions, workspaceID)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const createAIApproval = `-- name: CreateAIApproval :one
 INSERT INTO ai_me_approval (
     workspace_id,
@@ -232,13 +247,20 @@ INSERT INTO ai_me_approval (
     final_payload,
     ai_reasoning_summary,
     expires_at,
-    tool_call_id
+    tool_call_id,
+    run_id
 ) VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
     $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-    $21, $22::uuid
+    $21, $22::uuid,
+    (
+        SELECT id
+        FROM ai_me_run
+        WHERE id = $23::uuid
+          AND workspace_id = $1::uuid
+    )
 )
-RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id
+RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id, run_id
 `
 
 type CreateAIApprovalParams struct {
@@ -264,6 +286,7 @@ type CreateAIApprovalParams struct {
 	AiReasoningSummary string             `json:"ai_reasoning_summary"`
 	ExpiresAt          pgtype.Timestamptz `json:"expires_at"`
 	ToolCallID         pgtype.UUID        `json:"tool_call_id"`
+	RunID              pgtype.UUID        `json:"run_id"`
 }
 
 func (q *Queries) CreateAIApproval(ctx context.Context, arg CreateAIApprovalParams) (AiMeApproval, error) {
@@ -290,6 +313,7 @@ func (q *Queries) CreateAIApproval(ctx context.Context, arg CreateAIApprovalPara
 		arg.AiReasoningSummary,
 		arg.ExpiresAt,
 		arg.ToolCallID,
+		arg.RunID,
 	)
 	var i AiMeApproval
 	err := row.Scan(
@@ -335,6 +359,7 @@ func (q *Queries) CreateAIApproval(ctx context.Context, arg CreateAIApprovalPara
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.ToolCallID,
+		&i.RunID,
 	)
 	return i, err
 }
@@ -449,7 +474,7 @@ func (q *Queries) CreateAIApprovalEvidence(ctx context.Context, arg CreateAIAppr
 }
 
 const getAIApprovalInWorkspace = `-- name: GetAIApprovalInWorkspace :one
-SELECT id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id
+SELECT id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id, run_id
 FROM ai_me_approval
 WHERE id = $1 AND workspace_id = $2
 `
@@ -505,6 +530,7 @@ func (q *Queries) GetAIApprovalInWorkspace(ctx context.Context, arg GetAIApprova
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.ToolCallID,
+		&i.RunID,
 	)
 	return i, err
 }
@@ -556,13 +582,83 @@ func (q *Queries) GetAIApprovalStats(ctx context.Context, dollar_1 pgtype.UUID) 
 	return i, err
 }
 
+const getAIMeDecisionLedgerSummary = `-- name: GetAIMeDecisionLedgerSummary :one
+WITH today_runs AS (
+    SELECT status, input_tokens, output_tokens, cache_read_tokens, cost_microusd
+    FROM ai_me_run
+    WHERE workspace_id = $1::uuid
+      AND created_at >= date_trunc('day', now())
+), latest_quality AS (
+    SELECT DISTINCT ON (approval_id)
+        approval_id,
+        CASE
+            WHEN payload->>'score' ~ '^[1-5]$' THEN (payload->>'score')::int
+            ELSE 0
+        END AS score,
+        COALESCE(payload->>'outcome', '')::text AS outcome
+    FROM ai_me_approval_event
+    WHERE workspace_id = $1::uuid
+      AND event_type = 'edited'
+      AND payload->>'kind' = 'quality_review'
+    ORDER BY approval_id, created_at DESC, id DESC
+)
+SELECT
+    (SELECT count(*) FROM today_runs)::bigint AS today_runs,
+    (SELECT count(*) FROM today_runs WHERE status = 'succeeded')::bigint AS succeeded,
+    (SELECT count(*) FROM today_runs WHERE status = 'failed')::bigint AS failed,
+    (SELECT count(*) FROM latest_quality WHERE score > 0)::bigint AS reviewed,
+    COALESCE((SELECT avg(NULLIF(score, 0)) FROM latest_quality), 0)::float8 AS avg_score,
+    (SELECT count(*) FROM latest_quality WHERE outcome = 'accepted')::bigint AS accepted,
+    (SELECT count(*) FROM latest_quality WHERE outcome = 'needs_retry')::bigint AS needs_retry,
+    (SELECT count(*) FROM latest_quality WHERE outcome = 'wrong')::bigint AS wrong,
+    COALESCE((SELECT sum(input_tokens) FROM today_runs), 0)::bigint AS input_tokens,
+    COALESCE((SELECT sum(output_tokens) FROM today_runs), 0)::bigint AS output_tokens,
+    COALESCE((SELECT sum(cache_read_tokens) FROM today_runs), 0)::bigint AS cache_read_tokens,
+    COALESCE((SELECT sum(cost_microusd) FROM today_runs), 0)::bigint AS cost_microusd
+`
+
+type GetAIMeDecisionLedgerSummaryRow struct {
+	TodayRuns       int64   `json:"today_runs"`
+	Succeeded       int64   `json:"succeeded"`
+	Failed          int64   `json:"failed"`
+	Reviewed        int64   `json:"reviewed"`
+	AvgScore        float64 `json:"avg_score"`
+	Accepted        int64   `json:"accepted"`
+	NeedsRetry      int64   `json:"needs_retry"`
+	Wrong           int64   `json:"wrong"`
+	InputTokens     int64   `json:"input_tokens"`
+	OutputTokens    int64   `json:"output_tokens"`
+	CacheReadTokens int64   `json:"cache_read_tokens"`
+	CostMicrousd    int64   `json:"cost_microusd"`
+}
+
+func (q *Queries) GetAIMeDecisionLedgerSummary(ctx context.Context, workspaceID pgtype.UUID) (GetAIMeDecisionLedgerSummaryRow, error) {
+	row := q.db.QueryRow(ctx, getAIMeDecisionLedgerSummary, workspaceID)
+	var i GetAIMeDecisionLedgerSummaryRow
+	err := row.Scan(
+		&i.TodayRuns,
+		&i.Succeeded,
+		&i.Failed,
+		&i.Reviewed,
+		&i.AvgScore,
+		&i.Accepted,
+		&i.NeedsRetry,
+		&i.Wrong,
+		&i.InputTokens,
+		&i.OutputTokens,
+		&i.CacheReadTokens,
+		&i.CostMicrousd,
+	)
+	return i, err
+}
+
 const linkAIApprovalInboxItem = `-- name: LinkAIApprovalInboxItem :one
 UPDATE ai_me_approval SET
     inbox_item_id = $1::uuid,
     updated_at = now()
 WHERE id = $2::uuid
   AND workspace_id = $3::uuid
-RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id
+RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id, run_id
 `
 
 type LinkAIApprovalInboxItemParams struct {
@@ -617,6 +713,76 @@ func (q *Queries) LinkAIApprovalInboxItem(ctx context.Context, arg LinkAIApprova
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.ToolCallID,
+		&i.RunID,
+	)
+	return i, err
+}
+
+const linkAIApprovalRun = `-- name: LinkAIApprovalRun :one
+UPDATE ai_me_approval AS approval SET
+    run_id = run.id,
+    updated_at = now()
+FROM ai_me_run AS run
+WHERE approval.id = $1::uuid
+  AND approval.workspace_id = $2::uuid
+  AND run.id = $3::uuid
+  AND run.workspace_id = approval.workspace_id
+RETURNING approval.id, approval.workspace_id, approval.requester_user_id, approval.source_type, approval.source_ref_id, approval.source_url, approval.issue_id, approval.inbox_item_id, approval.task_queue_id, approval.memory_id, approval.title, approval.summary, approval.status, approval.risk_level, approval.confidence, approval.reversibility, approval.action_type, approval.action_title, approval.action_description, approval.original_payload, approval.final_payload, approval.ai_reasoning_summary, approval.approval_note, approval.rejection_reason, approval.approved_by, approval.approved_at, approval.rejected_by, approval.rejected_at, approval.observed_by, approval.observed_at, approval.taken_over_by, approval.taken_over_at, approval.executed_at, approval.execution_status, approval.execution_error, approval.created_issue_id, approval.created_task_id, approval.created_comment_id, approval.expires_at, approval.created_at, approval.updated_at, approval.tool_call_id, approval.run_id
+`
+
+type LinkAIApprovalRunParams struct {
+	ApprovalID  pgtype.UUID `json:"approval_id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	RunID       pgtype.UUID `json:"run_id"`
+}
+
+func (q *Queries) LinkAIApprovalRun(ctx context.Context, arg LinkAIApprovalRunParams) (AiMeApproval, error) {
+	row := q.db.QueryRow(ctx, linkAIApprovalRun, arg.ApprovalID, arg.WorkspaceID, arg.RunID)
+	var i AiMeApproval
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.RequesterUserID,
+		&i.SourceType,
+		&i.SourceRefID,
+		&i.SourceUrl,
+		&i.IssueID,
+		&i.InboxItemID,
+		&i.TaskQueueID,
+		&i.MemoryID,
+		&i.Title,
+		&i.Summary,
+		&i.Status,
+		&i.RiskLevel,
+		&i.Confidence,
+		&i.Reversibility,
+		&i.ActionType,
+		&i.ActionTitle,
+		&i.ActionDescription,
+		&i.OriginalPayload,
+		&i.FinalPayload,
+		&i.AiReasoningSummary,
+		&i.ApprovalNote,
+		&i.RejectionReason,
+		&i.ApprovedBy,
+		&i.ApprovedAt,
+		&i.RejectedBy,
+		&i.RejectedAt,
+		&i.ObservedBy,
+		&i.ObservedAt,
+		&i.TakenOverBy,
+		&i.TakenOverAt,
+		&i.ExecutedAt,
+		&i.ExecutionStatus,
+		&i.ExecutionError,
+		&i.CreatedIssueID,
+		&i.CreatedTaskID,
+		&i.CreatedCommentID,
+		&i.ExpiresAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ToolCallID,
+		&i.RunID,
 	)
 	return i, err
 }
@@ -708,7 +874,7 @@ func (q *Queries) ListAIApprovalEvidence(ctx context.Context, arg ListAIApproval
 }
 
 const listAIApprovals = `-- name: ListAIApprovals :many
-SELECT id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id
+SELECT id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id, run_id
 FROM ai_me_approval
 WHERE workspace_id = $1::uuid
   AND ($2::text IS NULL OR status = $2::text)
@@ -794,6 +960,137 @@ func (q *Queries) ListAIApprovals(ctx context.Context, arg ListAIApprovalsParams
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.ToolCallID,
+			&i.RunID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAIMeDecisions = `-- name: ListAIMeDecisions :many
+WITH latest_quality AS (
+    SELECT DISTINCT ON (approval_id)
+        approval_id,
+        CASE
+            WHEN payload->>'score' ~ '^[1-5]$' THEN (payload->>'score')::int
+            ELSE 0
+        END AS quality_score,
+        COALESCE(payload->>'outcome', '')::text AS quality_outcome,
+        COALESCE(payload->>'note', '')::text AS quality_note,
+        created_at AS reviewed_at
+    FROM ai_me_approval_event
+    WHERE workspace_id = $1::uuid
+      AND event_type = 'edited'
+      AND payload->>'kind' = 'quality_review'
+    ORDER BY approval_id, created_at DESC, id DESC
+)
+SELECT
+    approval.id AS approval_id,
+    approval.run_id,
+    approval.title,
+    approval.source_type,
+    approval.status,
+    approval.execution_status,
+    approval.risk_level,
+    approval.confidence::float8 AS confidence,
+    COALESCE(run.provider, '')::text AS provider,
+    COALESCE(run.model, '')::text AS model,
+    COALESCE(run.input_tokens, 0)::bigint AS input_tokens,
+    COALESCE(run.output_tokens, 0)::bigint AS output_tokens,
+    COALESCE(run.cache_read_tokens, 0)::bigint AS cache_read_tokens,
+    COALESCE(run.cost_microusd, 0)::bigint AS cost_microusd,
+    COALESCE(run.step_count, 0)::int AS step_count,
+    COALESCE(run.max_steps, 0)::int AS max_steps,
+    COALESCE(quality.quality_score, 0)::int AS quality_score,
+    COALESCE(quality.quality_outcome, '')::text AS quality_outcome,
+    COALESCE(quality.quality_note, '')::text AS quality_note,
+    quality.reviewed_at,
+    approval.created_at,
+    COALESCE(run.completed_at, approval.executed_at) AS completed_at,
+    CASE
+        WHEN COALESCE(run.last_error, '') <> '' THEN run.last_error
+        ELSE approval.execution_error
+    END::text AS last_error
+FROM ai_me_approval AS approval
+LEFT JOIN ai_me_run AS run
+  ON run.id = approval.run_id
+ AND run.workspace_id = approval.workspace_id
+LEFT JOIN latest_quality AS quality ON quality.approval_id = approval.id
+WHERE approval.workspace_id = $1::uuid
+ORDER BY approval.created_at DESC, approval.id DESC
+LIMIT $3 OFFSET $2
+`
+
+type ListAIMeDecisionsParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	Offset      int32       `json:"offset"`
+	Limit       int32       `json:"limit"`
+}
+
+type ListAIMeDecisionsRow struct {
+	ApprovalID      pgtype.UUID        `json:"approval_id"`
+	RunID           pgtype.UUID        `json:"run_id"`
+	Title           string             `json:"title"`
+	SourceType      string             `json:"source_type"`
+	Status          string             `json:"status"`
+	ExecutionStatus string             `json:"execution_status"`
+	RiskLevel       string             `json:"risk_level"`
+	Confidence      float64            `json:"confidence"`
+	Provider        string             `json:"provider"`
+	Model           string             `json:"model"`
+	InputTokens     int64              `json:"input_tokens"`
+	OutputTokens    int64              `json:"output_tokens"`
+	CacheReadTokens int64              `json:"cache_read_tokens"`
+	CostMicrousd    int64              `json:"cost_microusd"`
+	StepCount       int32              `json:"step_count"`
+	MaxSteps        int32              `json:"max_steps"`
+	QualityScore    int32              `json:"quality_score"`
+	QualityOutcome  string             `json:"quality_outcome"`
+	QualityNote     string             `json:"quality_note"`
+	ReviewedAt      pgtype.Timestamptz `json:"reviewed_at"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	CompletedAt     pgtype.Timestamptz `json:"completed_at"`
+	LastError       string             `json:"last_error"`
+}
+
+func (q *Queries) ListAIMeDecisions(ctx context.Context, arg ListAIMeDecisionsParams) ([]ListAIMeDecisionsRow, error) {
+	rows, err := q.db.Query(ctx, listAIMeDecisions, arg.WorkspaceID, arg.Offset, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListAIMeDecisionsRow{}
+	for rows.Next() {
+		var i ListAIMeDecisionsRow
+		if err := rows.Scan(
+			&i.ApprovalID,
+			&i.RunID,
+			&i.Title,
+			&i.SourceType,
+			&i.Status,
+			&i.ExecutionStatus,
+			&i.RiskLevel,
+			&i.Confidence,
+			&i.Provider,
+			&i.Model,
+			&i.InputTokens,
+			&i.OutputTokens,
+			&i.CacheReadTokens,
+			&i.CostMicrousd,
+			&i.StepCount,
+			&i.MaxSteps,
+			&i.QualityScore,
+			&i.QualityOutcome,
+			&i.QualityNote,
+			&i.ReviewedAt,
+			&i.CreatedAt,
+			&i.CompletedAt,
+			&i.LastError,
 		); err != nil {
 			return nil, err
 		}
@@ -813,7 +1110,7 @@ UPDATE ai_me_approval SET
     updated_at = now()
 WHERE id = $2::uuid
   AND workspace_id = $3::uuid
-RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id
+RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id, run_id
 `
 
 type MarkAIApprovalExecutionFailedParams struct {
@@ -868,6 +1165,7 @@ func (q *Queries) MarkAIApprovalExecutionFailed(ctx context.Context, arg MarkAIA
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.ToolCallID,
+		&i.RunID,
 	)
 	return i, err
 }
@@ -883,7 +1181,7 @@ UPDATE ai_me_approval SET
     updated_at = now()
 WHERE id = $4::uuid
   AND workspace_id = $5::uuid
-RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id
+RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id, run_id
 `
 
 type MarkAIApprovalExecutionSucceededParams struct {
@@ -946,6 +1244,7 @@ func (q *Queries) MarkAIApprovalExecutionSucceeded(ctx context.Context, arg Mark
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.ToolCallID,
+		&i.RunID,
 	)
 	return i, err
 }
@@ -960,7 +1259,7 @@ UPDATE ai_me_approval SET
 WHERE id = $3::uuid
   AND workspace_id = $4::uuid
   AND status = 'pending'
-RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id
+RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id, run_id
 `
 
 type ObserveAIApprovalParams struct {
@@ -1021,6 +1320,7 @@ func (q *Queries) ObserveAIApproval(ctx context.Context, arg ObserveAIApprovalPa
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.ToolCallID,
+		&i.RunID,
 	)
 	return i, err
 }
@@ -1037,7 +1337,7 @@ UPDATE ai_me_approval SET
 WHERE id = $3::uuid
   AND workspace_id = $4::uuid
   AND status IN ('pending', 'observing')
-RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id
+RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id, run_id
 `
 
 type RejectAIApprovalParams struct {
@@ -1098,6 +1398,7 @@ func (q *Queries) RejectAIApproval(ctx context.Context, arg RejectAIApprovalPara
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.ToolCallID,
+		&i.RunID,
 	)
 	return i, err
 }
@@ -1114,7 +1415,7 @@ UPDATE ai_me_approval SET
 WHERE id = $3::uuid
   AND workspace_id = $4::uuid
   AND status IN ('pending', 'observing')
-RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id
+RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id, run_id
 `
 
 type TakeOverAIApprovalParams struct {
@@ -1175,6 +1476,7 @@ func (q *Queries) TakeOverAIApproval(ctx context.Context, arg TakeOverAIApproval
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.ToolCallID,
+		&i.RunID,
 	)
 	return i, err
 }
@@ -1195,7 +1497,7 @@ UPDATE ai_me_approval SET
 WHERE id = $11::uuid
   AND workspace_id = $12::uuid
   AND status IN ('pending', 'observing')
-RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id
+RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id, run_id
 `
 
 type UpdateAIApprovalParams struct {
@@ -1272,6 +1574,7 @@ func (q *Queries) UpdateAIApproval(ctx context.Context, arg UpdateAIApprovalPara
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.ToolCallID,
+		&i.RunID,
 	)
 	return i, err
 }

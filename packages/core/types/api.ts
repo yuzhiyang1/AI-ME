@@ -174,6 +174,17 @@ export interface FeishuDogfoodSummary {
   last_received_at: string | null;
 }
 
+export interface FeishuDogfoodRun {
+  id: string;
+  status: string;
+  target: number;
+  started_at: string;
+  first_closed_at: string | null;
+  completed_at: string | null;
+  first_close_seconds: number | null;
+  first_close_within_ten_minutes: boolean;
+}
+
 export interface AIMeCostControl {
   currency: string;
   draft_call_count: number;
@@ -303,6 +314,7 @@ export interface AIMeOnboardingStatus {
 
 export interface FeishuDogfoodPanel {
   status: FeishuIntegrationStatus;
+  run: FeishuDogfoodRun;
   summary: FeishuDogfoodSummary;
   cost: AIMeCostControl;
   reliability: FeishuReliabilitySummary;

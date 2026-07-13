@@ -126,6 +126,27 @@ describe("ApiClient schema fallback", () => {
       expect(panel.cases).toEqual([]);
     });
   });
+
+  describe("listAIMeDecisions", () => {
+    it("falls back to an empty ledger when decisions are malformed", async () => {
+      stubFetchJson({ summary: { today_runs: 3 }, decisions: null, total: 3 });
+      const client = new ApiClient("https://api.example.test");
+
+      const ledger = await client.listAIMeDecisions({ limit: 8, offset: 0 });
+
+      expect(ledger.decisions).toEqual([]);
+      expect(ledger.total).toBe(0);
+      expect(ledger.summary).toMatchObject({
+        today_runs: 0,
+        cost_microusd: 0,
+        budget_status: "unconfigured",
+      });
+      expect(fetch).toHaveBeenCalledWith(
+        "https://api.example.test/api/ai-me/decisions?limit=8&offset=0",
+        expect.any(Object),
+      );
+    });
+  });
 });
 
 // Direct tests for the helper, decoupled from any specific endpoint —

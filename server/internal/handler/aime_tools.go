@@ -23,6 +23,7 @@ type handlerAIMeToolExecutor struct {
 	context     AIMeContextSummary
 	policy      AIMePolicyContext
 	toolCallID  pgtype.UUID
+	runID       pgtype.UUID
 	resumeRunID pgtype.UUID
 	leaseOwner  string
 }
@@ -47,8 +48,10 @@ func completeAIMeModelWithTools(ctx context.Context, client AIModelClient, syste
 			return AIModelCompletion{}, model, err
 		}
 		if replay != nil {
+			baseExecutor.runID = replay.RunID
 			return *replay, model, nil
 		}
+		baseExecutor.runID = recorder.run.ID
 		executor = &recordingAIMeToolExecutor{base: baseExecutor, recorder: recorder}
 	}
 	result, err := runAIMeToolLoop(ctx, toolClient, executor, []AIModelMessage{
@@ -66,11 +69,15 @@ func completeAIMeModelWithTools(ctx context.Context, client AIModelClient, syste
 			return AIModelCompletion{}, model, err
 		}
 	}
-	return AIModelCompletion{
+	completion := AIModelCompletion{
 		Content: result.Content,
 		Message: AIModelMessage{Role: "assistant", Content: result.Content},
 		Usage:   result.Usage,
-	}, model, nil
+	}
+	if recorder != nil {
+		completion.RunID = recorder.run.ID
+	}
+	return completion, model, nil
 }
 
 func aimeToolCallingPromptSuffix() string {
@@ -313,6 +320,7 @@ func (e *handlerAIMeToolExecutor) executeWriteTool(ctx context.Context, actionTy
 		return failedAIMeToolExecution(err.Error())
 	}
 	params.ToolCallID = e.toolCallID
+	params.RunID = e.runID
 	if requiresApproval {
 		approval, err := e.handler.createAIMeApproval(ctx, e.workspaceID, e.userID, params, req.Evidence)
 		if err != nil {

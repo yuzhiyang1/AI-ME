@@ -461,6 +461,9 @@ func (h *Handler) createAIMeApproval(ctx context.Context, workspaceID, userID st
 	if err != nil {
 		return db.AiMeApproval{}, err
 	}
+	if err := validateAIApprovalRunLink(approval, params.RunID); err != nil {
+		return db.AiMeApproval{}, err
+	}
 	if approval.ToolCallID.Valid {
 		if _, err := qtx.WaitAIMeToolCallForApproval(ctx, db.WaitAIMeToolCallForApprovalParams{
 			ID: approval.ToolCallID, WorkspaceID: approval.WorkspaceID,
@@ -1148,11 +1151,21 @@ func (h *Handler) RateAIApproval(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "approval not found")
 		return
 	}
+	if !aiApprovalCanBeReviewed(approval) {
+		writeError(w, http.StatusConflict, "approval must reach a terminal state before quality review")
+		return
+	}
+	outcome, err := normalizeAIApprovalQualityOutcome(req.Outcome, approval)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	req.Outcome = outcome
 	payload := map[string]any{
 		"kind":    "quality_review",
 		"score":   req.Score,
 		"note":    strings.TrimSpace(req.Note),
-		"outcome": strings.TrimSpace(req.Outcome),
+		"outcome": outcome,
 	}
 	if _, err := createAIApprovalEvent(r.Context(), qtx, approval, "member", userUUID, "edited", approval.Status, approval.Status, payload); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create quality event")
@@ -1961,6 +1974,48 @@ func approvalQualityQuote(req AIApprovalQualityRequest) string {
 		parts = append(parts, "结果："+outcome)
 	}
 	return strings.Join(parts, "；")
+}
+
+func aiApprovalCanBeReviewed(approval db.AiMeApproval) bool {
+	if approval.ExecutionStatus == "succeeded" || approval.ExecutionStatus == "failed" || approval.ExecutionStatus == "skipped" {
+		return true
+	}
+	switch approval.Status {
+	case "rejected", "taken_over", "expired":
+		return true
+	default:
+		return false
+	}
+}
+
+func normalizeAIApprovalQualityOutcome(raw string, approval db.AiMeApproval) (string, error) {
+	outcome := strings.TrimSpace(raw)
+	if outcome == "" {
+		switch approval.ExecutionStatus {
+		case "succeeded":
+			return "accepted", nil
+		case "failed":
+			return "needs_retry", nil
+		default:
+			return "wrong", nil
+		}
+	}
+	switch outcome {
+	case "accepted", "needs_retry", "wrong":
+		return outcome, nil
+	default:
+		return "", errors.New("outcome must be accepted, needs_retry, or wrong")
+	}
+}
+
+func validateAIApprovalRunLink(approval db.AiMeApproval, requestedRunID pgtype.UUID) error {
+	if !requestedRunID.Valid {
+		return nil
+	}
+	if !approval.RunID.Valid || approval.RunID != requestedRunID {
+		return errors.New("AI-Me run does not belong to approval workspace")
+	}
+	return nil
 }
 
 func recordAIApprovalActivity(ctx context.Context, q *db.Queries, approval db.AiMeApproval, actorID pgtype.UUID, action string, payload any) (db.ActivityLog, bool, error) {

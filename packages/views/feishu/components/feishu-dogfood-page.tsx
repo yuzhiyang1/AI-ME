@@ -30,6 +30,7 @@ import type {
   FeishuDeliverySummary,
   FeishuDogfoodCase,
   FeishuDogfoodChecklistItem,
+  FeishuDogfoodRun,
   FeishuIntegrationStatus,
   FeishuMessageLog,
   FeishuReliabilitySummary,
@@ -141,6 +142,7 @@ export function FeishuDogfoodPage() {
 
             <section className="grid shrink-0 gap-4 xl:grid-cols-[minmax(0,1.2fr)_minmax(340px,0.8fr)]">
               <ProgressPanel
+                run={data.run}
                 progress={progress}
                 completed={summary.dogfood_completed}
                 target={summary.dogfood_target}
@@ -229,6 +231,7 @@ function ErrorState({ error, onRetry }: { error: unknown; onRetry: () => void })
 }
 
 function ProgressPanel({
+  run,
   progress,
   completed,
   target,
@@ -237,6 +240,7 @@ function ProgressPanel({
   firstReceivedAt,
   lastReceivedAt,
 }: {
+  run: FeishuDogfoodRun;
   progress: number;
   completed: number;
   target: number;
@@ -251,7 +255,7 @@ function ProgressPanel({
         <div>
           <h2 className="text-sm font-semibold">真实狗粮 20 条</h2>
           <p className="mt-1 text-xs leading-5 text-[var(--aime-text-tertiary)]">
-            真实消息完成发送或驳回，并记录质量复盘后才计入进度。
+            真实消息进入成功、失败或人工终止等终态，并记录质量复盘后计入进度。
           </p>
         </div>
         <div className="text-right">
@@ -272,7 +276,16 @@ function ProgressPanel({
         <InfoCell label="最近消息" value={lastReceivedAt ? formatDateTime(lastReceivedAt) : "暂无"} />
       </div>
       <p className="mt-3 text-xs text-[var(--aime-text-tertiary)]">
-        首条消息：{firstReceivedAt ? formatDateTime(firstReceivedAt) : "尚未收到"}
+        批次开始：{run.started_at ? formatDateTime(run.started_at) : "尚未开始"} · 首条消息：{firstReceivedAt ? formatDateTime(firstReceivedAt) : "尚未收到"}
+      </p>
+      <p className={cn(
+        "mt-1 text-xs text-[var(--aime-text-tertiary)]",
+        run.first_close_seconds !== null && !run.first_close_within_ten_minutes && "text-[var(--aime-warning)]",
+        run.first_close_within_ten_minutes && "text-[var(--aime-success)]",
+      )}>
+        首条闭环：{run.first_close_seconds === null
+          ? "尚未完成"
+          : `${formatDuration(run.first_close_seconds)}${run.first_close_within_ten_minutes ? "，达到 10 分钟目标" : "，超过 10 分钟目标"}`}
       </p>
     </section>
   );
@@ -1127,6 +1140,16 @@ function formatMicroMoney(microusd: number, currency: string) {
     minimumFractionDigits: 2,
     maximumFractionDigits: amount >= 1 ? 4 : 6,
   }).format(amount);
+}
+
+function formatDuration(seconds: number) {
+  if (seconds < 60) return `${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  if (minutes < 60) return remainingSeconds > 0 ? `${minutes} 分 ${remainingSeconds} 秒` : `${minutes} 分钟`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return remainingMinutes > 0 ? `${hours} 小时 ${remainingMinutes} 分` : `${hours} 小时`;
 }
 
 function formatDateTime(value: string) {

@@ -98,6 +98,8 @@ import type {
   KnowledgeDocument,
   ListAIApprovalsParams,
   ListAIApprovalsResponse,
+  ListAIMeDecisionsParams,
+  ListAIMeDecisionsResponse,
   ListKnowledgeDocumentsParams,
   ListKnowledgeDocumentsResponse,
   ListMemoryEntriesParams,
@@ -124,12 +126,14 @@ import {
   ChatMessagesSchema,
   ChatPendingTaskSchema,
   AIMeCockpitSummarySchema,
+  AIMeDecisionLedgerSchema,
   AIMeThinkResponseSchema,
   AIApprovalStatsSchema,
   AIApprovalSchema,
   AIMeOnboardingStatusSchema,
   EMPTY_AIME_ONBOARDING_STATUS,
   EMPTY_AIME_COCKPIT_SUMMARY,
+  EMPTY_AIME_DECISION_LEDGER,
   EMPTY_AIME_THINK_RESPONSE,
   EMPTY_AI_APPROVAL,
   EMPTY_AI_APPROVAL_STATS,
@@ -455,6 +459,24 @@ export class ApiClient {
     return parseWithFallback(raw, AIMeCockpitSummarySchema, EMPTY_AIME_COCKPIT_SUMMARY, {
       endpoint: "GET /api/ai-me/cockpit/summary",
     });
+  }
+
+  async listAIMeDecisions(
+    params?: ListAIMeDecisionsParams,
+  ): Promise<ListAIMeDecisionsResponse> {
+    const search = new URLSearchParams();
+    if (params?.limit !== undefined) search.set("limit", String(params.limit));
+    if (params?.offset !== undefined) search.set("offset", String(params.offset));
+    const suffix = search.toString();
+    const raw = await this.fetch<unknown>(
+      `/api/ai-me/decisions${suffix ? `?${suffix}` : ""}`,
+    );
+    return parseWithFallback(
+      raw,
+      AIMeDecisionLedgerSchema,
+      EMPTY_AIME_DECISION_LEDGER,
+      { endpoint: "GET /api/ai-me/decisions" },
+    );
   }
 
   async getAIMeOnboardingStatus(): Promise<AIMeOnboardingStatus> {

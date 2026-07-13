@@ -376,6 +376,65 @@ func TestThinkAIMeDisabledSkipsModelCall(t *testing.T) {
 	}
 }
 
+func TestThinkAIMeBudgetExceededSkipsModelCall(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+	ctx := context.Background()
+	var oldSettings []byte
+	if err := testPool.QueryRow(ctx, `SELECT settings FROM workspace WHERE id = $1`, testWorkspaceID).Scan(&oldSettings); err != nil {
+		t.Fatalf("load workspace settings: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = testPool.Exec(ctx, `UPDATE workspace SET settings = $1 WHERE id = $2`, oldSettings, testWorkspaceID)
+	})
+	if _, err := testPool.Exec(ctx, `
+		UPDATE workspace
+		SET settings = '{"ai_me":{"enabled":true,"autonomy_level":"balanced","approval_mode":"risky","timezone":"Asia/Shanghai","working_hours":{"start":"00:00","end":"00:00"},"model_provider":"deepseek","model_name":"deepseek-chat"}}'::jsonb
+		WHERE id = $1
+	`, testWorkspaceID); err != nil {
+		t.Fatalf("update workspace settings: %v", err)
+	}
+	t.Setenv("AI_ME_DAILY_BUDGET_CENTS", "0")
+
+	called := false
+	origModel := testHandler.AIModel
+	testHandler.AIModel = fakeAIMeModelClient{
+		content: `{"summary":"should not run"}`,
+		onComplete: func(_, _ string) {
+			called = true
+		},
+	}
+	t.Cleanup(func() { testHandler.AIModel = origModel })
+
+	member, err := testHandler.getWorkspaceMember(ctx, testUserID, testWorkspaceID)
+	if err != nil {
+		t.Fatalf("load member: %v", err)
+	}
+	thinkReq := newRequest("POST", "/api/ai-me/think?workspace_id="+testWorkspaceID, AIMeThinkRequest{
+		Input:      "请判断是否需要派工",
+		Intent:     "assign",
+		SourceType: "manual",
+	})
+	thinkReq = thinkReq.WithContext(middleware.SetMemberContext(thinkReq.Context(), testWorkspaceID, member))
+
+	w := httptest.NewRecorder()
+	testHandler.ThinkAIMe(w, thinkReq)
+	if w.Code != http.StatusOK {
+		t.Fatalf("ThinkAIMe: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if called {
+		t.Fatal("expected exhausted budget to skip model call")
+	}
+	var resp AIMeThinkResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Mode != "budget_exceeded" || resp.Configured != true || resp.NeedApproval {
+		t.Fatalf("budget response = %#v", resp)
+	}
+}
+
 func TestThinkAIMeAutonomousNeverAutoQueuesAssignWorker(t *testing.T) {
 	if testHandler == nil {
 		t.Skip("database not available")

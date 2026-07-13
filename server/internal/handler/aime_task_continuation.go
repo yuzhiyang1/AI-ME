@@ -190,7 +190,7 @@ func (h *Handler) resumeAIMeTaskResultRun(ctx context.Context, run db.AiMeRun, l
 		}); err != nil {
 			return err
 		}
-	} else if input.Depth <= aiMeMaxContinuationDepth && settings.Enabled && aimeModelConfiguredForSettings(h.AIModel, settings) && !h.aimeDraftBudgetExceeded(ctx, run.WorkspaceID) {
+	} else if input.Depth <= aiMeMaxContinuationDepth && settings.Enabled && aimeModelConfiguredForSettings(h.AIModel, settings) && !h.aimeBudgetExceeded(ctx, run.WorkspaceID) {
 		systemPrompt := buildAIMeTaskResultSystemPrompt(policy)
 		userPrompt, promptErr := h.buildAIMeTaskResultUserPrompt(ctx, input, task, issue, resultText, contextSummary, policy)
 		if promptErr != nil {

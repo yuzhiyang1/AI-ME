@@ -959,6 +959,88 @@ func (m *failingToolCallingAIMeModel) CompleteWithTools(context.Context, []AIMod
 	return AIModelCompletion{}, errors.New("simulated task result model failure")
 }
 
+func TestThinkAIMeLinksDecisionApprovalToDurableRun(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+	ctx := context.Background()
+	var originalSettings []byte
+	if err := testPool.QueryRow(ctx, `SELECT settings FROM workspace WHERE id = $1`, testWorkspaceID).Scan(&originalSettings); err != nil {
+		t.Fatalf("load workspace settings: %v", err)
+	}
+	if _, err := testPool.Exec(ctx, `
+		UPDATE workspace
+		SET settings = '{"ai_me":{"enabled":true,"autonomy_level":"balanced","approval_mode":"always","timezone":"Asia/Shanghai","working_hours":{"start":"00:00","end":"23:59"},"model_provider":"deepseek","model_name":"deepseek-test"}}'::jsonb
+		WHERE id = $1
+	`, testWorkspaceID); err != nil {
+		t.Fatalf("enable AI-Me: %v", err)
+	}
+
+	var issueID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO issue (workspace_id, title, status, priority, creator_type, creator_id, number, position)
+		VALUES ($1, 'Decision run link test', 'todo', 'medium', 'member', $2, 990001, 0)
+		RETURNING id
+	`, testWorkspaceID, testUserID).Scan(&issueID); err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	content := `{"summary":"需要人工确认回复。","risk_level":"high","confidence":0.9,"need_approval":true,"reply_draft":"退款进度正在核查。","reasoning_summary":"对外承诺需要审批。","actions":[{"type":"draft_reply","title":"回复退款进度","description":"确认后写入内部评论","issue_id":"` + issueID + `","requires_approval":true}],"evidence":[]}`
+	model := &scriptedToolCallingAIMeModel{completions: []AIModelCompletion{{
+		Content: content,
+		Message: AIModelMessage{Role: "assistant", Content: content},
+		Usage:   AIModelUsage{InputTokens: 120, OutputTokens: 30, CacheReadTokens: 20},
+	}}}
+	originalModel := testHandler.AIModel
+	testHandler.AIModel = model
+	t.Cleanup(func() {
+		testHandler.AIModel = originalModel
+		_, _ = testPool.Exec(ctx, `UPDATE workspace SET settings = $2 WHERE id = $1`, testWorkspaceID, originalSettings)
+		_, _ = testPool.Exec(ctx, `DELETE FROM ai_me_approval WHERE issue_id = $1`, issueID)
+		_, _ = testPool.Exec(ctx, `DELETE FROM ai_me_run WHERE workspace_id = $1 AND idempotency_key = $2`, testWorkspaceID, "issue:"+issueID)
+		_, _ = testPool.Exec(ctx, `DELETE FROM issue WHERE id = $1`, issueID)
+	})
+
+	member, err := testHandler.getWorkspaceMember(ctx, testUserID, testWorkspaceID)
+	if err != nil {
+		t.Fatalf("load workspace member: %v", err)
+	}
+	request := newRequest("POST", "/api/ai-me/think?workspace_id="+testWorkspaceID, AIMeThinkRequest{
+		Input: "请帮我回复退款进度。", SourceType: "issue", SourceRefID: issueID, IssueID: issueID,
+	})
+	request = request.WithContext(middleware.SetMemberContext(request.Context(), testWorkspaceID, member))
+	w := httptest.NewRecorder()
+	testHandler.ThinkAIMe(w, request)
+	if w.Code != http.StatusOK {
+		t.Fatalf("ThinkAIMe: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var response AIMeThinkResponse
+	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
+		t.Fatalf("decode ThinkAIMe response: %v", err)
+	}
+	if response.ApprovalID == "" {
+		t.Fatalf("expected approval_id, got %#v", response)
+	}
+
+	var approvalRunID string
+	if err := testPool.QueryRow(ctx, `
+		SELECT run_id::text
+		FROM ai_me_approval
+		WHERE id = $1 AND workspace_id = $2
+	`, response.ApprovalID, testWorkspaceID).Scan(&approvalRunID); err != nil {
+		t.Fatalf("load approval run link: %v", err)
+	}
+	run, err := testHandler.Queries.FindAIMeRunByIdempotencyKey(ctx, db.FindAIMeRunByIdempotencyKeyParams{
+		WorkspaceID: parseUUID(testWorkspaceID), IdempotencyKey: "issue:" + issueID,
+	})
+	if err != nil {
+		t.Fatalf("load durable run: %v", err)
+	}
+	if approvalRunID != uuidToString(run.ID) {
+		t.Fatalf("approval run_id = %q, want %q", approvalRunID, uuidToString(run.ID))
+	}
+}
+
 func TestThinkAIMeToolCallCreatesDurableRunIssueAndTask(t *testing.T) {
 	if testHandler == nil {
 		t.Skip("database not available")

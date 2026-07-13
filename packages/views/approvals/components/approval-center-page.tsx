@@ -979,7 +979,8 @@ function ApprovalQualityReview({ approval }: { approval: AIApproval }) {
   const rateApproval = useRateAIApproval();
   const [score, setScore] = useState(approvalQualityScore(approval) || 0);
   const [note, setNote] = useState("");
-  const canSubmit = score >= 1 && score <= 5 && !rateApproval.isPending;
+  const canReview = canReviewAIApproval(approval);
+  const canSubmit = canReview && score >= 1 && score <= 5 && !rateApproval.isPending;
 
   useEffect(() => {
     setScore(approvalQualityScore(approval) || 0);
@@ -994,7 +995,7 @@ function ApprovalQualityReview({ approval }: { approval: AIApproval }) {
         data: {
           score,
           note: note.trim(),
-          outcome: approval.execution_status === "succeeded" ? "accepted" : approval.execution_status,
+          outcome: qualityOutcomeForApproval(approval),
         },
       });
       toast.success("质量复盘已记录");
@@ -1020,8 +1021,9 @@ function ApprovalQualityReview({ approval }: { approval: AIApproval }) {
             key={value}
             type="button"
             onClick={() => setScore(value)}
+            disabled={!canReview}
             className={cn(
-              "flex size-7 items-center justify-center rounded-lg border text-xs font-semibold transition-colors",
+              "flex size-7 items-center justify-center rounded-lg border text-xs font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50",
               score === value
                 ? "border-[var(--aime-brand-200)] bg-[var(--aime-brand-50)] text-[var(--aime-brand-700)]"
                 : "border-[var(--aime-border)] text-[var(--aime-text-tertiary)] hover:bg-[var(--aime-surface-muted)]",
@@ -1035,8 +1037,12 @@ function ApprovalQualityReview({ approval }: { approval: AIApproval }) {
         value={note}
         onChange={(event) => setNote(event.target.value)}
         placeholder="记录这次判断哪里好、哪里需要改..."
+        disabled={!canReview}
         className="mt-3 min-h-20 resize-none rounded-xl border-[var(--aime-border)] text-sm"
       />
+      {!canReview && (
+        <p className="mt-2 text-xs text-[var(--aime-text-tertiary)]">审批完成后可进行质量复盘。</p>
+      )}
       <Button
         type="button"
         size="sm"
@@ -1049,6 +1055,17 @@ function ApprovalQualityReview({ approval }: { approval: AIApproval }) {
       </Button>
     </section>
   );
+}
+
+function canReviewAIApproval(approval: AIApproval) {
+  if (["succeeded", "failed", "skipped"].includes(approval.execution_status)) return true;
+  return ["rejected", "taken_over", "expired"].includes(approval.status);
+}
+
+function qualityOutcomeForApproval(approval: AIApproval): "accepted" | "needs_retry" | "wrong" {
+  if (approval.execution_status === "succeeded") return "accepted";
+  if (approval.execution_status === "failed") return "needs_retry";
+  return "wrong";
 }
 
 function PayloadBlock({ title, value, note }: { title: string; value: unknown; note?: string }) {

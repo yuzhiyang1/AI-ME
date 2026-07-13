@@ -17,6 +17,7 @@ const mockApi = vi.hoisted(() => ({
   rejectAIApproval: vi.fn(),
   observeAIApproval: vi.fn(),
   takeOverAIApproval: vi.fn(),
+  rateAIApproval: vi.fn(),
   listTasksByIssue: vi.fn(),
   rerunIssue: vi.fn(),
 }));
@@ -120,6 +121,7 @@ describe("ApprovalCenterPage edit then approve", () => {
     mockApi.rejectAIApproval.mockResolvedValue(approval);
     mockApi.observeAIApproval.mockResolvedValue(approval);
     mockApi.takeOverAIApproval.mockResolvedValue(approval);
+    mockApi.rateAIApproval.mockResolvedValue(approval);
     mockApi.listTasksByIssue.mockResolvedValue([]);
     mockApi.rerunIssue.mockResolvedValue({});
   });
@@ -203,6 +205,39 @@ describe("ApprovalCenterPage edit then approve", () => {
     expect(screen.getAllByText(/feishu client is not configured/).length).toBeGreaterThan(0);
     expect(await screen.findByText(/状态：失败/)).toHaveTextContent("渠道：feishu");
     expect(screen.getByText(/状态：失败/)).toHaveTextContent("消息：msg-1");
+  });
+
+  it("submits needs_retry when reviewing a failed execution", async () => {
+    const failedApproval = makeApproval({
+      status: "approved",
+      execution_status: "failed",
+    });
+    mockApi.listAIApprovals.mockResolvedValue({ approvals: [failedApproval], total: 1 });
+    mockApi.getAIApproval.mockResolvedValue(failedApproval);
+    mockApi.rateAIApproval.mockResolvedValue(failedApproval);
+
+    renderApprovals();
+
+    expect(await screen.findByText("是否对外回复退款问题")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "4" }));
+    fireEvent.click(screen.getByRole("button", { name: "记录评分" }));
+
+    await waitFor(() => {
+      expect(mockApi.rateAIApproval).toHaveBeenCalledWith("approval-1", {
+        score: 4,
+        note: "",
+        outcome: "needs_retry",
+      });
+    });
+  });
+
+  it("disables quality review until the approval reaches a terminal state", async () => {
+    renderApprovals();
+
+    expect(await screen.findByText("是否对外回复退款问题")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "4" })).toBeDisabled();
+    expect(screen.getByText("审批完成后可进行质量复盘。")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "记录评分" })).toBeDisabled();
   });
 
   it("disables external approval while the employee task result is pending", async () => {

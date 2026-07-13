@@ -137,8 +137,12 @@ export type {
 export type {
   AIMeActionType,
   AIMeAgentContext,
+  AIMeBudgetStatus,
   AIMeCockpitSummary,
   AIMeContextSummary,
+  AIMeDecision,
+  AIMeDecisionLedgerSummary,
+  AIMeDecisionQualityOutcome,
   AIMeEvidence,
   AIMeIssueContext,
   AIMeMemoryContext,
@@ -150,4 +154,6 @@ export type {
   AIMeThinkResponse,
   AIMeTurnInput,
   AIMeWorkspaceContext,
+  ListAIMeDecisionsParams,
+  ListAIMeDecisionsResponse,
 } from "./aime";

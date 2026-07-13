@@ -25,7 +25,11 @@ import {
 } from "lucide-react";
 import { api } from "@multica/core/api";
 import { agentTaskSnapshotOptions } from "@multica/core/agents";
-import { aimeCockpitSummaryOptions, useThinkAIMe } from "@multica/core/aime";
+import {
+  aimeCockpitSummaryOptions,
+  aimeDecisionLedgerOptions,
+  useThinkAIMe,
+} from "@multica/core/aime";
 import { approvalListOptions } from "@multica/core/approvals";
 import { inboxListOptions, deduplicateInboxItems } from "@multica/core/inbox/queries";
 import { memoryListOptions } from "@multica/core/memory";
@@ -74,6 +78,7 @@ import {
   type CockpitInboxItem,
   type CockpitWorkItem,
 } from "./dashboard-data";
+import { DecisionLedgerPanel } from "./decision-ledger-panel";
 
 const INTENTS: { value: AIMeThinkIntent; label: string }[] = [
   { value: "triage", label: "判断优先级" },
@@ -140,6 +145,7 @@ export function AIMeDashboardPage() {
   const agentsQuery = useQuery(agentListOptions(wsId));
   const issuesQuery = useQuery(issueListOptions(wsId));
   const summaryQuery = useQuery(aimeCockpitSummaryOptions(wsId));
+  const decisionLedgerQuery = useQuery(aimeDecisionLedgerOptions(wsId, { limit: 8, offset: 0 }));
   const approvalsQuery = useQuery(approvalListOptions(wsId, { status: "pending", limit: 20 }));
   const inboxQuery = useQuery(inboxListOptions(wsId));
   const taskSnapshotQuery = useQuery(agentTaskSnapshotOptions(wsId));
@@ -279,6 +285,15 @@ export function AIMeDashboardPage() {
           memoryUsedToday={summary?.memory_used_today ?? 0}
           onlineAgents={onlineAgents.length}
           totalAgents={agents.length}
+        />
+
+        <DecisionLedgerPanel
+          data={decisionLedgerQuery.data}
+          isLoading={decisionLedgerQuery.isLoading}
+          isRefetching={decisionLedgerQuery.isRefetching}
+          error={firstErrorMessage(decisionLedgerQuery.error)}
+          onRetry={() => void decisionLedgerQuery.refetch()}
+          approvalPath={(id) => paths.approvals(id)}
         />
 
         <section className="grid shrink-0 gap-4 xl:grid-cols-[minmax(0,1.25fr)_minmax(360px,0.75fr)]">

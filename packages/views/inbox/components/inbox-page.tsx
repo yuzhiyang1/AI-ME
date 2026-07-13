@@ -889,6 +889,8 @@ function modeLabel(mode: string) {
       return "兜底判断";
     case "provider_error":
       return "模型异常";
+    case "budget_exceeded":
+      return "今日预算已用完";
     case "unconfigured":
       return "未配置";
     default:

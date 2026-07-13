@@ -987,6 +987,26 @@ func TestEstimateAIMeModelCostUsesDeepSeekCachePricing(t *testing.T) {
 	}
 }
 
+func TestFeishuDogfoodCaseStatusCountsReviewedTerminalOutcomes(t *testing.T) {
+	tests := []struct {
+		name string
+		log  FeishuMessageLogResponse
+	}{
+		{name: "sent", log: FeishuMessageLogResponse{ApprovalID: "approval", ExecutionStatus: "succeeded", QualityScore: 5}},
+		{name: "failed", log: FeishuMessageLogResponse{ApprovalID: "approval", ExecutionStatus: "failed", QualityScore: 2}},
+		{name: "rejected", log: FeishuMessageLogResponse{ApprovalID: "approval", ApprovalStatus: "rejected", ExecutionStatus: "skipped", QualityScore: 3}},
+		{name: "taken over", log: FeishuMessageLogResponse{ApprovalID: "approval", ApprovalStatus: "taken_over", QualityScore: 4}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stage, completed, blockingReason := feishuDogfoodCaseStatus(tt.log)
+			if stage != "reviewed" || !completed || blockingReason != "" {
+				t.Fatalf("status = (%q, %t, %q), want reviewed terminal case", stage, completed, blockingReason)
+			}
+		})
+	}
+}
+
 func TestListFeishuLogsReturnsDogfoodPanel(t *testing.T) {
 	if testHandler == nil {
 		t.Skip("handler test fixture is not available")
@@ -1060,6 +1080,12 @@ func TestListFeishuLogsReturnsDogfoodPanel(t *testing.T) {
 	if resp.Summary.TotalReceived < 1 || resp.Summary.DogfoodCompleted != 0 || resp.Summary.DogfoodTarget != 20 {
 		t.Fatalf("summary = %+v, want dogfood progress", resp.Summary)
 	}
+	if resp.Run.ID == "" || resp.Run.Status != "active" || resp.Run.Target != 20 || resp.Run.StartedAt == "" {
+		t.Fatalf("dogfood run = %+v, want a stable active batch", resp.Run)
+	}
+	if resp.Run.FirstCloseSeconds != nil || resp.Run.FirstCloseWithinTenMinutes {
+		t.Fatalf("dogfood run timing = %+v, want no completed case yet", resp.Run)
+	}
 	if len(resp.Cases) != 20 {
 		t.Fatalf("dogfood cases = %d, want 20 executable slots", len(resp.Cases))
 	}
@@ -1073,8 +1099,8 @@ func TestListFeishuLogsReturnsDogfoodPanel(t *testing.T) {
 	if matchedCase == nil || matchedCase.Stage != "pending_approval" || matchedCase.Completed {
 		t.Fatalf("dogfood case = %#v, want pending approval", matchedCase)
 	}
-	if resp.Onboarding.TotalSteps != 10 || resp.Onboarding.CompletedSteps == 0 {
-		t.Fatalf("onboarding = %+v, want ten first-closure steps", resp.Onboarding)
+	if resp.Onboarding.TotalSteps != 11 || resp.Onboarding.CompletedSteps == 0 {
+		t.Fatalf("onboarding = %+v, want eleven first-closure steps", resp.Onboarding)
 	}
 	if resp.Cost.DailyBudgetCents != 20 || resp.Cost.BudgetStatus == "" {
 		t.Fatalf("cost = %+v, want configured budget", resp.Cost)

@@ -41,6 +41,7 @@ type AIModelCompletion struct {
 	Content string         `json:"content"`
 	Message AIModelMessage `json:"message"`
 	Usage   AIModelUsage   `json:"usage"`
+	RunID   pgtype.UUID    `json:"-"`
 }
 
 // AIModelMessage is the provider-neutral Chat Completions message shape used
@@ -499,6 +500,25 @@ func (h *Handler) ThinkAIMe(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
+	if h.aimeBudgetExceeded(r.Context(), parseUUID(workspaceID)) {
+		resp := h.fallbackAIMeResponse(
+			ctx,
+			policy,
+			"budget_exceeded",
+			"AI-Me 今日 LLM 预算已用完，已停止新的模型调用。",
+			"请等待次日预算重置，或在设置中提高 AI_ME_DAILY_BUDGET_CENTS。",
+		)
+		resp.NeedApproval = false
+		resp.ReasoningSummary = "预算策略在调用模型前生效，本次没有产生新的模型费用。"
+		resp.Actions = []AIMeSuggestedAction{{
+			Type:             "no_action",
+			Title:            "停止本次模型调用",
+			Description:      "今日预算已耗尽，AI-Me 保留现有工作项，不再发起新的 LLM 请求。",
+			RequiresApproval: false,
+		}}
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
 
 	systemPrompt := buildAIMeSystemPrompt(policy)
 	userPrompt, err := buildAIMeUserPrompt(userID, req, ctx, policy)
@@ -567,6 +587,7 @@ func (h *Handler) ThinkAIMe(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to prepare AI-Me approval")
 			return
 		}
+		params.RunID = completion.RunID
 		approval, err := h.createAIMeApproval(r.Context(), workspaceID, userID, params, approvalReq.Evidence)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to create AI-Me approval")
@@ -582,6 +603,7 @@ func (h *Handler) ThinkAIMe(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to prepare AI-Me auto execution")
 			return
 		}
+		params.RunID = completion.RunID
 		approval, _, err := h.createAndAutoApproveAIMeApproval(r.Context(), workspaceID, userID, params, approvalReq.Evidence)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to auto execute AI-Me action")
@@ -1205,6 +1227,9 @@ func (h *Handler) createAndAutoApproveAIMeApproval(ctx context.Context, workspac
 	qtx := h.Queries.WithTx(tx)
 	approval, err := qtx.CreateAIApproval(ctx, params)
 	if err != nil {
+		return db.AiMeApproval{}, approvedAIActionExecution{}, err
+	}
+	if err := validateAIApprovalRunLink(approval, params.RunID); err != nil {
 		return db.AiMeApproval{}, approvedAIActionExecution{}, err
 	}
 	for _, evidenceReq := range evidence {

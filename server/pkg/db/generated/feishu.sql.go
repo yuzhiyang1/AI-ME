@@ -114,6 +114,46 @@ func (q *Queries) ClaimFailedFeishuWebhookEvent(ctx context.Context, eventKey st
 	return i, err
 }
 
+const createFeishuDogfoodRun = `-- name: CreateFeishuDogfoodRun :one
+INSERT INTO ai_me_feishu_dogfood_run (workspace_id, target, started_at)
+VALUES (
+    $1::uuid,
+    $2::int,
+    COALESCE(
+        (
+            SELECT min(created_at)
+            FROM inbox_item
+            WHERE workspace_id = $1::uuid
+              AND details->>'source_type' = 'feishu'
+        ),
+        now()
+    )
+)
+RETURNING id, workspace_id, target, status, started_at, first_closed_at, completed_at, created_at, updated_at
+`
+
+type CreateFeishuDogfoodRunParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	Target      int32       `json:"target"`
+}
+
+func (q *Queries) CreateFeishuDogfoodRun(ctx context.Context, arg CreateFeishuDogfoodRunParams) (AiMeFeishuDogfoodRun, error) {
+	row := q.db.QueryRow(ctx, createFeishuDogfoodRun, arg.WorkspaceID, arg.Target)
+	var i AiMeFeishuDogfoodRun
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Target,
+		&i.Status,
+		&i.StartedAt,
+		&i.FirstClosedAt,
+		&i.CompletedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const createFeishuWebhookEvent = `-- name: CreateFeishuWebhookEvent :one
 INSERT INTO ai_me_feishu_webhook_event (
     workspace_id,
@@ -213,7 +253,7 @@ WHERE id = $6::uuid
   AND status = 'pending'
   AND execution_status = 'not_started'
   AND final_payload->>'draft_source' = 'pending_ai_model'
-RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id
+RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id, run_id
 `
 
 type EnrichPendingFeishuApprovalParams struct {
@@ -280,6 +320,7 @@ func (q *Queries) EnrichPendingFeishuApproval(ctx context.Context, arg EnrichPen
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.ToolCallID,
+		&i.RunID,
 	)
 	return i, err
 }
@@ -492,7 +533,15 @@ func (q *Queries) GetFeishuDeliverySummary(ctx context.Context, workspaceID pgty
 }
 
 const getFeishuDogfoodSummary = `-- name: GetFeishuDogfoodSummary :one
-WITH base AS (
+WITH selected_inbox AS (
+    SELECT id, workspace_id, recipient_type, recipient_id, type, severity, issue_id, title, body, read, archived, created_at, actor_type, actor_id, details
+    FROM inbox_item
+    WHERE workspace_id = $2::uuid
+      AND details->>'source_type' = 'feishu'
+      AND created_at >= $3::timestamptz
+    ORDER BY created_at ASC, id ASC
+    LIMIT $1::int
+), base AS (
     SELECT
         i.id AS inbox_item_id,
         i.created_at AS received_at,
@@ -504,10 +553,11 @@ WITH base AS (
             WHEN COALESCE(a.final_payload->>'draft_source', '') <> 'ai_model' THEN 0
             WHEN a.final_payload#>>'{draft_usage,cost_microusd}' ~ '^\d+$'
                 THEN (a.final_payload#>>'{draft_usage,cost_microusd}')::bigint
-            ELSE $1::bigint * 10000
+            ELSE $4::bigint * 10000
         END AS draft_cost_microusd,
-        q.quality_score
-    FROM inbox_item i
+        q.quality_score,
+        q.quality_scored_at
+    FROM selected_inbox i
     LEFT JOIN ai_me_approval a
       ON a.workspace_id = i.workspace_id
      AND a.id::text = i.details->>'approval_id'
@@ -516,7 +566,8 @@ WITH base AS (
             CASE
                 WHEN e.payload->>'score' ~ '^[1-5]$' THEN (e.payload->>'score')::int
                 ELSE 0
-            END AS quality_score
+            END AS quality_score,
+            e.created_at AS quality_scored_at
         FROM ai_me_approval_event e
         WHERE e.workspace_id = i.workspace_id
           AND a.id IS NOT NULL
@@ -526,8 +577,6 @@ WITH base AS (
         ORDER BY e.created_at DESC, e.id DESC
         LIMIT 1
     ) q ON true
-    WHERE i.workspace_id = $2::uuid
-      AND i.details->>'source_type' = 'feishu'
 )
 SELECT
     count(*)::bigint AS total_received,
@@ -546,22 +595,44 @@ SELECT
     COALESCE(avg(NULLIF(quality_score, 0)), 0)::float8 AS avg_quality_score,
     LEAST(count(*) FILTER (
         WHERE quality_score > 0
-          AND (execution_status = 'succeeded' OR approval_status = 'rejected')
-    ), 20)::bigint AS dogfood_completed,
-    GREATEST(20 - count(*) FILTER (
+          AND (
+              execution_status IN ('succeeded', 'failed', 'skipped')
+              OR approval_status IN ('rejected', 'taken_over', 'expired')
+          )
+    ), $1::int)::bigint AS dogfood_completed,
+    GREATEST($1::int - count(*) FILTER (
         WHERE quality_score > 0
-          AND (execution_status = 'succeeded' OR approval_status = 'rejected')
+          AND (
+              execution_status IN ('succeeded', 'failed', 'skipped')
+              OR approval_status IN ('rejected', 'taken_over', 'expired')
+          )
     ), 0)::bigint AS dogfood_remaining,
     min(received_at)::timestamptz AS first_received_at,
     max(received_at)::timestamptz AS last_received_at,
+    min(quality_scored_at) FILTER (
+        WHERE quality_score > 0
+          AND (
+              execution_status IN ('succeeded', 'failed', 'skipped')
+              OR approval_status IN ('rejected', 'taken_over', 'expired')
+          )
+    )::timestamptz AS first_closed_at,
+    max(quality_scored_at) FILTER (
+        WHERE quality_score > 0
+          AND (
+              execution_status IN ('succeeded', 'failed', 'skipped')
+              OR approval_status IN ('rejected', 'taken_over', 'expired')
+          )
+    )::timestamptz AS last_closed_at,
     COALESCE(sum(draft_cost_microusd) FILTER (WHERE received_at >= date_trunc('day', now())), 0)::bigint AS draft_cost_microusd,
     CEIL(COALESCE(sum(draft_cost_microusd) FILTER (WHERE received_at >= date_trunc('day', now())), 0)::numeric / 10000)::bigint AS estimated_draft_cost_cents
 FROM base
 `
 
 type GetFeishuDogfoodSummaryParams struct {
-	DraftCostCents int64       `json:"draft_cost_cents"`
-	WorkspaceID    pgtype.UUID `json:"workspace_id"`
+	Target         int32              `json:"target"`
+	WorkspaceID    pgtype.UUID        `json:"workspace_id"`
+	StartedAt      pgtype.Timestamptz `json:"started_at"`
+	DraftCostCents int64              `json:"draft_cost_cents"`
 }
 
 type GetFeishuDogfoodSummaryRow struct {
@@ -580,12 +651,19 @@ type GetFeishuDogfoodSummaryRow struct {
 	DogfoodRemaining        int64              `json:"dogfood_remaining"`
 	FirstReceivedAt         pgtype.Timestamptz `json:"first_received_at"`
 	LastReceivedAt          pgtype.Timestamptz `json:"last_received_at"`
+	FirstClosedAt           pgtype.Timestamptz `json:"first_closed_at"`
+	LastClosedAt            pgtype.Timestamptz `json:"last_closed_at"`
 	DraftCostMicrousd       int64              `json:"draft_cost_microusd"`
 	EstimatedDraftCostCents int64              `json:"estimated_draft_cost_cents"`
 }
 
 func (q *Queries) GetFeishuDogfoodSummary(ctx context.Context, arg GetFeishuDogfoodSummaryParams) (GetFeishuDogfoodSummaryRow, error) {
-	row := q.db.QueryRow(ctx, getFeishuDogfoodSummary, arg.DraftCostCents, arg.WorkspaceID)
+	row := q.db.QueryRow(ctx, getFeishuDogfoodSummary,
+		arg.Target,
+		arg.WorkspaceID,
+		arg.StartedAt,
+		arg.DraftCostCents,
+	)
 	var i GetFeishuDogfoodSummaryRow
 	err := row.Scan(
 		&i.TotalReceived,
@@ -603,6 +681,8 @@ func (q *Queries) GetFeishuDogfoodSummary(ctx context.Context, arg GetFeishuDogf
 		&i.DogfoodRemaining,
 		&i.FirstReceivedAt,
 		&i.LastReceivedAt,
+		&i.FirstClosedAt,
+		&i.LastClosedAt,
 		&i.DraftCostMicrousd,
 		&i.EstimatedDraftCostCents,
 	)
@@ -652,6 +732,31 @@ func (q *Queries) GetFeishuReliabilitySummary(ctx context.Context, workspaceID p
 		&i.ReplayProtectedEvents,
 		&i.EventsToday,
 		&i.LastEventAt,
+	)
+	return i, err
+}
+
+const getLatestFeishuDogfoodRun = `-- name: GetLatestFeishuDogfoodRun :one
+SELECT id, workspace_id, target, status, started_at, first_closed_at, completed_at, created_at, updated_at
+FROM ai_me_feishu_dogfood_run
+WHERE workspace_id = $1::uuid
+ORDER BY created_at DESC, id DESC
+LIMIT 1
+`
+
+func (q *Queries) GetLatestFeishuDogfoodRun(ctx context.Context, workspaceID pgtype.UUID) (AiMeFeishuDogfoodRun, error) {
+	row := q.db.QueryRow(ctx, getLatestFeishuDogfoodRun, workspaceID)
+	var i AiMeFeishuDogfoodRun
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Target,
+		&i.Status,
+		&i.StartedAt,
+		&i.FirstClosedAt,
+		&i.CompletedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
 	)
 	return i, err
 }
@@ -762,14 +867,24 @@ LEFT JOIN quality q
   ON q.approval_id = a.id
 WHERE i.workspace_id = $1::uuid
   AND i.details->>'source_type' = 'feishu'
-ORDER BY i.created_at DESC, i.id DESC
-LIMIT $3 OFFSET $2
+  AND (
+      $2::timestamptz IS NULL
+      OR i.created_at >= $2::timestamptz
+  )
+ORDER BY
+    CASE WHEN $3::boolean THEN i.created_at END ASC,
+    CASE WHEN $3::boolean THEN i.id END ASC,
+    CASE WHEN NOT $3::boolean THEN i.created_at END DESC,
+    CASE WHEN NOT $3::boolean THEN i.id END DESC
+LIMIT $5 OFFSET $4
 `
 
 type ListFeishuMessageLogsParams struct {
-	WorkspaceID pgtype.UUID `json:"workspace_id"`
-	Offset      int32       `json:"offset"`
-	Limit       int32       `json:"limit"`
+	WorkspaceID pgtype.UUID        `json:"workspace_id"`
+	StartedAt   pgtype.Timestamptz `json:"started_at"`
+	OldestFirst bool               `json:"oldest_first"`
+	Offset      int32              `json:"offset"`
+	Limit       int32              `json:"limit"`
 }
 
 type ListFeishuMessageLogsRow struct {
@@ -810,7 +925,13 @@ type ListFeishuMessageLogsRow struct {
 }
 
 func (q *Queries) ListFeishuMessageLogs(ctx context.Context, arg ListFeishuMessageLogsParams) ([]ListFeishuMessageLogsRow, error) {
-	rows, err := q.db.Query(ctx, listFeishuMessageLogs, arg.WorkspaceID, arg.Offset, arg.Limit)
+	rows, err := q.db.Query(ctx, listFeishuMessageLogs,
+		arg.WorkspaceID,
+		arg.StartedAt,
+		arg.OldestFirst,
+		arg.Offset,
+		arg.Limit,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -1070,6 +1191,55 @@ func (q *Queries) ReleaseClaimedFeishuDelivery(ctx context.Context, arg ReleaseC
 	return i, err
 }
 
+const updateFeishuDogfoodRunProgress = `-- name: UpdateFeishuDogfoodRunProgress :one
+UPDATE ai_me_feishu_dogfood_run SET
+    first_closed_at = COALESCE(first_closed_at, $1::timestamptz),
+    status = CASE
+        WHEN $2::bigint >= target THEN 'completed'
+        ELSE status
+    END,
+    completed_at = CASE
+        WHEN $2::bigint >= target
+            THEN COALESCE(completed_at, $3::timestamptz, now())
+        ELSE completed_at
+    END,
+    updated_at = now()
+WHERE id = $4::uuid
+  AND workspace_id = $5::uuid
+RETURNING id, workspace_id, target, status, started_at, first_closed_at, completed_at, created_at, updated_at
+`
+
+type UpdateFeishuDogfoodRunProgressParams struct {
+	FirstClosedAt pgtype.Timestamptz `json:"first_closed_at"`
+	Completed     int64              `json:"completed"`
+	LastClosedAt  pgtype.Timestamptz `json:"last_closed_at"`
+	ID            pgtype.UUID        `json:"id"`
+	WorkspaceID   pgtype.UUID        `json:"workspace_id"`
+}
+
+func (q *Queries) UpdateFeishuDogfoodRunProgress(ctx context.Context, arg UpdateFeishuDogfoodRunProgressParams) (AiMeFeishuDogfoodRun, error) {
+	row := q.db.QueryRow(ctx, updateFeishuDogfoodRunProgress,
+		arg.FirstClosedAt,
+		arg.Completed,
+		arg.LastClosedAt,
+		arg.ID,
+		arg.WorkspaceID,
+	)
+	var i AiMeFeishuDogfoodRun
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.Target,
+		&i.Status,
+		&i.StartedAt,
+		&i.FirstClosedAt,
+		&i.CompletedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const updateFeishuWebhookEventStatus = `-- name: UpdateFeishuWebhookEventStatus :one
 UPDATE ai_me_feishu_webhook_event SET
     workspace_id = COALESCE($1::uuid, workspace_id),
@@ -1139,7 +1309,7 @@ WHERE id = $8::uuid
   AND source_type = 'feishu'
   AND status IN ('pending', 'observing')
   AND execution_status = 'not_started'
-RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id
+RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id, run_id
 `
 
 type UpdatePendingFeishuApprovalForTaskParams struct {
@@ -1210,6 +1380,7 @@ func (q *Queries) UpdatePendingFeishuApprovalForTask(ctx context.Context, arg Up
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.ToolCallID,
+		&i.RunID,
 	)
 	return i, err
 }

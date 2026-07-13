@@ -496,6 +496,18 @@ func TestRateAIApprovalRecordsQualityReview(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&approval); err != nil {
 		t.Fatalf("decode approval: %v", err)
 	}
+	approveReq := withURLParam(
+		newRequest("POST", "/api/ai-me/approvals/"+approval.ID+"/approve?workspace_id="+testWorkspaceID, AIApprovalTransitionRequest{
+			Note: "先完成审批，再评价最终决策。",
+		}),
+		"id",
+		approval.ID,
+	)
+	w = httptest.NewRecorder()
+	testHandler.ApproveAIApproval(w, approveReq)
+	if w.Code != http.StatusOK {
+		t.Fatalf("ApproveAIApproval: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
 
 	rateReq := withURLParam(
 		newRequest("POST", "/api/ai-me/approvals/"+approval.ID+"/quality?workspace_id="+testWorkspaceID, AIApprovalQualityRequest{

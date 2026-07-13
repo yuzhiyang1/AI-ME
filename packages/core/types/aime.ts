@@ -1,3 +1,10 @@
+import type {
+  AIApprovalExecutionStatus,
+  AIApprovalRiskLevel,
+  AIApprovalSourceType,
+  AIApprovalStatus,
+} from "./approval";
+
 export type AIMeThinkIntent =
   | "triage"
   | "plan"
@@ -10,6 +17,7 @@ export type AIMeThinkMode =
   | "disabled"
   | "unconfigured"
   | "provider_error"
+  | "budget_exceeded"
   | "fallback";
 
 export type AIMeRiskLevel = "low" | "medium" | "high";
@@ -138,6 +146,74 @@ export interface AIMeCockpitSummary {
   memory_used_today: number;
   unread_inbox: number;
   active_issues: number;
+}
+
+export type AIMeDecisionQualityOutcome =
+  | "accepted"
+  | "needs_retry"
+  | "wrong";
+
+export type AIMeBudgetStatus =
+  | "unconfigured"
+  | "ok"
+  | "warning"
+  | "exceeded";
+
+export interface AIMeDecisionLedgerSummary {
+  today_runs: number;
+  succeeded: number;
+  failed: number;
+  reviewed: number;
+  avg_score: number;
+  accepted: number;
+  needs_retry: number;
+  wrong: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cost_microusd: number;
+  daily_budget_cents: number;
+  daily_budget_microusd: number;
+  remaining_budget_microusd: number;
+  budget_configured: boolean;
+  budget_status: AIMeBudgetStatus;
+}
+
+export interface AIMeDecision {
+  approval_id: string;
+  run_id: string | null;
+  title: string;
+  source_type: AIApprovalSourceType;
+  status: AIApprovalStatus;
+  execution_status: AIApprovalExecutionStatus;
+  risk_level: AIApprovalRiskLevel;
+  confidence: number;
+  provider: string;
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cost_microusd: number;
+  step_count: number;
+  max_steps: number;
+  quality_score: number;
+  quality_outcome: AIMeDecisionQualityOutcome | null;
+  quality_note: string;
+  reviewed_at: string | null;
+  created_at: string;
+  completed_at: string | null;
+  last_error: string;
+}
+
+export interface ListAIMeDecisionsParams {
+  limit?: number;
+  offset?: number;
+}
+
+export interface ListAIMeDecisionsResponse {
+  summary: AIMeDecisionLedgerSummary;
+  decisions: AIMeDecision[];
+  total: number;
 }
 
 export interface AIMeThinkResponse {

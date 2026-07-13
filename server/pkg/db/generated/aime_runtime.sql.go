@@ -1074,7 +1074,7 @@ WHERE approval.id = $2::uuid
   AND approval.workspace_id = $3::uuid
   AND call.id = $1::uuid
   AND run.workspace_id = approval.workspace_id
-RETURNING approval.id, approval.workspace_id, approval.requester_user_id, approval.source_type, approval.source_ref_id, approval.source_url, approval.issue_id, approval.inbox_item_id, approval.task_queue_id, approval.memory_id, approval.title, approval.summary, approval.status, approval.risk_level, approval.confidence, approval.reversibility, approval.action_type, approval.action_title, approval.action_description, approval.original_payload, approval.final_payload, approval.ai_reasoning_summary, approval.approval_note, approval.rejection_reason, approval.approved_by, approval.approved_at, approval.rejected_by, approval.rejected_at, approval.observed_by, approval.observed_at, approval.taken_over_by, approval.taken_over_at, approval.executed_at, approval.execution_status, approval.execution_error, approval.created_issue_id, approval.created_task_id, approval.created_comment_id, approval.expires_at, approval.created_at, approval.updated_at, approval.tool_call_id
+RETURNING approval.id, approval.workspace_id, approval.requester_user_id, approval.source_type, approval.source_ref_id, approval.source_url, approval.issue_id, approval.inbox_item_id, approval.task_queue_id, approval.memory_id, approval.title, approval.summary, approval.status, approval.risk_level, approval.confidence, approval.reversibility, approval.action_type, approval.action_title, approval.action_description, approval.original_payload, approval.final_payload, approval.ai_reasoning_summary, approval.approval_note, approval.rejection_reason, approval.approved_by, approval.approved_at, approval.rejected_by, approval.rejected_at, approval.observed_by, approval.observed_at, approval.taken_over_by, approval.taken_over_at, approval.executed_at, approval.execution_status, approval.execution_error, approval.created_issue_id, approval.created_task_id, approval.created_comment_id, approval.expires_at, approval.created_at, approval.updated_at, approval.tool_call_id, approval.run_id
 `
 
 type LinkAIMeApprovalToolCallParams struct {
@@ -1129,6 +1129,7 @@ func (q *Queries) LinkAIMeApprovalToolCall(ctx context.Context, arg LinkAIMeAppr
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.ToolCallID,
+		&i.RunID,
 	)
 	return i, err
 }

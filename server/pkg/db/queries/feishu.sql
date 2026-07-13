@@ -57,8 +57,57 @@ LEFT JOIN quality q
   ON q.approval_id = a.id
 WHERE i.workspace_id = sqlc.arg('workspace_id')::uuid
   AND i.details->>'source_type' = 'feishu'
-ORDER BY i.created_at DESC, i.id DESC
+  AND (
+      sqlc.narg('started_at')::timestamptz IS NULL
+      OR i.created_at >= sqlc.narg('started_at')::timestamptz
+  )
+ORDER BY
+    CASE WHEN sqlc.arg('oldest_first')::boolean THEN i.created_at END ASC,
+    CASE WHEN sqlc.arg('oldest_first')::boolean THEN i.id END ASC,
+    CASE WHEN NOT sqlc.arg('oldest_first')::boolean THEN i.created_at END DESC,
+    CASE WHEN NOT sqlc.arg('oldest_first')::boolean THEN i.id END DESC
 LIMIT sqlc.arg('limit') OFFSET sqlc.arg('offset');
+
+-- name: GetLatestFeishuDogfoodRun :one
+SELECT *
+FROM ai_me_feishu_dogfood_run
+WHERE workspace_id = sqlc.arg('workspace_id')::uuid
+ORDER BY created_at DESC, id DESC
+LIMIT 1;
+
+-- name: CreateFeishuDogfoodRun :one
+INSERT INTO ai_me_feishu_dogfood_run (workspace_id, target, started_at)
+VALUES (
+    sqlc.arg('workspace_id')::uuid,
+    sqlc.arg('target')::int,
+    COALESCE(
+        (
+            SELECT min(created_at)
+            FROM inbox_item
+            WHERE workspace_id = sqlc.arg('workspace_id')::uuid
+              AND details->>'source_type' = 'feishu'
+        ),
+        now()
+    )
+)
+RETURNING *;
+
+-- name: UpdateFeishuDogfoodRunProgress :one
+UPDATE ai_me_feishu_dogfood_run SET
+    first_closed_at = COALESCE(first_closed_at, sqlc.narg('first_closed_at')::timestamptz),
+    status = CASE
+        WHEN sqlc.arg('completed')::bigint >= target THEN 'completed'
+        ELSE status
+    END,
+    completed_at = CASE
+        WHEN sqlc.arg('completed')::bigint >= target
+            THEN COALESCE(completed_at, sqlc.narg('last_closed_at')::timestamptz, now())
+        ELSE completed_at
+    END,
+    updated_at = now()
+WHERE id = sqlc.arg('id')::uuid
+  AND workspace_id = sqlc.arg('workspace_id')::uuid
+RETURNING *;
 
 -- name: FindFeishuWebhookEventByKey :one
 SELECT *
@@ -313,7 +362,15 @@ SELECT
 FROM latest_quality;
 
 -- name: GetFeishuDogfoodSummary :one
-WITH base AS (
+WITH selected_inbox AS (
+    SELECT *
+    FROM inbox_item
+    WHERE workspace_id = sqlc.arg('workspace_id')::uuid
+      AND details->>'source_type' = 'feishu'
+      AND created_at >= sqlc.arg('started_at')::timestamptz
+    ORDER BY created_at ASC, id ASC
+    LIMIT sqlc.arg('target')::int
+), base AS (
     SELECT
         i.id AS inbox_item_id,
         i.created_at AS received_at,
@@ -327,8 +384,9 @@ WITH base AS (
                 THEN (a.final_payload#>>'{draft_usage,cost_microusd}')::bigint
             ELSE sqlc.arg('draft_cost_cents')::bigint * 10000
         END AS draft_cost_microusd,
-        q.quality_score
-    FROM inbox_item i
+        q.quality_score,
+        q.quality_scored_at
+    FROM selected_inbox i
     LEFT JOIN ai_me_approval a
       ON a.workspace_id = i.workspace_id
      AND a.id::text = i.details->>'approval_id'
@@ -337,7 +395,8 @@ WITH base AS (
             CASE
                 WHEN e.payload->>'score' ~ '^[1-5]$' THEN (e.payload->>'score')::int
                 ELSE 0
-            END AS quality_score
+            END AS quality_score,
+            e.created_at AS quality_scored_at
         FROM ai_me_approval_event e
         WHERE e.workspace_id = i.workspace_id
           AND a.id IS NOT NULL
@@ -347,8 +406,6 @@ WITH base AS (
         ORDER BY e.created_at DESC, e.id DESC
         LIMIT 1
     ) q ON true
-    WHERE i.workspace_id = sqlc.arg('workspace_id')::uuid
-      AND i.details->>'source_type' = 'feishu'
 )
 SELECT
     count(*)::bigint AS total_received,
@@ -367,14 +424,34 @@ SELECT
     COALESCE(avg(NULLIF(quality_score, 0)), 0)::float8 AS avg_quality_score,
     LEAST(count(*) FILTER (
         WHERE quality_score > 0
-          AND (execution_status = 'succeeded' OR approval_status = 'rejected')
-    ), 20)::bigint AS dogfood_completed,
-    GREATEST(20 - count(*) FILTER (
+          AND (
+              execution_status IN ('succeeded', 'failed', 'skipped')
+              OR approval_status IN ('rejected', 'taken_over', 'expired')
+          )
+    ), sqlc.arg('target')::int)::bigint AS dogfood_completed,
+    GREATEST(sqlc.arg('target')::int - count(*) FILTER (
         WHERE quality_score > 0
-          AND (execution_status = 'succeeded' OR approval_status = 'rejected')
+          AND (
+              execution_status IN ('succeeded', 'failed', 'skipped')
+              OR approval_status IN ('rejected', 'taken_over', 'expired')
+          )
     ), 0)::bigint AS dogfood_remaining,
     min(received_at)::timestamptz AS first_received_at,
     max(received_at)::timestamptz AS last_received_at,
+    min(quality_scored_at) FILTER (
+        WHERE quality_score > 0
+          AND (
+              execution_status IN ('succeeded', 'failed', 'skipped')
+              OR approval_status IN ('rejected', 'taken_over', 'expired')
+          )
+    )::timestamptz AS first_closed_at,
+    max(quality_scored_at) FILTER (
+        WHERE quality_score > 0
+          AND (
+              execution_status IN ('succeeded', 'failed', 'skipped')
+              OR approval_status IN ('rejected', 'taken_over', 'expired')
+          )
+    )::timestamptz AS last_closed_at,
     COALESCE(sum(draft_cost_microusd) FILTER (WHERE received_at >= date_trunc('day', now())), 0)::bigint AS draft_cost_microusd,
     CEIL(COALESCE(sum(draft_cost_microusd) FILTER (WHERE received_at >= date_trunc('day', now())), 0)::numeric / 10000)::bigint AS estimated_draft_cost_cents
 FROM base;

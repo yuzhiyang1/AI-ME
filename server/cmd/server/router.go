@@ -360,6 +360,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 
 			// AI-Me command center
 			r.Get("/api/ai-me/cockpit/summary", h.GetAIMeCockpitSummary)
+			r.Get("/api/ai-me/decisions", h.ListAIMeDecisions)
 			r.Get("/api/ai-me/onboarding", h.GetAIMeOnboardingStatus)
 			r.Post("/api/ai-me/think", h.ThinkAIMe)
 			r.Get("/api/integrations/feishu/status", h.GetFeishuIntegrationStatus)

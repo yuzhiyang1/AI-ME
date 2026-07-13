@@ -76,13 +76,31 @@ INSERT INTO ai_me_approval (
     final_payload,
     ai_reasoning_summary,
     expires_at,
-    tool_call_id
+    tool_call_id,
+    run_id
 ) VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
     $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-    $21, sqlc.narg('tool_call_id')::uuid
+    $21, sqlc.narg('tool_call_id')::uuid,
+    (
+        SELECT id
+        FROM ai_me_run
+        WHERE id = sqlc.narg('run_id')::uuid
+          AND workspace_id = $1::uuid
+    )
 )
 RETURNING *;
+
+-- name: LinkAIApprovalRun :one
+UPDATE ai_me_approval AS approval SET
+    run_id = run.id,
+    updated_at = now()
+FROM ai_me_run AS run
+WHERE approval.id = sqlc.arg('approval_id')::uuid
+  AND approval.workspace_id = sqlc.arg('workspace_id')::uuid
+  AND run.id = sqlc.arg('run_id')::uuid
+  AND run.workspace_id = approval.workspace_id
+RETURNING approval.*;
 
 -- name: LinkAIApprovalInboxItem :one
 UPDATE ai_me_approval SET
@@ -237,3 +255,95 @@ SELECT *
 FROM ai_me_approval_event
 WHERE approval_id = $1 AND workspace_id = $2
 ORDER BY created_at ASC, id ASC;
+
+-- name: CountAIMeDecisions :one
+SELECT count(*)::bigint
+FROM ai_me_approval
+WHERE workspace_id = sqlc.arg('workspace_id')::uuid;
+
+-- name: ListAIMeDecisions :many
+WITH latest_quality AS (
+    SELECT DISTINCT ON (approval_id)
+        approval_id,
+        CASE
+            WHEN payload->>'score' ~ '^[1-5]$' THEN (payload->>'score')::int
+            ELSE 0
+        END AS quality_score,
+        COALESCE(payload->>'outcome', '')::text AS quality_outcome,
+        COALESCE(payload->>'note', '')::text AS quality_note,
+        created_at AS reviewed_at
+    FROM ai_me_approval_event
+    WHERE workspace_id = sqlc.arg('workspace_id')::uuid
+      AND event_type = 'edited'
+      AND payload->>'kind' = 'quality_review'
+    ORDER BY approval_id, created_at DESC, id DESC
+)
+SELECT
+    approval.id AS approval_id,
+    approval.run_id,
+    approval.title,
+    approval.source_type,
+    approval.status,
+    approval.execution_status,
+    approval.risk_level,
+    approval.confidence::float8 AS confidence,
+    COALESCE(run.provider, '')::text AS provider,
+    COALESCE(run.model, '')::text AS model,
+    COALESCE(run.input_tokens, 0)::bigint AS input_tokens,
+    COALESCE(run.output_tokens, 0)::bigint AS output_tokens,
+    COALESCE(run.cache_read_tokens, 0)::bigint AS cache_read_tokens,
+    COALESCE(run.cost_microusd, 0)::bigint AS cost_microusd,
+    COALESCE(run.step_count, 0)::int AS step_count,
+    COALESCE(run.max_steps, 0)::int AS max_steps,
+    COALESCE(quality.quality_score, 0)::int AS quality_score,
+    COALESCE(quality.quality_outcome, '')::text AS quality_outcome,
+    COALESCE(quality.quality_note, '')::text AS quality_note,
+    quality.reviewed_at,
+    approval.created_at,
+    COALESCE(run.completed_at, approval.executed_at) AS completed_at,
+    CASE
+        WHEN COALESCE(run.last_error, '') <> '' THEN run.last_error
+        ELSE approval.execution_error
+    END::text AS last_error
+FROM ai_me_approval AS approval
+LEFT JOIN ai_me_run AS run
+  ON run.id = approval.run_id
+ AND run.workspace_id = approval.workspace_id
+LEFT JOIN latest_quality AS quality ON quality.approval_id = approval.id
+WHERE approval.workspace_id = sqlc.arg('workspace_id')::uuid
+ORDER BY approval.created_at DESC, approval.id DESC
+LIMIT sqlc.arg('limit') OFFSET sqlc.arg('offset');
+
+-- name: GetAIMeDecisionLedgerSummary :one
+WITH today_runs AS (
+    SELECT status, input_tokens, output_tokens, cache_read_tokens, cost_microusd
+    FROM ai_me_run
+    WHERE workspace_id = sqlc.arg('workspace_id')::uuid
+      AND created_at >= date_trunc('day', now())
+), latest_quality AS (
+    SELECT DISTINCT ON (approval_id)
+        approval_id,
+        CASE
+            WHEN payload->>'score' ~ '^[1-5]$' THEN (payload->>'score')::int
+            ELSE 0
+        END AS score,
+        COALESCE(payload->>'outcome', '')::text AS outcome
+    FROM ai_me_approval_event
+    WHERE workspace_id = sqlc.arg('workspace_id')::uuid
+      AND event_type = 'edited'
+      AND payload->>'kind' = 'quality_review'
+    ORDER BY approval_id, created_at DESC, id DESC
+)
+SELECT
+    (SELECT count(*) FROM today_runs)::bigint AS today_runs,
+    (SELECT count(*) FROM today_runs WHERE status = 'succeeded')::bigint AS succeeded,
+    (SELECT count(*) FROM today_runs WHERE status = 'failed')::bigint AS failed,
+    (SELECT count(*) FROM latest_quality WHERE score > 0)::bigint AS reviewed,
+    COALESCE((SELECT avg(NULLIF(score, 0)) FROM latest_quality), 0)::float8 AS avg_score,
+    (SELECT count(*) FROM latest_quality WHERE outcome = 'accepted')::bigint AS accepted,
+    (SELECT count(*) FROM latest_quality WHERE outcome = 'needs_retry')::bigint AS needs_retry,
+    (SELECT count(*) FROM latest_quality WHERE outcome = 'wrong')::bigint AS wrong,
+    COALESCE((SELECT sum(input_tokens) FROM today_runs), 0)::bigint AS input_tokens,
+    COALESCE((SELECT sum(output_tokens) FROM today_runs), 0)::bigint AS output_tokens,
+    COALESCE((SELECT sum(cache_read_tokens) FROM today_runs), 0)::bigint AS cache_read_tokens,
+    COALESCE((SELECT sum(cost_microusd) FROM today_runs), 0)::bigint AS cost_microusd;

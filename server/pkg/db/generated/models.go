@@ -137,6 +137,7 @@ type AiMeApproval struct {
 	CreatedAt          pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt          pgtype.Timestamptz `json:"updated_at"`
 	ToolCallID         pgtype.UUID        `json:"tool_call_id"`
+	RunID              pgtype.UUID        `json:"run_id"`
 }
 
 type AiMeApprovalEvent struct {
@@ -178,6 +179,18 @@ type AiMeFeishuDelivery struct {
 	SentAt          pgtype.Timestamptz `json:"sent_at"`
 	CreatedAt       pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+}
+
+type AiMeFeishuDogfoodRun struct {
+	ID            pgtype.UUID        `json:"id"`
+	WorkspaceID   pgtype.UUID        `json:"workspace_id"`
+	Target        int32              `json:"target"`
+	Status        string             `json:"status"`
+	StartedAt     pgtype.Timestamptz `json:"started_at"`
+	FirstClosedAt pgtype.Timestamptz `json:"first_closed_at"`
+	CompletedAt   pgtype.Timestamptz `json:"completed_at"`
+	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
 }
 
 type AiMeFeishuWebhookEvent struct {

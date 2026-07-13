@@ -223,5 +223,5 @@ export interface AIApprovalTransitionRequest {
 export interface AIApprovalQualityRequest {
   score: number;
   note?: string;
-  outcome?: string;
+  outcome?: "accepted" | "needs_retry" | "wrong";
 }

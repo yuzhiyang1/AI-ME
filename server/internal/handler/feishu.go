@@ -163,6 +163,17 @@ type FeishuDogfoodSummaryResponse struct {
 	LastReceivedAt   *string `json:"last_received_at"`
 }
 
+type FeishuDogfoodRunResponse struct {
+	ID                         string  `json:"id"`
+	Status                     string  `json:"status"`
+	Target                     int32   `json:"target"`
+	StartedAt                  string  `json:"started_at"`
+	FirstClosedAt              *string `json:"first_closed_at"`
+	CompletedAt                *string `json:"completed_at"`
+	FirstCloseSeconds          *int64  `json:"first_close_seconds"`
+	FirstCloseWithinTenMinutes bool    `json:"first_close_within_ten_minutes"`
+}
+
 type AIMeCostControlResponse struct {
 	Currency                string `json:"currency"`
 	DraftCallCount          int64  `json:"draft_call_count"`
@@ -292,6 +303,7 @@ type AIMeOnboardingResponse struct {
 
 type FeishuDogfoodPanelResponse struct {
 	Status      FeishuIntegrationStatusResponse      `json:"status"`
+	Run         FeishuDogfoodRunResponse             `json:"run"`
 	Summary     FeishuDogfoodSummaryResponse         `json:"summary"`
 	Cost        AIMeCostControlResponse              `json:"cost"`
 	Reliability FeishuReliabilitySummaryResponse     `json:"reliability"`
@@ -377,8 +389,14 @@ func (h *Handler) ListFeishuLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit, offset := feishuLogPagination(r)
+	run, err := h.ensureFeishuDogfoodRun(r.Context(), workspaceUUID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load feishu dogfood run")
+		return
+	}
 	logs, err := h.Queries.ListFeishuMessageLogs(r.Context(), db.ListFeishuMessageLogsParams{
 		WorkspaceID: workspaceUUID,
+		OldestFirst: false,
 		Limit:       limit,
 		Offset:      offset,
 	})
@@ -388,7 +406,9 @@ func (h *Handler) ListFeishuLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	caseRows, err := h.Queries.ListFeishuMessageLogs(r.Context(), db.ListFeishuMessageLogsParams{
 		WorkspaceID: workspaceUUID,
-		Limit:       20,
+		StartedAt:   run.StartedAt,
+		OldestFirst: true,
+		Limit:       run.Target,
 		Offset:      0,
 	})
 	if err != nil {
@@ -396,11 +416,24 @@ func (h *Handler) ListFeishuLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	summary, err := h.Queries.GetFeishuDogfoodSummary(r.Context(), db.GetFeishuDogfoodSummaryParams{
+		Target:         run.Target,
 		WorkspaceID:    workspaceUUID,
+		StartedAt:      run.StartedAt,
 		DraftCostCents: aimeDraftCostCentsFromEnv(),
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load feishu summary")
+		return
+	}
+	run, err = h.Queries.UpdateFeishuDogfoodRunProgress(r.Context(), db.UpdateFeishuDogfoodRunProgressParams{
+		FirstClosedAt: summary.FirstClosedAt,
+		Completed:     summary.DogfoodCompleted,
+		LastClosedAt:  summary.LastClosedAt,
+		ID:            run.ID,
+		WorkspaceID:   workspaceUUID,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update feishu dogfood run")
 		return
 	}
 	workerUsage, err := h.Queries.GetAIMeWorkerUsageSummary(r.Context(), workspaceUUID)
@@ -447,13 +480,14 @@ func (h *Handler) ListFeishuLogs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to load AI-Me onboarding status")
 		return
 	}
-	summaryResp := feishuDogfoodSummaryToResponse(summary)
+	summaryResp := feishuDogfoodSummaryToResponse(summary, run.Target)
 	costResp := aimeCostControlToResponse(summary, workerUsage)
 	reliabilityResp := feishuReliabilitySummaryToResponse(reliability)
 	deliveryResp := feishuDeliverySummaryToResponse(delivery)
 	qualityResp := aimeQualitySummaryToResponse(quality)
 	writeJSON(w, http.StatusOK, FeishuDogfoodPanelResponse{
 		Status:      status,
+		Run:         feishuDogfoodRunToResponse(run),
 		Summary:     summaryResp,
 		Cost:        costResp,
 		Reliability: reliabilityResp,
@@ -462,10 +496,24 @@ func (h *Handler) ListFeishuLogs(w http.ResponseWriter, r *http.Request) {
 		ModelRoute:  buildAIMeModelRoutingResponse(status, costResp),
 		Onboarding:  onboarding,
 		Checklist:   buildFeishuDogfoodChecklist(status, summaryResp, reliabilityResp, deliveryResp, qualityResp),
-		Cases:       buildFeishuDogfoodCases(feishuLogsToResponse(caseRows), 20),
+		Cases:       buildFeishuDogfoodCases(feishuLogsToResponse(caseRows), int(run.Target)),
 		Logs:        feishuLogsToResponse(logs),
 		Events:      feishuWebhookEventsToResponse(events),
 		Deliveries:  feishuDeliveriesToResponse(deliveries),
+	})
+}
+
+func (h *Handler) ensureFeishuDogfoodRun(ctx context.Context, workspaceID pgtype.UUID) (db.AiMeFeishuDogfoodRun, error) {
+	run, err := h.Queries.GetLatestFeishuDogfoodRun(ctx, workspaceID)
+	if err == nil {
+		return run, nil
+	}
+	if !isNotFound(err) {
+		return db.AiMeFeishuDogfoodRun{}, err
+	}
+	return h.Queries.CreateFeishuDogfoodRun(ctx, db.CreateFeishuDogfoodRunParams{
+		WorkspaceID: workspaceID,
+		Target:      20,
 	})
 }
 
@@ -476,10 +524,6 @@ func buildFeishuDogfoodCases(logs []FeishuMessageLogResponse, target int) []Feis
 	if len(logs) > target {
 		logs = logs[:target]
 	}
-	ordered := make([]FeishuMessageLogResponse, len(logs))
-	for i := range logs {
-		ordered[len(logs)-1-i] = logs[i]
-	}
 	cases := make([]FeishuDogfoodCaseResponse, target)
 	for i := 0; i < target; i++ {
 		caseResp := FeishuDogfoodCaseResponse{
@@ -488,8 +532,8 @@ func buildFeishuDogfoodCases(logs []FeishuMessageLogResponse, target int) []Feis
 			Stage:          "awaiting_message",
 			BlockingReason: "等待同事从飞书发送真实消息",
 		}
-		if i < len(ordered) {
-			log := ordered[i]
+		if i < len(logs) {
+			log := logs[i]
 			stage, completed, blockingReason := feishuDogfoodCaseStatus(log)
 			receivedAt := log.ReceivedAt
 			caseResp = FeishuDogfoodCaseResponse{
@@ -515,10 +559,10 @@ func feishuDogfoodCaseStatus(log FeishuMessageLogResponse) (string, bool, string
 	if log.ApprovalStatus == "pending" || log.ApprovalStatus == "observing" {
 		return "pending_approval", false, "等待人工审批"
 	}
+	if log.QualityScore > 0 && feishuDogfoodLogTerminal(log) {
+		return "reviewed", true, ""
+	}
 	if log.ApprovalStatus == "rejected" {
-		if log.QualityScore > 0 {
-			return "reviewed", true, ""
-		}
 		return "awaiting_review", false, "已驳回，等待质量复盘"
 	}
 	if log.ExecutionStatus == "failed" {
@@ -528,15 +572,28 @@ func feishuDogfoodCaseStatus(log FeishuMessageLogResponse) (string, bool, string
 		return "sending", false, "飞书回复发送中"
 	}
 	if log.ExecutionStatus == "succeeded" {
-		if log.QualityScore > 0 {
-			return "reviewed", true, ""
-		}
 		return "awaiting_review", false, "发送成功，等待质量复盘"
+	}
+	if log.ExecutionStatus == "skipped" || log.ApprovalStatus == "taken_over" || log.ApprovalStatus == "expired" {
+		return "awaiting_review", false, "流程已人工终止，等待质量复盘"
 	}
 	if log.ApprovalStatus == "approved" {
 		return "awaiting_send", false, "审批已通过，等待发送"
 	}
 	return "received", false, "等待 AI-Me 推进"
+}
+
+func feishuDogfoodLogTerminal(log FeishuMessageLogResponse) bool {
+	switch log.ExecutionStatus {
+	case "succeeded", "failed", "skipped":
+		return true
+	}
+	switch log.ApprovalStatus {
+	case "rejected", "taken_over", "expired":
+		return true
+	default:
+		return false
+	}
 }
 
 func (h *Handler) GetAIMeOnboardingStatus(w http.ResponseWriter, r *http.Request) {
@@ -613,7 +670,7 @@ func feishuLogsToResponse(rows []db.ListFeishuMessageLogsRow) []FeishuMessageLog
 	return resp
 }
 
-func feishuDogfoodSummaryToResponse(row db.GetFeishuDogfoodSummaryRow) FeishuDogfoodSummaryResponse {
+func feishuDogfoodSummaryToResponse(row db.GetFeishuDogfoodSummaryRow, target int32) FeishuDogfoodSummaryResponse {
 	return FeishuDogfoodSummaryResponse{
 		TotalReceived:    row.TotalReceived,
 		ReceivedToday:    row.ReceivedToday,
@@ -625,11 +682,34 @@ func feishuDogfoodSummaryToResponse(row db.GetFeishuDogfoodSummaryRow) FeishuDog
 		AIDrafted:        row.AiDrafted,
 		QualityReviewed:  row.QualityReviewed,
 		AvgQualityScore:  row.AvgQualityScore,
-		DogfoodTarget:    20,
+		DogfoodTarget:    int64(target),
 		DogfoodCompleted: row.DogfoodCompleted,
 		DogfoodRemaining: row.DogfoodRemaining,
 		FirstReceivedAt:  timestampToPtr(row.FirstReceivedAt),
 		LastReceivedAt:   timestampToPtr(row.LastReceivedAt),
+	}
+}
+
+func feishuDogfoodRunToResponse(run db.AiMeFeishuDogfoodRun) FeishuDogfoodRunResponse {
+	var firstCloseSeconds *int64
+	withinTenMinutes := false
+	if run.StartedAt.Valid && run.FirstClosedAt.Valid {
+		seconds := int64(run.FirstClosedAt.Time.Sub(run.StartedAt.Time).Seconds())
+		if seconds < 0 {
+			seconds = 0
+		}
+		firstCloseSeconds = &seconds
+		withinTenMinutes = seconds <= int64((10 * time.Minute).Seconds())
+	}
+	return FeishuDogfoodRunResponse{
+		ID:                         uuidToString(run.ID),
+		Status:                     run.Status,
+		Target:                     run.Target,
+		StartedAt:                  timestampToString(run.StartedAt),
+		FirstClosedAt:              timestampToPtr(run.FirstClosedAt),
+		CompletedAt:                timestampToPtr(run.CompletedAt),
+		FirstCloseSeconds:          firstCloseSeconds,
+		FirstCloseWithinTenMinutes: withinTenMinutes,
 	}
 }
 
@@ -961,6 +1041,13 @@ func (h *Handler) buildAIMeOnboardingResponse(ctx context.Context, workspaceUUID
 	}
 	settings := aimeWorkspaceSettingsFromJSON(workspace.Settings)
 	llmConfigured := settings.Enabled && aimeModelConfiguredForSettings(h.AIModel, settings)
+	firstCloseWithinTenMinutes := false
+	dogfoodRun, err := h.Queries.GetLatestFeishuDogfoodRun(ctx, workspaceUUID)
+	if err == nil && dogfoodRun.StartedAt.Valid && dogfoodRun.FirstClosedAt.Valid {
+		firstCloseWithinTenMinutes = dogfoodRun.FirstClosedAt.Time.Sub(dogfoodRun.StartedAt.Time) <= 10*time.Minute
+	} else if err != nil && !isNotFound(err) {
+		return AIMeOnboardingResponse{}, err
+	}
 	steps := []AIMeOnboardingStepResponse{
 		{Key: "llm_configured", Title: "连接 AI-Me 大脑", Description: "配置 DeepSeek 或其他 LLM API，让 AI-Me 能生成判断和回复草稿。", Completed: llmConfigured},
 		{Key: "workers_ready", Title: "配置 AI 员工", Description: "至少准备一个 Codex 或 Claude Code 员工用于承接任务。", Completed: counts.AgentCount > 0},
@@ -972,6 +1059,7 @@ func (h *Handler) buildAIMeOnboardingResponse(ctx context.Context, workspaceUUID
 		{Key: "first_reply_sent", Title: "完成第一次发送", Description: "审批通过后，AI-Me 已成功通过飞书回复。", Completed: counts.FeishuSentCount > 0},
 		{Key: "quality_reviewed", Title: "完成第一次复盘", Description: "至少为一条 AI-Me 飞书回复打分，留下质量评估。", Completed: counts.FeishuQualityReviewCount > 0},
 		{Key: "budget_configured", Title: "设置每日预算", Description: "配置 AI_ME_DAILY_BUDGET_CENTS，让 AI-Me 有成本边界。", Completed: aimeDailyBudgetConfigured()},
+		{Key: "first_close_under_ten_minutes", Title: "10 分钟内完成首条闭环", Description: "从收到第一条真实飞书消息到发送并完成质量复盘，不超过 10 分钟。", Completed: firstCloseWithinTenMinutes},
 	}
 	completed := 0
 	for _, step := range steps {
@@ -1060,20 +1148,17 @@ func float64FromEnv(key string, fallback float64) float64 {
 	return parsed
 }
 
-func (h *Handler) aimeDraftBudgetExceeded(ctx context.Context, workspaceID pgtype.UUID) bool {
+func (h *Handler) aimeBudgetExceeded(ctx context.Context, workspaceID pgtype.UUID) bool {
 	budgetCents, configured := aimeDailyBudgetCentsConfig()
 	if !configured {
 		return false
 	}
-	summary, err := h.Queries.GetFeishuDogfoodSummary(ctx, db.GetFeishuDogfoodSummaryParams{
-		WorkspaceID:    workspaceID,
-		DraftCostCents: aimeDraftCostCentsFromEnv(),
-	})
+	summary, err := h.Queries.GetAIMeDecisionLedgerSummary(ctx, workspaceID)
 	if err != nil {
 		slog.Warn("failed to check AI-Me draft budget", "error", err)
 		return false
 	}
-	return summary.DraftCostMicrousd >= budgetCents*10_000
+	return summary.CostMicrousd >= budgetCents*10_000
 }
 
 func int64FromEnv(key string, fallback int64) int64 {
@@ -1458,7 +1543,7 @@ func (h *Handler) createFeishuInboxItemAndApproval(ctx context.Context, workspac
 		if configurable, ok := h.AIModel.(AIModelClientWithOptions); ok {
 			model = configurable.EffectiveModel(aimeModelOptionsFromSettings(settings))
 		}
-		if _, err := qtx.CreateAIMeRun(ctx, db.CreateAIMeRunParams{
+		run, err := qtx.CreateAIMeRun(ctx, db.CreateAIMeRunParams{
 			WorkspaceID: workspaceID,
 			UserID:      recipientID,
 			Source:      "feishu",
@@ -1475,7 +1560,16 @@ func (h *Handler) createFeishuInboxItemAndApproval(ctx context.Context, workspac
 			Model:           model,
 			MaxSteps:        aiMeMaxToolIterations,
 			IdempotencyKey:  "feishu:" + feishuSourceMessageID(payload),
-		}); err != nil {
+		})
+		if err != nil {
+			return db.InboxItem{}, db.AiMeApproval{}, err
+		}
+		approval, err = qtx.LinkAIApprovalRun(ctx, db.LinkAIApprovalRunParams{
+			ApprovalID:  approval.ID,
+			WorkspaceID: workspaceID,
+			RunID:       run.ID,
+		})
+		if err != nil {
 			return db.InboxItem{}, db.AiMeApproval{}, err
 		}
 	}
@@ -1541,7 +1635,7 @@ func (h *Handler) prepareFeishuReplyDraft(ctx context.Context, workspace db.Work
 		draft.Source = "model_unconfigured"
 		return draft, false
 	}
-	if h.aimeDraftBudgetExceeded(ctx, workspace.ID) {
+	if h.aimeBudgetExceeded(ctx, workspace.ID) {
 		draft.Source = "budget_exceeded"
 		draft.Error = "AI-Me daily LLM budget is exhausted"
 		return draft, false
@@ -1656,7 +1750,7 @@ func (h *Handler) generateFeishuReplyDraftWithRun(ctx context.Context, workspace
 		draft.Source = "model_unconfigured"
 		return draft
 	}
-	if h.aimeDraftBudgetExceeded(ctx, workspace.ID) {
+	if h.aimeBudgetExceeded(ctx, workspace.ID) {
 		draft.Source = "budget_exceeded"
 		draft.Error = "AI-Me daily LLM budget is exhausted"
 		return draft

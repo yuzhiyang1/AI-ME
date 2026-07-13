@@ -2,6 +2,7 @@ import { z } from "zod";
 import type {
   AIApproval,
   AIApprovalStats,
+  AIMeDecisionLedgerSummary,
   AIMeOnboardingStatus,
   AIMeCockpitSummary,
   AIMeThinkResponse,
@@ -9,6 +10,7 @@ import type {
   FeishuIntegrationStatus,
   KnowledgeDocument,
   ListAIApprovalsResponse,
+  ListAIMeDecisionsResponse,
   ListKnowledgeDocumentsResponse,
   ListMemoryEntriesResponse,
   ListIssuesResponse,
@@ -603,6 +605,17 @@ const FeishuDogfoodSummarySchema = z.object({
   last_received_at: z.string().nullable().default(null),
 }).loose();
 
+const FeishuDogfoodRunSchema = z.object({
+  id: z.string().default(""),
+  status: z.string().default("active"),
+  target: z.number().default(20),
+  started_at: z.string().default(""),
+  first_closed_at: z.string().nullable().default(null),
+  completed_at: z.string().nullable().default(null),
+  first_close_seconds: z.number().nullable().default(null),
+  first_close_within_ten_minutes: z.boolean().default(false),
+}).loose();
+
 const AIMeCostControlSchema = z.object({
   currency: z.string().default("USD"),
   draft_call_count: z.number().default(0),
@@ -756,6 +769,16 @@ export const FeishuDogfoodPanelSchema = z.object({
     required_scopes: [],
     warnings: [],
   }),
+  run: FeishuDogfoodRunSchema.default({
+    id: "",
+    status: "active",
+    target: 20,
+    started_at: "",
+    first_closed_at: null,
+    completed_at: null,
+    first_close_seconds: null,
+    first_close_within_ten_minutes: false,
+  }),
   summary: FeishuDogfoodSummarySchema.default({
     total_received: 0,
     received_today: 0,
@@ -846,6 +869,16 @@ export const FeishuDogfoodPanelSchema = z.object({
 
 export const EMPTY_FEISHU_DOGFOOD_PANEL: FeishuDogfoodPanel = {
   status: EMPTY_FEISHU_INTEGRATION_STATUS,
+  run: {
+    id: "",
+    status: "active",
+    target: 20,
+    started_at: "",
+    first_closed_at: null,
+    completed_at: null,
+    first_close_seconds: null,
+    first_close_within_ten_minutes: false,
+  },
   summary: {
     total_received: 0,
     received_today: 0,
@@ -927,6 +960,103 @@ export const EMPTY_FEISHU_DOGFOOD_PANEL: FeishuDogfoodPanel = {
   logs: [],
   events: [],
   deliveries: [],
+};
+
+const EMPTY_AIME_DECISION_LEDGER_SUMMARY: AIMeDecisionLedgerSummary = {
+  today_runs: 0,
+  succeeded: 0,
+  failed: 0,
+  reviewed: 0,
+  avg_score: 0,
+  accepted: 0,
+  needs_retry: 0,
+  wrong: 0,
+  input_tokens: 0,
+  output_tokens: 0,
+  cache_read_tokens: 0,
+  cost_microusd: 0,
+  daily_budget_cents: 0,
+  daily_budget_microusd: 0,
+  remaining_budget_microusd: 0,
+  budget_configured: false,
+  budget_status: "unconfigured",
+};
+
+const AIMeDecisionLedgerSummarySchema = z.object({
+  today_runs: z.number().default(0),
+  succeeded: z.number().default(0),
+  failed: z.number().default(0),
+  reviewed: z.number().default(0),
+  avg_score: z.number().default(0),
+  accepted: z.number().default(0),
+  needs_retry: z.number().default(0),
+  wrong: z.number().default(0),
+  input_tokens: z.number().default(0),
+  output_tokens: z.number().default(0),
+  cache_read_tokens: z.number().default(0),
+  cost_microusd: z.number().default(0),
+  daily_budget_cents: z.number().default(0),
+  daily_budget_microusd: z.number().default(0),
+  remaining_budget_microusd: z.number().default(0),
+  budget_configured: z.boolean().default(false),
+  budget_status: z.enum(["unconfigured", "ok", "warning", "exceeded"]).default("unconfigured"),
+});
+
+const AIMeDecisionQualityOutcomeSchema = z.string().nullable().default(null).transform((value) => {
+  if (value === "accepted" || value === "needs_retry" || value === "wrong") {
+    return value;
+  }
+  return null;
+});
+
+const AIMeDecisionSchema = z.object({
+  approval_id: z.string(),
+  run_id: z.string().nullable().default(null),
+  title: z.string(),
+  source_type: z.enum([
+    "ai_me_think",
+    "exception",
+    "inbox",
+    "issue",
+    "comment",
+    "agent_task",
+    "memory",
+    "feishu",
+    "email",
+    "github",
+    "manual",
+  ]).default("manual"),
+  status: z.enum(["pending", "approved", "rejected", "observing", "taken_over", "expired"]).default("pending"),
+  execution_status: z.enum(["not_started", "running", "succeeded", "failed", "skipped"]).default("not_started"),
+  risk_level: z.enum(["low", "medium", "high"]).default("low"),
+  confidence: z.number().default(0),
+  provider: z.string().default(""),
+  model: z.string().default(""),
+  input_tokens: z.number().default(0),
+  output_tokens: z.number().default(0),
+  cache_read_tokens: z.number().default(0),
+  cost_microusd: z.number().default(0),
+  step_count: z.number().default(0),
+  max_steps: z.number().default(0),
+  quality_score: z.number().default(0),
+  quality_outcome: AIMeDecisionQualityOutcomeSchema,
+  quality_note: z.string().default(""),
+  reviewed_at: z.string().nullable().default(null),
+  created_at: z.string(),
+  completed_at: z.string().nullable().default(null),
+  last_error: z.string().default(""),
+}).loose();
+
+export const AIMeDecisionLedgerSchema = z.object({
+  summary: AIMeDecisionLedgerSummarySchema.default(EMPTY_AIME_DECISION_LEDGER_SUMMARY),
+  decisions: z.array(AIMeDecisionSchema).default([]),
+  total: z.number().default(0),
+}).loose();
+
+export const EMPTY_AIME_DECISION_LEDGER: ListAIMeDecisionsResponse = {
+  summary: EMPTY_AIME_DECISION_LEDGER_SUMMARY,
+  decisions: [],
+  total: 0,
 };
 
 export const AIMeCockpitSummarySchema = z.object({

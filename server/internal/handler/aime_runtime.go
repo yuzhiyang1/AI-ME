@@ -78,7 +78,7 @@ func beginAIMeRun(ctx context.Context, executor *handlerAIMeToolExecutor, model 
 		content := strings.TrimSpace(string(run.FinalOutput))
 		return nil, &AIModelCompletion{Content: content, Message: AIModelMessage{Role: "assistant", Content: content}, Usage: AIModelUsage{
 			InputTokens: run.InputTokens, OutputTokens: run.OutputTokens, CacheReadTokens: run.CacheReadTokens,
-		}}, nil
+		}, RunID: run.ID}, nil
 	}
 	if run.Status != "queued" {
 		return nil, nil, fmt.Errorf("AI-Me run is already %s", run.Status)
