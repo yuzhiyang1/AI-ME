@@ -111,6 +111,22 @@ WHERE event_key = sqlc.arg('event_key')::text
   AND status = 'failed'
 RETURNING *;
 
+-- name: EnrichPendingFeishuApproval :one
+UPDATE ai_me_approval SET
+    summary = sqlc.arg('summary')::text,
+    risk_level = sqlc.arg('risk_level')::text,
+    confidence = sqlc.arg('confidence')::numeric,
+    final_payload = sqlc.arg('final_payload')::jsonb,
+    ai_reasoning_summary = sqlc.arg('ai_reasoning_summary')::text,
+    updated_at = now()
+WHERE id = sqlc.arg('id')::uuid
+  AND workspace_id = sqlc.arg('workspace_id')::uuid
+  AND source_type = 'feishu'
+  AND status = 'pending'
+  AND execution_status = 'not_started'
+  AND final_payload->>'draft_source' = 'pending_ai_model'
+RETURNING *;
+
 -- name: UpdateFeishuWebhookEventStatus :one
 UPDATE ai_me_feishu_webhook_event SET
     workspace_id = COALESCE(sqlc.narg('workspace_id')::uuid, workspace_id),

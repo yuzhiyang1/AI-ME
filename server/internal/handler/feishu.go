@@ -1101,12 +1101,12 @@ func int32FromEnv(key string, fallback int32) int32 {
 }
 
 func feishuDraftTimeout() time.Duration {
-	milliseconds := int64FromEnv("AI_ME_FEISHU_DRAFT_TIMEOUT_MS", 1200)
+	milliseconds := int64FromEnv("AI_ME_FEISHU_DRAFT_TIMEOUT_MS", 30_000)
 	if milliseconds < 10 {
 		milliseconds = 10
 	}
-	if milliseconds > 5000 {
-		milliseconds = 5000
+	if milliseconds > 120_000 {
+		milliseconds = 120_000
 	}
 	return time.Duration(milliseconds) * time.Millisecond
 }
@@ -1299,7 +1299,7 @@ func (h *Handler) ingestFeishuMessage(ctx context.Context, payload feishuEventCa
 		return feishuIngestResult{Status: "ignored", Reason: "empty_message"}, nil
 	}
 
-	draft := h.generateFeishuReplyDraft(ctx, workspace, recipient, payload, messageText, gate)
+	draft, enrichAsync := h.prepareFeishuReplyDraft(ctx, workspace)
 	item, approval, err := h.createFeishuInboxItemAndApproval(ctx, workspace.ID, recipient.UserID, payload, messageText, gate, draft)
 	if err != nil {
 		slog.Warn("飞书消息创建 AI-Me 收件箱和审批失败", append(logAttrs, "error", err)...)
@@ -1311,6 +1311,9 @@ func (h *Handler) ingestFeishuMessage(ctx context.Context, payload feishuEventCa
 	approvalID := uuidToString(approval.ID)
 	h.publish(protocol.EventApprovalCreated, workspaceID, "ai_me", recipientID, map[string]any{"approval": aiApprovalToResponse(approval)})
 	h.publish(protocol.EventInboxNew, workspaceID, "system", "", map[string]any{"item": inboxToResponse(item)})
+	if enrichAsync {
+		h.startFeishuReplyDraftEnrichment(workspace, recipient, item, approval, payload, messageText, gate, logAttrs)
+	}
 	slog.Info("飞书消息已进入 AI-Me 收件箱", append(logAttrs,
 		"workspace_id", workspaceID,
 		"recipient_id", recipientID,
@@ -1498,6 +1501,104 @@ func fallbackFeishuReplyDraft(source, errText string) feishuReplyDraft {
 	}
 }
 
+func (h *Handler) prepareFeishuReplyDraft(ctx context.Context, workspace db.Workspace) (feishuReplyDraft, bool) {
+	draft := fallbackFeishuReplyDraft("fallback", "")
+	settings := aimeWorkspaceSettingsFromJSON(workspace.Settings)
+	if !settings.Enabled {
+		draft.Source = "ai_me_disabled"
+		draft.Error = "AI-Me workspace settings are disabled"
+		return draft, false
+	}
+	if !aimeModelConfiguredForSettings(h.AIModel, settings) {
+		draft.Source = "model_unconfigured"
+		return draft, false
+	}
+	if h.aimeDraftBudgetExceeded(ctx, workspace.ID) {
+		draft.Source = "budget_exceeded"
+		draft.Error = "AI-Me daily LLM budget is exhausted"
+		return draft, false
+	}
+	draft.Source = "pending_ai_model"
+	draft.Summary = "飞书消息已进入审批队列，AI-Me 正在生成回复草稿。"
+	draft.ReasoningSummary = "先可靠接收并创建审批，再由 AI-Me 在后台补全待审批回复草稿。"
+	draft.Error = ""
+	return draft, true
+}
+
+func (h *Handler) startFeishuReplyDraftEnrichment(workspace db.Workspace, recipient db.Member, item db.InboxItem, approval db.AiMeApproval, payload feishuEventCallback, messageText string, gate feishuInboundGateResult, logAttrs []any) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), feishuDraftTimeout()+5*time.Second)
+		defer cancel()
+
+		draft := h.generateFeishuReplyDraft(ctx, workspace, recipient, payload, messageText, gate)
+		updated, err := h.enrichPendingFeishuApproval(ctx, item, approval, recipient.UserID, payload, messageText, gate, draft)
+		if err != nil {
+			if isNotFound(err) {
+				slog.Info("飞书 AI 草稿升级已跳过", append(logAttrs, "approval_id", uuidToString(approval.ID), "reason", "approval_no_longer_pending")...)
+				return
+			}
+			slog.Warn("飞书 AI 草稿升级失败", append(logAttrs, "approval_id", uuidToString(approval.ID), "error", err)...)
+			return
+		}
+
+		workspaceID := uuidToString(updated.WorkspaceID)
+		recipientID := uuidToString(recipient.UserID)
+		h.publish(protocol.EventApprovalUpdated, workspaceID, "ai_me", recipientID, map[string]any{"approval": aiApprovalToResponse(updated)})
+		slog.Info("飞书 AI 草稿已升级", append(logAttrs,
+			"approval_id", uuidToString(updated.ID),
+			"draft_source", draft.Source,
+			"draft_provider", draft.Provider,
+			"draft_model", draft.Model,
+			"draft_cost_microusd", draft.CostMicrousd,
+		)...)
+	}()
+}
+
+func (h *Handler) enrichPendingFeishuApproval(ctx context.Context, item db.InboxItem, approval db.AiMeApproval, actorID pgtype.UUID, payload feishuEventCallback, messageText string, gate feishuInboundGateResult, draft feishuReplyDraft) (db.AiMeApproval, error) {
+	request := feishuReplyApprovalRequest(item, payload, messageText, gate, draft)
+	finalPayload, err := json.Marshal(request.FinalPayload)
+	if err != nil {
+		return db.AiMeApproval{}, err
+	}
+	confidence, err := numericFromFloat64(draft.Confidence)
+	if err != nil {
+		return db.AiMeApproval{}, err
+	}
+
+	tx, err := h.TxStarter.Begin(ctx)
+	if err != nil {
+		return db.AiMeApproval{}, err
+	}
+	defer tx.Rollback(ctx)
+	qtx := h.Queries.WithTx(tx)
+	updated, err := qtx.EnrichPendingFeishuApproval(ctx, db.EnrichPendingFeishuApprovalParams{
+		Summary:            request.Summary,
+		RiskLevel:          request.RiskLevel,
+		Confidence:         confidence,
+		FinalPayload:       finalPayload,
+		AiReasoningSummary: request.AIReasoningSummary,
+		ID:                 approval.ID,
+		WorkspaceID:        approval.WorkspaceID,
+	})
+	if err != nil {
+		return db.AiMeApproval{}, err
+	}
+	if _, err := createAIApprovalEvent(ctx, qtx, updated, "ai_me", actorID, "edited", updated.Status, updated.Status, map[string]any{
+		"kind":                "ai_draft_enriched",
+		"draft_source":        draft.Source,
+		"draft_provider":      draft.Provider,
+		"draft_model":         draft.Model,
+		"draft_cost_microusd": draft.CostMicrousd,
+		"draft_error":         truncateText(draft.Error, 400),
+	}); err != nil {
+		return db.AiMeApproval{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return db.AiMeApproval{}, err
+	}
+	return updated, nil
+}
+
 func (h *Handler) generateFeishuReplyDraft(ctx context.Context, workspace db.Workspace, recipient db.Member, payload feishuEventCallback, messageText string, gate feishuInboundGateResult) feishuReplyDraft {
 	draft := fallbackFeishuReplyDraft("fallback", "")
 	settings := aimeWorkspaceSettingsFromJSON(workspace.Settings)
@@ -1676,6 +1777,9 @@ func feishuReplyApprovalRequest(item db.InboxItem, payload feishuEventCallback, 
 	}
 	if draft.Model != "" {
 		finalPayload["draft_model"] = draft.Model
+	}
+	if draft.Error != "" {
+		finalPayload["draft_error"] = truncateText(draft.Error, 400)
 	}
 	if draft.Source == "ai_model" {
 		finalPayload["draft_usage"] = map[string]any{

@@ -33,6 +33,30 @@ func (client blockingAIMeModelClient) CompleteWithUsage(ctx context.Context, sys
 	return AIModelCompletion{Content: content}, err
 }
 
+type delayedAIMeModelClient struct {
+	delay   time.Duration
+	content string
+	usage   AIModelUsage
+}
+
+func (delayedAIMeModelClient) Configured() bool { return true }
+func (delayedAIMeModelClient) Provider() string { return "fake" }
+func (delayedAIMeModelClient) Model() string    { return "delayed-model" }
+func (client delayedAIMeModelClient) Complete(ctx context.Context, _, _ string) (string, error) {
+	timer := time.NewTimer(client.delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case <-timer.C:
+		return client.content, nil
+	}
+}
+func (client delayedAIMeModelClient) CompleteWithUsage(ctx context.Context, systemPrompt, userPrompt string, _ AIModelOptions) (AIModelCompletion, error) {
+	content, err := client.Complete(ctx, systemPrompt, userPrompt)
+	return AIModelCompletion{Content: content, Usage: client.usage}, err
+}
+
 func TestFeishuOwnerMentionedMatchesAllowedOpenID(t *testing.T) {
 	message := feishuMessage{
 		MessageType: "text",
@@ -582,12 +606,16 @@ func TestFeishuWebhookCompletesFallbackAfterRequestCancellation(t *testing.T) {
 		t.Fatalf("cancelled request status = %d, body = %s", w.Code, w.Body.String())
 	}
 
-	var draftSource string
-	if err := testPool.QueryRow(ctx, `SELECT final_payload->>'draft_source' FROM ai_me_approval WHERE source_type = 'feishu' AND source_ref_id = $1`, messageID).Scan(&draftSource); err != nil {
-		t.Fatalf("query fallback approval: %v", err)
-	}
+	draftSource, _ := waitForFeishuDraftSource(t, ctx, messageID, "model_error", 2*time.Second)
 	if draftSource != "model_error" {
 		t.Fatalf("draft source = %q, want model_error fallback", draftSource)
+	}
+	var draftError string
+	if err := testPool.QueryRow(ctx, `SELECT final_payload->>'draft_error' FROM ai_me_approval WHERE source_type = 'feishu' AND source_ref_id = $1`, messageID).Scan(&draftError); err != nil {
+		t.Fatalf("query fallback draft error: %v", err)
+	}
+	if !strings.Contains(draftError, "deadline exceeded") {
+		t.Fatalf("draft error = %q, want deadline exceeded", draftError)
 	}
 }
 
@@ -658,7 +686,7 @@ func TestFeishuWebhookUsesAIMeModelForReplyDraft(t *testing.T) {
 	const messageID = "om_ai_me_model_draft_test"
 	ctx := context.Background()
 	cleanupFeishuMessageTestRows(ctx, messageID)
-	var capturedPrompt string
+	promptCh := make(chan string, 1)
 	origModel := testHandler.AIModel
 	testHandler.AIModel = fakeAIMeModelClient{
 		content: `{
@@ -671,7 +699,7 @@ func TestFeishuWebhookUsesAIMeModelForReplyDraft(t *testing.T) {
 			"evidence":[{"type":"user_input","label":"飞书消息","quote":"退款状态"}]
 		}`,
 		onComplete: func(_ string, userPrompt string) {
-			capturedPrompt = userPrompt
+			promptCh <- userPrompt
 		},
 		usage: AIModelUsage{
 			InputTokens:     120,
@@ -724,6 +752,12 @@ func TestFeishuWebhookUsesAIMeModelForReplyDraft(t *testing.T) {
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("webhook status = %d, body = %s", w.Code, w.Body.String())
 	}
+	var capturedPrompt string
+	select {
+	case capturedPrompt = <-promptCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for asynchronous model prompt")
+	}
 	if !strings.Contains(capturedPrompt, "客户比较着急") || !strings.Contains(capturedPrompt, "feishu") {
 		t.Fatalf("model prompt did not include Feishu message context: %s", capturedPrompt)
 	}
@@ -737,6 +771,7 @@ func TestFeishuWebhookUsesAIMeModelForReplyDraft(t *testing.T) {
 	if approvalID == "" {
 		t.Fatal("expected approval_id")
 	}
+	waitForFeishuDraftSource(t, ctx, messageID, "ai_model", 2*time.Second)
 
 	var (
 		summary         string
@@ -794,6 +829,83 @@ WHERE id = $1
 	}
 	if panel.Cost.DraftCallCount < 1 || panel.Cost.DraftCostMicrousd < 20 {
 		t.Fatalf("metered cost panel = %+v", panel.Cost)
+	}
+}
+
+func TestFeishuWebhookReturnsBeforeAIMeDraftCompletes(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("handler test fixture is not available")
+	}
+
+	const messageID = "om_ai_me_async_draft_test"
+	ctx := context.Background()
+	cleanupFeishuMessageTestRows(ctx, messageID)
+	origModel := testHandler.AIModel
+	testHandler.AIModel = delayedAIMeModelClient{
+		delay: 700 * time.Millisecond,
+		content: `{
+			"summary":"异步生成飞书回复草稿",
+			"risk_level":"medium",
+			"confidence":0.86,
+			"need_approval":true,
+			"reply_draft":"收到，我正在异步确认退款状态，确认后同步给你。",
+			"reasoning_summary":"先快速接收消息，再在后台生成待审批草稿。",
+			"evidence":[{"type":"user_input","label":"飞书消息","quote":"退款状态"}]
+		}`,
+		usage: AIModelUsage{InputTokens: 160, OutputTokens: 40, CacheReadTokens: 20},
+	}
+	t.Cleanup(func() {
+		testHandler.AIModel = origModel
+		cleanupFeishuMessageTestRows(ctx, messageID)
+	})
+
+	t.Setenv("FEISHU_WEBHOOK_TOKEN", "test-token")
+	t.Setenv("FEISHU_ENCRYPT_KEY", "")
+	t.Setenv("FEISHU_WORKSPACE_ID", testWorkspaceID)
+	t.Setenv("FEISHU_WORKSPACE_SLUG", "")
+	t.Setenv("FEISHU_OWNER_USER_ID", testUserID)
+	t.Setenv("FEISHU_ALLOWED_CHAT_ID", "")
+	t.Setenv("FEISHU_GROUP_MESSAGE_POLICY", "mention")
+	t.Setenv("AI_ME_FEISHU_DRAFT_TIMEOUT_MS", "3000")
+	payload := feishuEventCallback{
+		Header: feishuHeader{EventID: "evt_ai_me_async_draft_test", EventType: "im.message.receive_v1", Token: "test-token"},
+		Event: feishuEventBody{
+			Sender: feishuSender{SenderType: "user", SenderID: feishuSenderID{OpenID: "ou_async_draft"}},
+			Message: feishuMessage{
+				MessageID: messageID, ChatID: "oc_async_draft", ChatType: "p2p", MessageType: "text", Content: `{"text":"请异步确认退款状态"}`,
+			},
+		},
+	}
+
+	startedAt := time.Now()
+	w := httptest.NewRecorder()
+	testHandler.FeishuWebhook(w, feishuWebhookRequest(t, payload))
+	elapsed := time.Since(startedAt)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("async draft webhook status = %d, body = %s", w.Code, w.Body.String())
+	}
+	if elapsed >= 500*time.Millisecond {
+		t.Fatalf("webhook waited %s for AI draft, want under 500ms", elapsed)
+	}
+
+	draftSource, replyText := waitForFeishuDraftSource(t, ctx, messageID, "ai_model", 3*time.Second)
+	if draftSource != "ai_model" || replyText != "收到，我正在异步确认退款状态，确认后同步给你。" {
+		t.Fatalf("eventual draft = source %q text %q", draftSource, replyText)
+	}
+	var auditCount int
+	if err := testPool.QueryRow(ctx, `
+SELECT count(*)
+FROM ai_me_approval_event e
+JOIN ai_me_approval a ON a.id = e.approval_id
+WHERE a.source_type = 'feishu'
+  AND a.source_ref_id = $1
+  AND e.event_type = 'edited'
+  AND e.payload->>'kind' = 'ai_draft_enriched'
+`, messageID).Scan(&auditCount); err != nil {
+		t.Fatalf("query async draft audit event: %v", err)
+	}
+	if auditCount != 1 {
+		t.Fatalf("async draft audit event count = %d, want 1", auditCount)
 	}
 }
 
@@ -1030,6 +1142,26 @@ func encryptedFeishuWebhookRequest(t *testing.T, payload feishuEventCallback, en
 	req.Header.Set("X-Lark-Request-Nonce", nonce)
 	req.Header.Set("X-Lark-Signature", signature)
 	return req
+}
+
+func waitForFeishuDraftSource(t *testing.T, ctx context.Context, messageID, expectedSource string, timeout time.Duration) (string, string) {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	var draftSource, replyText string
+	for time.Now().Before(deadline) {
+		err := testPool.QueryRow(ctx, `
+SELECT final_payload->>'draft_source', final_payload->>'text'
+FROM ai_me_approval
+WHERE source_type = 'feishu' AND source_ref_id = $1
+`, messageID).Scan(&draftSource, &replyText)
+		if err == nil && draftSource == expectedSource {
+			return draftSource, replyText
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("draft source for %s = %q, want %q", messageID, draftSource, expectedSource)
+	return draftSource, replyText
 }
 
 func cleanupFeishuMessageTestRows(ctx context.Context, messageID string) {
