@@ -181,6 +181,8 @@ func (h *Handler) resumeAIMeTaskResultRun(ctx context.Context, run db.AiMeRun, l
 			InputTokens: run.InputTokens, OutputTokens: run.OutputTokens, CacheReadTokens: run.CacheReadTokens,
 		}
 		reusedFinalOutput = true
+	} else if hasMeaningfulAIMeFinalOutput(run.FinalOutput) {
+		return errors.New("persisted AI-Me task result decision is invalid")
 	}
 	if reusedFinalOutput {
 		if _, err := h.Queries.CompleteAIMeRun(ctx, db.CompleteAIMeRunParams{
@@ -223,6 +225,8 @@ func (h *Handler) resumeAIMeTaskResultRun(ctx context.Context, run db.AiMeRun, l
 			decision = parsed
 		} else if parsed, ok := parseAIMeDecision(completion.Content); ok && strings.TrimSpace(parsed.ReplyDraft) != "" {
 			decision = parsed
+		} else {
+			return errors.New("AI-Me task result decision is invalid")
 		}
 	} else {
 		finalOutput := jsonBytesOrObject(decision)
@@ -253,6 +257,11 @@ func (h *Handler) resumeAIMeTaskResultRun(ctx context.Context, run db.AiMeRun, l
 	}
 
 	return h.finalizeFeishuApprovalFromTask(ctx, approval, task, issue, decision, provider, model, usage, resultText, input.Depth)
+}
+
+func hasMeaningfulAIMeFinalOutput(raw []byte) bool {
+	value := strings.TrimSpace(string(raw))
+	return value != "" && value != "{}" && value != "null"
 }
 
 func (h *Handler) handleAIMeTaskResultRunError(ctx context.Context, run db.AiMeRun, leaseOwner string, cause error) (bool, error) {

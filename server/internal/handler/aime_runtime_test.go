@@ -23,6 +23,27 @@ type failingToolCallingAIMeModel struct {
 	calls int
 }
 
+func TestHasMeaningfulAIMeFinalOutput(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{name: "empty", raw: "", want: false},
+		{name: "empty object", raw: "{}", want: false},
+		{name: "null", raw: "null", want: false},
+		{name: "persisted decision", raw: `{"reply_draft":"done"}`, want: true},
+		{name: "invalid persisted response", raw: `{"reply_draft":123}`, want: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := hasMeaningfulAIMeFinalOutput([]byte(test.raw)); got != test.want {
+				t.Fatalf("hasMeaningfulAIMeFinalOutput(%q) = %v, want %v", test.raw, got, test.want)
+			}
+		})
+	}
+}
+
 func TestTaskCompletedEnqueuesSingleAIMeContinuation(t *testing.T) {
 	if testHandler == nil {
 		t.Skip("database not available")
