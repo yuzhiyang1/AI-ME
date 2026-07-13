@@ -30,6 +30,7 @@ export interface AIMeTurnInput {
 
 export interface AIMeThinkRequest {
   input: string;
+  request_id?: string;
   intent?: AIMeThinkIntent;
   source_type?: "manual" | "issue" | "inbox" | "feishu" | "email" | "github";
   source_ref_id?: string;

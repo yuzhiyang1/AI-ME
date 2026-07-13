@@ -147,6 +147,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	})
 	if opts.FeishuRetryContext != nil {
 		go h.RunFeishuDeliveryRetryScheduler(opts.FeishuRetryContext)
+		go h.RunAIMeRuntimeScheduler(opts.FeishuRetryContext)
 	}
 	if handler.FeishuWebSocketIntakeEnabled() {
 		go h.StartFeishuWebSocketIntake(context.Background())

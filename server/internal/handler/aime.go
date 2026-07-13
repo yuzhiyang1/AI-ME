@@ -38,8 +38,60 @@ type AIModelUsage struct {
 }
 
 type AIModelCompletion struct {
-	Content string       `json:"content"`
-	Usage   AIModelUsage `json:"usage"`
+	Content string         `json:"content"`
+	Message AIModelMessage `json:"message"`
+	Usage   AIModelUsage   `json:"usage"`
+}
+
+// AIModelMessage is the provider-neutral Chat Completions message shape used
+// by the AI-Me tool loop. Tool arguments stay as JSON text until the trusted
+// tool executor validates them against the registered schema.
+type AIModelMessage struct {
+	Role       string            `json:"role"`
+	Content    string            `json:"content,omitempty"`
+	ToolCallID string            `json:"tool_call_id,omitempty"`
+	ToolCalls  []AIModelToolCall `json:"tool_calls,omitempty"`
+}
+
+func (m AIModelMessage) MarshalJSON() ([]byte, error) {
+	type wireMessage struct {
+		Role       string            `json:"role"`
+		Content    any               `json:"content"`
+		ToolCallID string            `json:"tool_call_id,omitempty"`
+		ToolCalls  []AIModelToolCall `json:"tool_calls,omitempty"`
+	}
+	var content any = m.Content
+	if m.Role == "assistant" && m.Content == "" && len(m.ToolCalls) > 0 {
+		content = nil
+	}
+	return json.Marshal(wireMessage{
+		Role:       m.Role,
+		Content:    content,
+		ToolCallID: m.ToolCallID,
+		ToolCalls:  m.ToolCalls,
+	})
+}
+
+type AIModelToolCall struct {
+	ID       string                  `json:"id"`
+	Type     string                  `json:"type"`
+	Function AIModelToolCallFunction `json:"function"`
+}
+
+type AIModelToolCallFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+type AIModelToolDefinition struct {
+	Type     string                        `json:"type"`
+	Function AIModelToolFunctionDefinition `json:"function"`
+}
+
+type AIModelToolFunctionDefinition struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters"`
 }
 
 type AIModelClientWithOptions interface {
@@ -52,6 +104,10 @@ type AIModelClientWithOptions interface {
 // test doubles and alternate clients to change the base AIModelClient contract.
 type AIModelClientWithUsage interface {
 	CompleteWithUsage(ctx context.Context, systemPrompt, userPrompt string, options AIModelOptions) (AIModelCompletion, error)
+}
+
+type AIModelClientWithTools interface {
+	CompleteWithTools(ctx context.Context, messages []AIModelMessage, tools []AIModelToolDefinition, options AIModelOptions) (AIModelCompletion, error)
 }
 
 type openAICompatibleAIModelClient struct {
@@ -130,20 +186,37 @@ func (c *openAICompatibleAIModelClient) CompleteWithOptions(ctx context.Context,
 }
 
 func (c *openAICompatibleAIModelClient) CompleteWithUsage(ctx context.Context, systemPrompt, userPrompt string, options AIModelOptions) (AIModelCompletion, error) {
+	return c.completeChat(ctx, []AIModelMessage{
+		{Role: "system", Content: systemPrompt},
+		{Role: "user", Content: userPrompt},
+	}, nil, options)
+}
+
+func (c *openAICompatibleAIModelClient) CompleteWithTools(ctx context.Context, messages []AIModelMessage, tools []AIModelToolDefinition, options AIModelOptions) (AIModelCompletion, error) {
+	if len(messages) == 0 {
+		return AIModelCompletion{}, errors.New("AI-Me LLM messages are required")
+	}
+	return c.completeChat(ctx, messages, tools, options)
+}
+
+func (c *openAICompatibleAIModelClient) completeChat(ctx context.Context, messages []AIModelMessage, tools []AIModelToolDefinition, options AIModelOptions) (AIModelCompletion, error) {
 	if !c.ConfiguredWithOptions(options) {
 		return AIModelCompletion{}, errors.New("AI-Me LLM is not configured")
 	}
 	model := c.EffectiveModel(options)
 	payload := map[string]any{
-		"model": model,
-		"messages": []map[string]string{
-			{"role": "system", "content": systemPrompt},
-			{"role": "user", "content": userPrompt},
-		},
+		"model":       model,
+		"messages":    messages,
 		"temperature": c.temperature,
 	}
+	if len(tools) > 0 {
+		payload["tools"] = tools
+		payload["tool_choice"] = "auto"
+	}
 	if c.provider == "deepseek" {
-		payload["response_format"] = map[string]string{"type": "json_object"}
+		if len(tools) == 0 {
+			payload["response_format"] = map[string]string{"type": "json_object"}
+		}
 		payload["thinking"] = map[string]string{"type": "disabled"}
 	}
 	body, err := json.Marshal(payload)
@@ -172,9 +245,7 @@ func (c *openAICompatibleAIModelClient) CompleteWithUsage(ctx context.Context, s
 	}
 	var parsed struct {
 		Choices []struct {
-			Message struct {
-				Content string `json:"content"`
-			} `json:"message"`
+			Message AIModelMessage `json:"message"`
 		} `json:"choices"`
 		Usage struct {
 			PromptTokens          int64 `json:"prompt_tokens"`
@@ -189,8 +260,12 @@ func (c *openAICompatibleAIModelClient) CompleteWithUsage(ctx context.Context, s
 	if err := json.Unmarshal(respBody, &parsed); err != nil {
 		return AIModelCompletion{}, err
 	}
-	if len(parsed.Choices) == 0 || strings.TrimSpace(parsed.Choices[0].Message.Content) == "" {
-		return AIModelCompletion{}, errors.New("LLM returned no content")
+	if len(parsed.Choices) == 0 {
+		return AIModelCompletion{}, errors.New("LLM returned no choices")
+	}
+	message := parsed.Choices[0].Message
+	if strings.TrimSpace(message.Content) == "" && len(message.ToolCalls) == 0 {
+		return AIModelCompletion{}, errors.New("LLM returned neither content nor tool calls")
 	}
 	cacheReadTokens := parsed.Usage.PromptCacheHitTokens
 	if cacheReadTokens == 0 {
@@ -201,7 +276,8 @@ func (c *openAICompatibleAIModelClient) CompleteWithUsage(ctx context.Context, s
 		inputTokens = parsed.Usage.PromptCacheMissTokens + cacheReadTokens
 	}
 	return AIModelCompletion{
-		Content: parsed.Choices[0].Message.Content,
+		Content: message.Content,
+		Message: message,
 		Usage: AIModelUsage{
 			InputTokens:     inputTokens,
 			OutputTokens:    parsed.Usage.CompletionTokens,
@@ -212,6 +288,7 @@ func (c *openAICompatibleAIModelClient) CompleteWithUsage(ctx context.Context, s
 
 type AIMeThinkRequest struct {
 	Input          string          `json:"input"`
+	RequestID      string          `json:"request_id"`
 	Intent         string          `json:"intent"`
 	SourceType     string          `json:"source_type"`
 	SourceRefID    string          `json:"source_ref_id"`
@@ -391,6 +468,13 @@ func (h *Handler) ThinkAIMe(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "input is required")
 		return
 	}
+	if strings.TrimSpace(req.SourceRefID) == "" {
+		req.SourceRefID = firstNonEmpty(
+			strings.TrimSpace(req.RequestID),
+			strings.TrimSpace(r.Header.Get("Idempotency-Key")),
+			strings.TrimSpace(r.Header.Get("X-Request-ID")),
+		)
+	}
 	workspace, err := h.Queries.GetWorkspace(r.Context(), parseUUID(workspaceID))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load AI-Me settings")
@@ -422,12 +506,23 @@ func (h *Handler) ThinkAIMe(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to build AI-Me prompt")
 		return
 	}
-	raw, model, err := completeAIMeModel(r.Context(), h.AIModel, systemPrompt, userPrompt, settings)
+	toolExecutor := &handlerAIMeToolExecutor{
+		handler:     h,
+		workspaceID: workspaceID,
+		userID:      userID,
+		sourceType:  firstNonEmpty(req.SourceType, "ai_me_think"),
+		sourceRefID: req.SourceRefID,
+		sourceInput: req.Input,
+		context:     ctx,
+		policy:      policy,
+	}
+	completion, model, err := completeAIMeModelWithTools(r.Context(), h.AIModel, systemPrompt, userPrompt, toolExecutor, settings)
 	if err != nil {
 		resp := h.fallbackAIMeResponse(ctx, policy, "provider_error", "AI-Me 调用 LLM Provider 时失败。", err.Error())
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
+	raw := completion.Content
 	decision, ok := parseAIMeDecision(raw)
 	if !ok {
 		resp := h.fallbackAIMeResponse(ctx, policy, "fallback", "AI-Me 已收到模型回复，但回复不是完整 JSON。", raw)
@@ -1095,6 +1190,31 @@ func (h *Handler) createAndAutoApproveAIMeApproval(ctx context.Context, workspac
 		return db.AiMeApproval{}, approvedAIActionExecution{}, err
 	}
 	execution := h.executeApprovedAIActionInSavepoint(ctx, tx, approval, params.WorkspaceID, params.RequesterUserID, approvalEffectivePayload(approval, nil))
+	if params.ToolCallID.Valid {
+		if execution.Status == "succeeded" {
+			if _, err := qtx.CompleteAIMeToolCall(ctx, db.CompleteAIMeToolCallParams{
+				Result: jsonBytesOrObject(map[string]any{
+					"status":             execution.Status,
+					"created_issue_id":   uuidToPtr(execution.CreatedIssueID),
+					"created_task_id":    uuidToPtr(execution.CreatedTaskID),
+					"created_comment_id": uuidToPtr(execution.CreatedCommentID),
+				}),
+				CreatedIssueID:   execution.CreatedIssueID,
+				CreatedTaskID:    execution.CreatedTaskID,
+				CreatedCommentID: execution.CreatedCommentID,
+				ID:               params.ToolCallID,
+				WorkspaceID:      params.WorkspaceID,
+			}); err != nil {
+				return db.AiMeApproval{}, approvedAIActionExecution{}, err
+			}
+		} else {
+			if _, err := qtx.FailAIMeToolCall(ctx, db.FailAIMeToolCallParams{
+				Error: firstNonEmpty(execution.ExecutionError, "tool execution failed"), ID: params.ToolCallID, WorkspaceID: params.WorkspaceID,
+			}); err != nil {
+				return db.AiMeApproval{}, approvedAIActionExecution{}, err
+			}
+		}
+	}
 	updated, err := qtx.ApproveAIApproval(ctx, db.ApproveAIApprovalParams{
 		ApprovedBy:       params.RequesterUserID,
 		ApprovalNote:     optionalTextFromString("AI-Me 根据工作区设置自动执行。"),
@@ -1135,6 +1255,9 @@ func (h *Handler) createAndAutoApproveAIMeApproval(ctx context.Context, workspac
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return db.AiMeApproval{}, approvedAIActionExecution{}, err
+	}
+	if execution.CreatedIssue != nil {
+		h.publishApprovalIssueCreated(ctx, *execution.CreatedIssue, workspaceID, userID)
 	}
 	if execution.UpdatedIssue != nil {
 		h.publishApprovalIssueUpdated(ctx, *execution.UpdatedIssue, execution.PreviousIssue, workspaceID, userID)

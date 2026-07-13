@@ -756,7 +756,7 @@ async function seed(client) {
       description: "代码定位、实现、测试与本地验证",
       status: "idle",
       maxConcurrentTasks: 1,
-      model: "codex-local",
+      model: "",
       instructions: "负责代码修改、测试和提交前验证。遇到对外动作必须等待 AI-ME 审批。",
       defaultCodeContext: {
         type: "repo",
@@ -770,7 +770,7 @@ async function seed(client) {
       description: "方案分析、复杂 Review 与文档整理",
       status: "working",
       maxConcurrentTasks: 1,
-      model: "claude-code-local",
+      model: "",
       instructions: "负责复杂方案分析和文档化，输出必须保留证据与风险判断。",
       defaultCodeContext: {
         type: "repo",

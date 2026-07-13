@@ -105,6 +105,7 @@ export interface AIApproval {
   inbox_item_id: string | null;
   task_queue_id: string | null;
   memory_id: string | null;
+  tool_call_id?: string | null;
   title: string;
   summary: string;
   status: AIApprovalStatus | string;

@@ -75,11 +75,12 @@ INSERT INTO ai_me_approval (
     original_payload,
     final_payload,
     ai_reasoning_summary,
-    expires_at
+    expires_at,
+    tool_call_id
 ) VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
     $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-    $21
+    $21, sqlc.narg('tool_call_id')::uuid
 )
 RETURNING *;
 

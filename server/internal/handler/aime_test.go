@@ -1154,6 +1154,190 @@ func TestApproveAssignWorkerApprovalAssignsIssueAndQueuesTask(t *testing.T) {
 	}
 }
 
+func TestApproveCreateIssueCreatesAssignedIssueAndTask(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+	ctx := context.Background()
+	var agentID string
+	if err := testPool.QueryRow(ctx, `
+		SELECT id FROM agent
+		WHERE workspace_id = $1 AND name = 'Handler Test Agent'
+		ORDER BY created_at ASC
+		LIMIT 1
+	`, testWorkspaceID).Scan(&agentID); err != nil {
+		t.Fatalf("load handler test agent: %v", err)
+	}
+
+	payload := map[string]any{
+		"title":             "AI-Me tool call creates issue",
+		"description":       "由 AI-Me create_issue 工具生成。",
+		"status":            "todo",
+		"priority":          "high",
+		"target_agent_id":   agentID,
+		"target_agent_name": "Handler Test Agent",
+		"summary":           "核查问题并在 Issue 中记录结果。",
+	}
+	w := httptest.NewRecorder()
+	testHandler.CreateAIApproval(w, newRequest("POST", "/api/ai-me/approvals?workspace_id="+testWorkspaceID, CreateAIApprovalRequest{
+		SourceType:         "ai_me_think",
+		SourceRefID:        "tool-call-create-issue",
+		Title:              "创建并分配工作项",
+		Summary:            "AI-Me 判断需要创建正式工作项。",
+		RiskLevel:          "medium",
+		Reversibility:      "reversible",
+		ActionType:         "create_issue",
+		ActionTitle:        "创建 Issue",
+		ActionDescription:  "批准后创建 Issue 并分配给员工。",
+		OriginalPayload:    payload,
+		FinalPayload:       payload,
+		AIReasoningSummary: "消息需要实际处理，不能只做口头回复。",
+	}))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateAIApproval: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var approval AIApprovalResponse
+	if err := json.NewDecoder(w.Body).Decode(&approval); err != nil {
+		t.Fatalf("decode approval: %v", err)
+	}
+
+	approveReq := withURLParam(
+		newRequest("POST", "/api/ai-me/approvals/"+approval.ID+"/approve?workspace_id="+testWorkspaceID, AIApprovalTransitionRequest{Note: "批准创建"}),
+		"id",
+		approval.ID,
+	)
+	w = httptest.NewRecorder()
+	testHandler.ApproveAIApproval(w, approveReq)
+	if w.Code != http.StatusOK {
+		t.Fatalf("ApproveAIApproval: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var approved AIApprovalResponse
+	if err := json.NewDecoder(w.Body).Decode(&approved); err != nil {
+		t.Fatalf("decode approved approval: %v", err)
+	}
+	if approved.ExecutionStatus != "succeeded" || approved.CreatedIssueID == nil || approved.CreatedTaskID == nil {
+		t.Fatalf("execution = %q issue=%#v task=%#v", approved.ExecutionStatus, approved.CreatedIssueID, approved.CreatedTaskID)
+	}
+
+	t.Cleanup(func() {
+		_, _ = testPool.Exec(ctx, `DELETE FROM ai_me_approval WHERE id = $1`, approval.ID)
+		_, _ = testPool.Exec(ctx, `DELETE FROM agent_task_queue WHERE id = $1`, *approved.CreatedTaskID)
+		_, _ = testPool.Exec(ctx, `DELETE FROM activity_log WHERE issue_id = $1`, *approved.CreatedIssueID)
+		_, _ = testPool.Exec(ctx, `DELETE FROM issue WHERE id = $1`, *approved.CreatedIssueID)
+	})
+
+	var title, priority, status, assigneeID string
+	if err := testPool.QueryRow(ctx, `
+		SELECT title, priority, status, assignee_id
+		FROM issue WHERE id = $1
+	`, *approved.CreatedIssueID).Scan(&title, &priority, &status, &assigneeID); err != nil {
+		t.Fatalf("load created issue: %v", err)
+	}
+	if title != "AI-Me tool call creates issue" || priority != "high" || status != "todo" || assigneeID != agentID {
+		t.Fatalf("created issue = title:%q priority:%s status:%s assignee:%s", title, priority, status, assigneeID)
+	}
+
+	var taskIssueID, taskAgentID, taskStatus string
+	if err := testPool.QueryRow(ctx, `
+		SELECT issue_id, agent_id, status FROM agent_task_queue WHERE id = $1
+	`, *approved.CreatedTaskID).Scan(&taskIssueID, &taskAgentID, &taskStatus); err != nil {
+		t.Fatalf("load created task: %v", err)
+	}
+	if taskIssueID != *approved.CreatedIssueID || taskAgentID != agentID || taskStatus != "queued" {
+		t.Fatalf("created task = issue:%s agent:%s status:%s", taskIssueID, taskAgentID, taskStatus)
+	}
+}
+
+func TestApproveCreateIssueRejectsOfflineAgentRuntime(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+	ctx := context.Background()
+	var runtimeID, agentID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent_runtime (
+			workspace_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at
+		)
+		VALUES ($1, $2, 'local', $3, 'offline', 'offline approval test', '{}'::jsonb, now())
+		RETURNING id
+	`, testWorkspaceID, "Offline Approval Runtime "+randomID(), "offline_approval_test_"+randomID()).Scan(&runtimeID); err != nil {
+		t.Fatalf("create offline runtime: %v", err)
+	}
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent (
+			workspace_id, name, description, runtime_mode, runtime_config,
+			runtime_id, visibility, max_concurrent_tasks, owner_id
+		)
+		VALUES ($1, $2, '', 'local', '{}'::jsonb, $3, 'workspace', 1, $4)
+		RETURNING id
+	`, testWorkspaceID, "Offline Approval Agent "+randomID(), runtimeID, testUserID).Scan(&agentID); err != nil {
+		t.Fatalf("create offline agent: %v", err)
+	}
+
+	title := "AI-Me must not queue offline agent " + randomID()
+	payload := map[string]any{
+		"title":           title,
+		"status":          "todo",
+		"priority":        "medium",
+		"target_agent_id": agentID,
+	}
+	w := httptest.NewRecorder()
+	testHandler.CreateAIApproval(w, newRequest("POST", "/api/ai-me/approvals?workspace_id="+testWorkspaceID, CreateAIApprovalRequest{
+		SourceType:         "ai_me_think",
+		SourceRefID:        "offline-agent-" + randomID(),
+		Title:              "创建离线员工工作项",
+		Summary:            "离线员工不得接收新任务。",
+		RiskLevel:          "medium",
+		Reversibility:      "reversible",
+		ActionType:         "create_issue",
+		ActionTitle:        "创建 Issue",
+		ActionDescription:  "尝试分配离线员工。",
+		OriginalPayload:    payload,
+		FinalPayload:       payload,
+		AIReasoningSummary: "验证运行时可用性。",
+	}))
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateAIApproval: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var approval AIApprovalResponse
+	if err := json.NewDecoder(w.Body).Decode(&approval); err != nil {
+		t.Fatalf("decode approval: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = testPool.Exec(ctx, `DELETE FROM ai_me_approval WHERE id = $1`, approval.ID)
+		_, _ = testPool.Exec(ctx, `DELETE FROM agent WHERE id = $1`, agentID)
+		_, _ = testPool.Exec(ctx, `DELETE FROM agent_runtime WHERE id = $1`, runtimeID)
+	})
+
+	approveReq := withURLParam(
+		newRequest("POST", "/api/ai-me/approvals/"+approval.ID+"/approve?workspace_id="+testWorkspaceID, AIApprovalTransitionRequest{Note: "验证离线拦截"}),
+		"id",
+		approval.ID,
+	)
+	w = httptest.NewRecorder()
+	testHandler.ApproveAIApproval(w, approveReq)
+	if w.Code != http.StatusOK {
+		t.Fatalf("ApproveAIApproval: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var approved AIApprovalResponse
+	if err := json.NewDecoder(w.Body).Decode(&approved); err != nil {
+		t.Fatalf("decode approved approval: %v", err)
+	}
+	if approved.ExecutionStatus != "failed" || approved.ExecutionError != "agent's runtime is offline" {
+		t.Fatalf("execution = %q error = %q", approved.ExecutionStatus, approved.ExecutionError)
+	}
+	if approved.CreatedIssueID != nil || approved.CreatedTaskID != nil {
+		t.Fatalf("offline assignment created issue=%#v task=%#v", approved.CreatedIssueID, approved.CreatedTaskID)
+	}
+	var issueCount int
+	if err := testPool.QueryRow(ctx, `SELECT count(*) FROM issue WHERE workspace_id = $1 AND title = $2`, testWorkspaceID, title).Scan(&issueCount); err != nil {
+		t.Fatalf("count offline issues: %v", err)
+	}
+	if issueCount != 0 {
+		t.Fatalf("offline assignment created %d issues", issueCount)
+	}
+}
+
 func TestApproveApprovalRecordsExecutionFailure(t *testing.T) {
 	if testHandler == nil {
 		t.Skip("database not available")
@@ -1376,6 +1560,90 @@ func TestAIModelClientReportsTokenUsage(t *testing.T) {
 	}
 	if completion.Usage.InputTokens != 120 || completion.Usage.OutputTokens != 30 || completion.Usage.CacheReadTokens != 40 {
 		t.Fatalf("usage = %+v", completion.Usage)
+	}
+}
+
+func TestAIModelClientSupportsToolCalls(t *testing.T) {
+	var gotPayload map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotPayload); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{
+				"id":"call_create_issue_1",
+				"type":"function",
+				"function":{"name":"create_issue","arguments":"{\"title\":\"核查退款进度\",\"priority\":\"high\"}"}
+			}]}}],
+			"usage":{"prompt_tokens":88,"completion_tokens":22}
+		}`))
+	}))
+	t.Cleanup(server.Close)
+
+	client := NewAIModelClient(Config{
+		AIModelProvider: "deepseek",
+		AIModelBaseURL:  server.URL,
+		AIModelAPIKey:   "sk-test",
+	})
+	toolClient, ok := client.(AIModelClientWithTools)
+	if !ok {
+		t.Fatal("client should support tool calls")
+	}
+	completion, err := toolClient.CompleteWithTools(context.Background(), []AIModelMessage{
+		{Role: "system", Content: "你是 AI-Me"},
+		{Role: "user", Content: "帮我确认退款进度"},
+	}, []AIModelToolDefinition{{
+		Type: "function",
+		Function: AIModelToolFunctionDefinition{
+			Name:        "create_issue",
+			Description: "创建工作项",
+			Parameters:  json.RawMessage(`{"type":"object","properties":{"title":{"type":"string"}},"required":["title"]}`),
+		},
+	}}, AIModelOptions{})
+	if err != nil {
+		t.Fatalf("CompleteWithTools() error = %v", err)
+	}
+	if len(completion.Message.ToolCalls) != 1 {
+		t.Fatalf("tool calls = %#v", completion.Message.ToolCalls)
+	}
+	call := completion.Message.ToolCalls[0]
+	if call.ID != "call_create_issue_1" || call.Function.Name != "create_issue" {
+		t.Fatalf("tool call = %#v", call)
+	}
+	if call.Function.Arguments != `{"title":"核查退款进度","priority":"high"}` {
+		t.Fatalf("arguments = %q", call.Function.Arguments)
+	}
+	if _, exists := gotPayload["response_format"]; exists {
+		t.Fatalf("tool request must not force JSON response format: %#v", gotPayload["response_format"])
+	}
+	tools, ok := gotPayload["tools"].([]any)
+	if !ok || len(tools) != 1 {
+		t.Fatalf("tools payload = %#v", gotPayload["tools"])
+	}
+	if completion.Usage.InputTokens != 88 || completion.Usage.OutputTokens != 22 {
+		t.Fatalf("usage = %+v", completion.Usage)
+	}
+}
+
+func TestAIModelToolCallMessageKeepsNullableContent(t *testing.T) {
+	raw, err := json.Marshal(AIModelMessage{
+		Role: "assistant",
+		ToolCalls: []AIModelToolCall{{
+			ID: "call-1", Type: "function",
+			Function: AIModelToolCallFunction{Name: "create_issue", Arguments: `{}`},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("marshal tool message: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatalf("decode tool message: %v", err)
+	}
+	content, exists := payload["content"]
+	if !exists || content != nil {
+		t.Fatalf("content = %#v, exists = %v; want explicit null", content, exists)
 	}
 }
 

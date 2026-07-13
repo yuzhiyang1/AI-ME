@@ -85,6 +85,7 @@ const FILTERS: { key: ApprovalFilterKey; label: string }[] = [
 ];
 
 const EXECUTABLE_ACTION_TYPES = new Set<string>([
+  "create_issue",
   "assign_worker",
   "draft_reply",
   "send_external_message",
@@ -686,8 +687,11 @@ function ApprovalExecutionPanel({ approval }: { approval: AIApproval }) {
   const { getAgentName } = useActorName();
   const [retrying, setRetrying] = useState(false);
   const retryApprovalExecution = useRetryAIApprovalExecution();
-  const issueId = approval.issue_id;
-  const shouldTrackTask = approval.action_type === "assign_worker" || !!approval.created_task_id;
+  const issueId = approval.created_issue_id ?? approval.issue_id;
+  const shouldTrackTask =
+    approval.action_type === "create_issue" ||
+    approval.action_type === "assign_worker" ||
+    !!approval.created_task_id;
   const shouldShow =
     shouldTrackTask ||
     approval.status === "approved" ||

@@ -31,7 +31,7 @@ UPDATE ai_me_approval SET
 WHERE id = $9::uuid
   AND workspace_id = $10::uuid
   AND status IN ('pending', 'observing')
-RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at
+RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id
 `
 
 type ApproveAIApprovalParams struct {
@@ -103,6 +103,7 @@ func (q *Queries) ApproveAIApproval(ctx context.Context, arg ApproveAIApprovalPa
 		&i.ExpiresAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ToolCallID,
 	)
 	return i, err
 }
@@ -116,7 +117,7 @@ WHERE id = $1::uuid
   AND workspace_id = $2::uuid
   AND status = 'approved'
   AND execution_status = 'failed'
-RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at
+RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id
 `
 
 type ClaimAIApprovalExecutionRetryParams struct {
@@ -169,6 +170,7 @@ func (q *Queries) ClaimAIApprovalExecutionRetry(ctx context.Context, arg ClaimAI
 		&i.ExpiresAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ToolCallID,
 	)
 	return i, err
 }
@@ -229,13 +231,14 @@ INSERT INTO ai_me_approval (
     original_payload,
     final_payload,
     ai_reasoning_summary,
-    expires_at
+    expires_at,
+    tool_call_id
 ) VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
     $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-    $21
+    $21, $22::uuid
 )
-RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at
+RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id
 `
 
 type CreateAIApprovalParams struct {
@@ -260,6 +263,7 @@ type CreateAIApprovalParams struct {
 	FinalPayload       []byte             `json:"final_payload"`
 	AiReasoningSummary string             `json:"ai_reasoning_summary"`
 	ExpiresAt          pgtype.Timestamptz `json:"expires_at"`
+	ToolCallID         pgtype.UUID        `json:"tool_call_id"`
 }
 
 func (q *Queries) CreateAIApproval(ctx context.Context, arg CreateAIApprovalParams) (AiMeApproval, error) {
@@ -285,6 +289,7 @@ func (q *Queries) CreateAIApproval(ctx context.Context, arg CreateAIApprovalPara
 		arg.FinalPayload,
 		arg.AiReasoningSummary,
 		arg.ExpiresAt,
+		arg.ToolCallID,
 	)
 	var i AiMeApproval
 	err := row.Scan(
@@ -329,6 +334,7 @@ func (q *Queries) CreateAIApproval(ctx context.Context, arg CreateAIApprovalPara
 		&i.ExpiresAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ToolCallID,
 	)
 	return i, err
 }
@@ -443,7 +449,7 @@ func (q *Queries) CreateAIApprovalEvidence(ctx context.Context, arg CreateAIAppr
 }
 
 const getAIApprovalInWorkspace = `-- name: GetAIApprovalInWorkspace :one
-SELECT id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at
+SELECT id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id
 FROM ai_me_approval
 WHERE id = $1 AND workspace_id = $2
 `
@@ -498,6 +504,7 @@ func (q *Queries) GetAIApprovalInWorkspace(ctx context.Context, arg GetAIApprova
 		&i.ExpiresAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ToolCallID,
 	)
 	return i, err
 }
@@ -555,7 +562,7 @@ UPDATE ai_me_approval SET
     updated_at = now()
 WHERE id = $2::uuid
   AND workspace_id = $3::uuid
-RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at
+RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id
 `
 
 type LinkAIApprovalInboxItemParams struct {
@@ -609,6 +616,7 @@ func (q *Queries) LinkAIApprovalInboxItem(ctx context.Context, arg LinkAIApprova
 		&i.ExpiresAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ToolCallID,
 	)
 	return i, err
 }
@@ -700,7 +708,7 @@ func (q *Queries) ListAIApprovalEvidence(ctx context.Context, arg ListAIApproval
 }
 
 const listAIApprovals = `-- name: ListAIApprovals :many
-SELECT id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at
+SELECT id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id
 FROM ai_me_approval
 WHERE workspace_id = $1::uuid
   AND ($2::text IS NULL OR status = $2::text)
@@ -785,6 +793,7 @@ func (q *Queries) ListAIApprovals(ctx context.Context, arg ListAIApprovalsParams
 			&i.ExpiresAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.ToolCallID,
 		); err != nil {
 			return nil, err
 		}
@@ -804,7 +813,7 @@ UPDATE ai_me_approval SET
     updated_at = now()
 WHERE id = $2::uuid
   AND workspace_id = $3::uuid
-RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at
+RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id
 `
 
 type MarkAIApprovalExecutionFailedParams struct {
@@ -858,6 +867,7 @@ func (q *Queries) MarkAIApprovalExecutionFailed(ctx context.Context, arg MarkAIA
 		&i.ExpiresAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ToolCallID,
 	)
 	return i, err
 }
@@ -873,7 +883,7 @@ UPDATE ai_me_approval SET
     updated_at = now()
 WHERE id = $4::uuid
   AND workspace_id = $5::uuid
-RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at
+RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id
 `
 
 type MarkAIApprovalExecutionSucceededParams struct {
@@ -935,6 +945,7 @@ func (q *Queries) MarkAIApprovalExecutionSucceeded(ctx context.Context, arg Mark
 		&i.ExpiresAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ToolCallID,
 	)
 	return i, err
 }
@@ -949,7 +960,7 @@ UPDATE ai_me_approval SET
 WHERE id = $3::uuid
   AND workspace_id = $4::uuid
   AND status = 'pending'
-RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at
+RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id
 `
 
 type ObserveAIApprovalParams struct {
@@ -1009,6 +1020,7 @@ func (q *Queries) ObserveAIApproval(ctx context.Context, arg ObserveAIApprovalPa
 		&i.ExpiresAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ToolCallID,
 	)
 	return i, err
 }
@@ -1025,7 +1037,7 @@ UPDATE ai_me_approval SET
 WHERE id = $3::uuid
   AND workspace_id = $4::uuid
   AND status IN ('pending', 'observing')
-RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at
+RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id
 `
 
 type RejectAIApprovalParams struct {
@@ -1085,6 +1097,7 @@ func (q *Queries) RejectAIApproval(ctx context.Context, arg RejectAIApprovalPara
 		&i.ExpiresAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ToolCallID,
 	)
 	return i, err
 }
@@ -1101,7 +1114,7 @@ UPDATE ai_me_approval SET
 WHERE id = $3::uuid
   AND workspace_id = $4::uuid
   AND status IN ('pending', 'observing')
-RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at
+RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id
 `
 
 type TakeOverAIApprovalParams struct {
@@ -1161,6 +1174,7 @@ func (q *Queries) TakeOverAIApproval(ctx context.Context, arg TakeOverAIApproval
 		&i.ExpiresAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ToolCallID,
 	)
 	return i, err
 }
@@ -1181,7 +1195,7 @@ UPDATE ai_me_approval SET
 WHERE id = $11::uuid
   AND workspace_id = $12::uuid
   AND status IN ('pending', 'observing')
-RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at
+RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id
 `
 
 type UpdateAIApprovalParams struct {
@@ -1257,6 +1271,7 @@ func (q *Queries) UpdateAIApproval(ctx context.Context, arg UpdateAIApprovalPara
 		&i.ExpiresAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ToolCallID,
 	)
 	return i, err
 }

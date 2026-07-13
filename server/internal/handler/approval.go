@@ -83,6 +83,7 @@ type AIApprovalResponse struct {
 	InboxItemID        *string                      `json:"inbox_item_id"`
 	TaskQueueID        *string                      `json:"task_queue_id"`
 	MemoryID           *string                      `json:"memory_id"`
+	ToolCallID         *string                      `json:"tool_call_id"`
 	Title              string                       `json:"title"`
 	Summary            string                       `json:"summary"`
 	Status             string                       `json:"status"`
@@ -226,6 +227,7 @@ func aiApprovalToResponse(a db.AiMeApproval) AIApprovalResponse {
 		InboxItemID:        uuidToPtr(a.InboxItemID),
 		TaskQueueID:        uuidToPtr(a.TaskQueueID),
 		MemoryID:           uuidToPtr(a.MemoryID),
+		ToolCallID:         uuidToPtr(a.ToolCallID),
 		Title:              a.Title,
 		Summary:            a.Summary,
 		Status:             a.Status,
@@ -458,6 +460,18 @@ func (h *Handler) createAIMeApproval(ctx context.Context, workspaceID, userID st
 	approval, err := qtx.CreateAIApproval(ctx, params)
 	if err != nil {
 		return db.AiMeApproval{}, err
+	}
+	if approval.ToolCallID.Valid {
+		if _, err := qtx.WaitAIMeToolCallForApproval(ctx, db.WaitAIMeToolCallForApprovalParams{
+			ID: approval.ToolCallID, WorkspaceID: approval.WorkspaceID,
+		}); err != nil {
+			return db.AiMeApproval{}, err
+		}
+		if _, err := qtx.WaitAIMeRunForToolApproval(ctx, db.WaitAIMeRunForToolApprovalParams{
+			ToolCallID: approval.ToolCallID, WorkspaceID: approval.WorkspaceID,
+		}); err != nil {
+			return db.AiMeApproval{}, err
+		}
 	}
 	for _, evidenceReq := range evidence {
 		if err := createAIApprovalEvidence(ctx, qtx, params.WorkspaceID, approval.ID, evidenceReq); err != nil {
@@ -800,6 +814,10 @@ func (h *Handler) ApproveAIApproval(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to approve approval")
 		return
 	}
+	if err := finishAIMeToolCallAfterApproval(r.Context(), qtx, existing, execution); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to finish AI-Me tool call")
+		return
+	}
 	if _, err := createAIApprovalEvent(r.Context(), qtx, updated, "member", userUUID, "approved", existing.Status, updated.Status, map[string]any{"note": req.Note}); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create approval event")
 		return
@@ -834,6 +852,9 @@ func (h *Handler) ApproveAIApproval(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := aiApprovalToResponse(updated)
+	if execution.CreatedIssue != nil {
+		h.publishApprovalIssueCreated(r.Context(), *execution.CreatedIssue, workspaceID, userID)
+	}
 	if execution.UpdatedIssue != nil {
 		h.publishApprovalIssueUpdated(r.Context(), *execution.UpdatedIssue, execution.PreviousIssue, workspaceID, userID)
 	}
@@ -861,6 +882,34 @@ func (h *Handler) ApproveAIApproval(w http.ResponseWriter, r *http.Request) {
 	}
 	h.publishArchivedAIApprovalInboxItems(workspaceID, userID, archivedInboxItems)
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func finishAIMeToolCallAfterApproval(ctx context.Context, q *db.Queries, approval db.AiMeApproval, execution approvedAIActionExecution) error {
+	if !approval.ToolCallID.Valid {
+		return nil
+	}
+	outcome := execution.Status
+	if outcome != "succeeded" && outcome != "rejected" && outcome != "cancelled" {
+		outcome = "failed"
+	}
+	result := jsonBytesOrObject(map[string]any{
+		"status":             execution.Status,
+		"execution_error":    execution.ExecutionError,
+		"created_issue_id":   uuidToPtr(execution.CreatedIssueID),
+		"created_task_id":    uuidToPtr(execution.CreatedTaskID),
+		"created_comment_id": uuidToPtr(execution.CreatedCommentID),
+	})
+	_, err := q.FinishAIMeToolCallAfterApproval(ctx, db.FinishAIMeToolCallAfterApprovalParams{
+		Outcome:          outcome,
+		Result:           result,
+		Error:            execution.ExecutionError,
+		CreatedIssueID:   execution.CreatedIssueID,
+		CreatedTaskID:    execution.CreatedTaskID,
+		CreatedCommentID: execution.CreatedCommentID,
+		ToolCallID:       approval.ToolCallID,
+		WorkspaceID:      approval.WorkspaceID,
+	})
+	return err
 }
 
 func (h *Handler) RejectAIApproval(w http.ResponseWriter, r *http.Request) {
@@ -974,6 +1023,9 @@ func (h *Handler) retryAIApprovalExecution(ctx context.Context, opts aiApprovalR
 	if err != nil {
 		return aiApprovalRetryResult{}, fmt.Errorf("update retry result: %w", err)
 	}
+	if err := finishAIMeToolCallAfterApproval(ctx, qtx, existing, execution); err != nil {
+		return aiApprovalRetryResult{}, fmt.Errorf("finish retried AI-Me tool call: %w", err)
+	}
 	executionEventType := "execution_succeeded"
 	if execution.Status == "failed" {
 		executionEventType = "execution_failed"
@@ -1012,6 +1064,9 @@ func (h *Handler) retryAIApprovalExecution(ctx context.Context, opts aiApprovalR
 func (h *Handler) publishAIApprovalRetryResult(ctx context.Context, result aiApprovalRetryResult, workspaceID, actorType, actorID string) {
 	execution := result.Execution
 	resp := aiApprovalToResponse(result.Approval)
+	if execution.CreatedIssue != nil {
+		h.publishApprovalIssueCreated(ctx, *execution.CreatedIssue, workspaceID, actorID)
+	}
 	if execution.UpdatedIssue != nil {
 		h.publishApprovalIssueUpdated(ctx, *execution.UpdatedIssue, execution.PreviousIssue, workspaceID, actorID)
 	}
@@ -1178,6 +1233,17 @@ func (h *Handler) transitionAIApproval(w http.ResponseWriter, r *http.Request, a
 		writeError(w, http.StatusInternalServerError, "failed to transition approval")
 		return
 	}
+	if (action == "reject" || action == "take_over") && existing.ToolCallID.Valid {
+		reason := firstNonEmpty(strings.TrimSpace(req.Reason), strings.TrimSpace(req.Note), "tool approval was not approved")
+		outcome := "rejected"
+		if action == "take_over" {
+			outcome = "cancelled"
+		}
+		if err := finishAIMeToolCallAfterApproval(r.Context(), qtx, existing, approvedAIActionExecution{Status: outcome, ExecutionError: reason}); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to finish AI-Me tool call")
+			return
+		}
+	}
 	payload := map[string]any{"note": req.Note, "reason": req.Reason}
 	if _, err := createAIApprovalEvent(r.Context(), qtx, updated, "member", userUUID, eventType, existing.Status, updated.Status, payload); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create approval event")
@@ -1228,6 +1294,7 @@ type approvedAIActionExecution struct {
 	CreatedIssueID   pgtype.UUID
 	CreatedTaskID    pgtype.UUID
 	CreatedCommentID pgtype.UUID
+	CreatedIssue     *db.Issue
 	PreviousIssue    db.Issue
 	UpdatedIssue     *db.Issue
 	CreatedComment   *db.Comment
@@ -1267,6 +1334,8 @@ func (h *Handler) executeApprovedAIAction(ctx context.Context, q *db.Queries, ap
 		return approvedAIActionExecution{Status: "skipped"}, nil
 	case "draft_reply":
 		return approvedAIActionExecution{Status: "succeeded"}, nil
+	case "create_issue":
+		return h.executeApprovalCreateIssue(ctx, q, approval, workspaceID, userID, payload)
 	case "send_external_message":
 		return h.executeApprovalSendExternalMessage(ctx, approval, payload)
 	case "post_internal_comment":
@@ -1276,6 +1345,139 @@ func (h *Handler) executeApprovedAIAction(ctx context.Context, q *db.Queries, ap
 	default:
 		return approvedAIActionExecution{}, errors.New("action_type is not executable in v0.1")
 	}
+}
+
+func (h *Handler) executeApprovalCreateIssue(ctx context.Context, q *db.Queries, approval db.AiMeApproval, workspaceID, userID pgtype.UUID, payload []byte) (approvedAIActionExecution, error) {
+	title := strings.TrimSpace(approvalPayloadText(payload, "title", "issue_title"))
+	if title == "" {
+		return approvedAIActionExecution{}, errors.New("title is required for create_issue")
+	}
+	status := strings.TrimSpace(approvalPayloadText(payload, "status"))
+	if status == "" {
+		status = "todo"
+	}
+	if status != "backlog" && status != "todo" {
+		return approvedAIActionExecution{}, errors.New("create_issue status must be backlog or todo")
+	}
+	priority := strings.TrimSpace(approvalPayloadText(payload, "priority"))
+	if priority == "" {
+		priority = "none"
+	}
+	switch priority {
+	case "urgent", "high", "medium", "low", "none":
+	default:
+		return approvedAIActionExecution{}, errors.New("invalid create_issue priority")
+	}
+
+	var assigneeType pgtype.Text
+	var assigneeID pgtype.UUID
+	var agent db.Agent
+	targetAgent := approvalPayloadText(payload, "target_agent_id", "agent_id", "assignee_id", "worker_id") != "" ||
+		approvalPayloadText(payload, "target_agent_name", "agent_name", "worker_name") != ""
+	if targetAgent {
+		var err error
+		agent, err = h.resolveApprovalTargetAgent(ctx, q, workspaceID, userID, payload)
+		if err != nil {
+			return approvedAIActionExecution{}, err
+		}
+		if !agent.RuntimeID.Valid {
+			return approvedAIActionExecution{}, errors.New("agent has no runtime")
+		}
+		assigneeType = pgtype.Text{String: "agent", Valid: true}
+		assigneeID = agent.ID
+	}
+	if approval.ToolCallID.Valid {
+		existing, err := q.GetIssueByOrigin(ctx, db.GetIssueByOriginParams{
+			WorkspaceID: workspaceID,
+			OriginType:  pgtype.Text{String: "ai_me", Valid: true},
+			OriginID:    approval.ToolCallID,
+		})
+		if err == nil {
+			execution := approvedAIActionExecution{Status: "succeeded", CreatedIssueID: existing.ID, CreatedIssue: &existing}
+			tasks, taskErr := q.ListTasksByIssue(ctx, existing.ID)
+			if taskErr == nil && len(tasks) > 0 {
+				execution.CreatedTaskID = tasks[0].ID
+				execution.QueuedTask = &tasks[0]
+			}
+			return execution, nil
+		}
+		if !isNotFound(err) {
+			return approvedAIActionExecution{}, errors.New("failed to check existing AI-Me issue")
+		}
+	}
+
+	issueNumber, err := q.IncrementIssueCounter(ctx, workspaceID)
+	if err != nil {
+		return approvedAIActionExecution{}, errors.New("failed to allocate issue number")
+	}
+	description := optionalTextFromString(approvalPayloadText(payload, "description", "body"))
+	var issue db.Issue
+	if approval.ToolCallID.Valid {
+		issue, err = q.CreateIssueWithOrigin(ctx, db.CreateIssueWithOriginParams{
+			WorkspaceID:   workspaceID,
+			Title:         title,
+			Description:   description,
+			Status:        status,
+			Priority:      priority,
+			AssigneeType:  assigneeType,
+			AssigneeID:    assigneeID,
+			CreatorType:   "member",
+			CreatorID:     userID,
+			ParentIssueID: pgtype.UUID{},
+			Position:      0,
+			DueDate:       pgtype.Timestamptz{},
+			Number:        issueNumber,
+			ProjectID:     pgtype.UUID{},
+			OriginType:    pgtype.Text{String: "ai_me", Valid: true},
+			OriginID:      approval.ToolCallID,
+			CodeContext:   []byte(`{}`),
+		})
+	} else {
+		issue, err = q.CreateIssue(ctx, db.CreateIssueParams{
+			WorkspaceID:   workspaceID,
+			Title:         title,
+			Description:   description,
+			Status:        status,
+			Priority:      priority,
+			AssigneeType:  assigneeType,
+			AssigneeID:    assigneeID,
+			CreatorType:   "member",
+			CreatorID:     userID,
+			ParentIssueID: pgtype.UUID{},
+			Position:      0,
+			DueDate:       pgtype.Timestamptz{},
+			Number:        issueNumber,
+			ProjectID:     pgtype.UUID{},
+			CodeContext:   []byte(`{}`),
+		})
+	}
+	if err != nil {
+		return approvedAIActionExecution{}, errors.New("failed to create issue")
+	}
+
+	execution := approvedAIActionExecution{
+		Status:         "succeeded",
+		CreatedIssueID: issue.ID,
+		CreatedIssue:   &issue,
+	}
+	if assigneeID.Valid && status != "backlog" {
+		task, err := q.CreateAgentTask(ctx, db.CreateAgentTaskParams{
+			AgentID:   agent.ID,
+			RuntimeID: agent.RuntimeID,
+			IssueID:   issue.ID,
+			Priority:  approvalPriorityToInt(priority),
+			TriggerSummary: pgtype.Text{
+				String: firstNonEmpty(approvalPayloadText(payload, "summary", "instruction"), approval.ActionDescription, approval.Summary),
+				Valid:  true,
+			},
+		})
+		if err != nil {
+			return approvedAIActionExecution{}, errors.New("failed to create agent task")
+		}
+		execution.CreatedTaskID = task.ID
+		execution.QueuedTask = &task
+	}
+	return execution, nil
 }
 
 func (h *Handler) executeApprovalSendExternalMessage(ctx context.Context, approval db.AiMeApproval, payload []byte) (approvedAIActionExecution, error) {
@@ -1474,11 +1676,17 @@ func (h *Handler) resolveApprovalTargetAgent(ctx context.Context, q *db.Queries,
 	return db.Agent{}, errors.New("target agent not found in workspace")
 }
 
-// ensureApprovalAgentAssignable mirrors the issue update permission check so
-// approving an AI-Me command cannot bypass private-agent ownership rules.
+// ensureApprovalAgentAssignable mirrors the issue update admission checks so
+// AI-Me cannot bypass runtime availability or private-agent ownership rules.
 func (h *Handler) ensureApprovalAgentAssignable(ctx context.Context, agent db.Agent, workspaceID, userID pgtype.UUID) error {
 	if agent.ArchivedAt.Valid {
 		return errors.New("cannot assign to archived agent")
+	}
+	if !agent.RuntimeID.Valid {
+		return errors.New("agent has no runtime")
+	}
+	if !h.isRuntimeOnline(ctx, agent.RuntimeID) {
+		return errors.New("agent's runtime is offline")
 	}
 	if agent.Visibility != "private" || agent.OwnerID == userID {
 		return nil
@@ -1528,6 +1736,13 @@ func approvalPriorityToInt(priority string) int32 {
 	default:
 		return 0
 	}
+}
+
+func (h *Handler) publishApprovalIssueCreated(ctx context.Context, issue db.Issue, workspaceID, userID string) {
+	prefix := h.getIssuePrefix(ctx, issue.WorkspaceID)
+	h.publish(protocol.EventIssueCreated, workspaceID, "member", userID, map[string]any{
+		"issue": issueToResponse(issue, prefix),
+	})
 }
 
 func (h *Handler) publishApprovalIssueUpdated(ctx context.Context, issue db.Issue, previousIssue db.Issue, workspaceID, userID string) {

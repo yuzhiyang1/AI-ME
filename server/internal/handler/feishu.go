@@ -1300,7 +1300,7 @@ func (h *Handler) ingestFeishuMessage(ctx context.Context, payload feishuEventCa
 	}
 
 	draft, enrichAsync := h.prepareFeishuReplyDraft(ctx, workspace)
-	item, approval, err := h.createFeishuInboxItemAndApproval(ctx, workspace.ID, recipient.UserID, payload, messageText, gate, draft)
+	item, approval, err := h.createFeishuInboxItemAndApproval(ctx, workspace, recipient.UserID, payload, messageText, gate, draft)
 	if err != nil {
 		slog.Warn("飞书消息创建 AI-Me 收件箱和审批失败", append(logAttrs, "error", err)...)
 		return feishuIngestResult{}, fmt.Errorf("failed to create feishu inbox item and approval: %w", err)
@@ -1408,8 +1408,9 @@ func (h *Handler) feishuWorkspaceMatches(ctx context.Context, workspaceUUID pgty
 	return false, nil
 }
 
-func (h *Handler) createFeishuInboxItemAndApproval(ctx context.Context, workspaceID, recipientID pgtype.UUID, payload feishuEventCallback, messageText string, gate feishuInboundGateResult, draft feishuReplyDraft) (db.InboxItem, db.AiMeApproval, error) {
+func (h *Handler) createFeishuInboxItemAndApproval(ctx context.Context, workspace db.Workspace, recipientID pgtype.UUID, payload feishuEventCallback, messageText string, gate feishuInboundGateResult, draft feishuReplyDraft) (db.InboxItem, db.AiMeApproval, error) {
 	// Keep the inbound message, approval, and inbox link atomic for webhook retries.
+	workspaceID := workspace.ID
 	tx, err := h.TxStarter.Begin(ctx)
 	if err != nil {
 		return db.InboxItem{}, db.AiMeApproval{}, err
@@ -1450,6 +1451,33 @@ func (h *Handler) createFeishuInboxItemAndApproval(ctx context.Context, workspac
 	})
 	if err != nil {
 		return db.InboxItem{}, db.AiMeApproval{}, err
+	}
+	if _, supportsTools := h.AIModel.(AIModelClientWithTools); supportsTools && draft.Source == "pending_ai_model" {
+		settings := aimeWorkspaceSettingsFromJSON(workspace.Settings)
+		model := strings.TrimSpace(settings.ModelName)
+		if configurable, ok := h.AIModel.(AIModelClientWithOptions); ok {
+			model = configurable.EffectiveModel(aimeModelOptionsFromSettings(settings))
+		}
+		if _, err := qtx.CreateAIMeRun(ctx, db.CreateAIMeRunParams{
+			WorkspaceID: workspaceID,
+			UserID:      recipientID,
+			Source:      "feishu",
+			Input: jsonBytesOrObject(map[string]any{
+				"payload":      payload,
+				"message_text": messageText,
+				"gate":         gate,
+				"item_id":      uuidToString(item.ID),
+				"approval_id":  uuidToString(approval.ID),
+			}),
+			ContextSnapshot: []byte(`{}`),
+			PolicySnapshot:  jsonBytesOrObject(buildAIMePolicyContext(settings, time.Now())),
+			Provider:        h.AIModel.Provider(),
+			Model:           model,
+			MaxSteps:        aiMeMaxToolIterations,
+			IdempotencyKey:  "feishu:" + feishuSourceMessageID(payload),
+		}); err != nil {
+			return db.InboxItem{}, db.AiMeApproval{}, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return db.InboxItem{}, db.AiMeApproval{}, err
@@ -1600,6 +1628,10 @@ func (h *Handler) enrichPendingFeishuApproval(ctx context.Context, item db.Inbox
 }
 
 func (h *Handler) generateFeishuReplyDraft(ctx context.Context, workspace db.Workspace, recipient db.Member, payload feishuEventCallback, messageText string, gate feishuInboundGateResult) feishuReplyDraft {
+	return h.generateFeishuReplyDraftWithRun(ctx, workspace, recipient, payload, messageText, gate, pgtype.UUID{}, "")
+}
+
+func (h *Handler) generateFeishuReplyDraftWithRun(ctx context.Context, workspace db.Workspace, recipient db.Member, payload feishuEventCallback, messageText string, gate feishuInboundGateResult, runID pgtype.UUID, leaseOwner string) feishuReplyDraft {
 	draft := fallbackFeishuReplyDraft("fallback", "")
 	settings := aimeWorkspaceSettingsFromJSON(workspace.Settings)
 	if !settings.Enabled {
@@ -1634,7 +1666,19 @@ func (h *Handler) generateFeishuReplyDraft(ctx context.Context, workspace db.Wor
 	}
 	modelCtx, cancel := context.WithTimeout(ctx, feishuDraftTimeout())
 	defer cancel()
-	completion, model, err := completeAIMeModelWithUsage(modelCtx, h.AIModel, systemPrompt, userPrompt, settings)
+	toolExecutor := &handlerAIMeToolExecutor{
+		handler:     h,
+		workspaceID: workspaceID,
+		userID:      recipientID,
+		sourceType:  "feishu",
+		sourceRefID: feishuSourceMessageID(payload),
+		sourceInput: messageText,
+		context:     aimeCtx,
+		policy:      policy,
+		resumeRunID: runID,
+		leaseOwner:  leaseOwner,
+	}
+	completion, model, err := completeAIMeModelWithTools(modelCtx, h.AIModel, systemPrompt, userPrompt, toolExecutor, settings)
 	if err != nil {
 		draft.Source = "model_error"
 		draft.Provider = h.AIModel.Provider()

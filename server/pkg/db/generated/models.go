@@ -136,6 +136,7 @@ type AiMeApproval struct {
 	ExpiresAt          pgtype.Timestamptz `json:"expires_at"`
 	CreatedAt          pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt          pgtype.Timestamptz `json:"updated_at"`
+	ToolCallID         pgtype.UUID        `json:"tool_call_id"`
 }
 
 type AiMeApprovalEvent struct {
@@ -198,6 +199,71 @@ type AiMeFeishuWebhookEvent struct {
 	ApprovalID        pgtype.UUID        `json:"approval_id"`
 	CreatedAt         pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
+}
+
+type AiMeRun struct {
+	ID              pgtype.UUID        `json:"id"`
+	WorkspaceID     pgtype.UUID        `json:"workspace_id"`
+	UserID          pgtype.UUID        `json:"user_id"`
+	Source          string             `json:"source"`
+	Status          string             `json:"status"`
+	Input           []byte             `json:"input"`
+	ContextSnapshot []byte             `json:"context_snapshot"`
+	PolicySnapshot  []byte             `json:"policy_snapshot"`
+	Provider        string             `json:"provider"`
+	Model           string             `json:"model"`
+	StepCount       int32              `json:"step_count"`
+	MaxSteps        int32              `json:"max_steps"`
+	InputTokens     int64              `json:"input_tokens"`
+	OutputTokens    int64              `json:"output_tokens"`
+	CacheReadTokens int64              `json:"cache_read_tokens"`
+	CostMicrousd    int64              `json:"cost_microusd"`
+	FinalOutput     []byte             `json:"final_output"`
+	LastError       string             `json:"last_error"`
+	IdempotencyKey  string             `json:"idempotency_key"`
+	LeaseOwner      pgtype.Text        `json:"lease_owner"`
+	LeaseExpiresAt  pgtype.Timestamptz `json:"lease_expires_at"`
+	NextWakeAt      pgtype.Timestamptz `json:"next_wake_at"`
+	StartedAt       pgtype.Timestamptz `json:"started_at"`
+	CompletedAt     pgtype.Timestamptz `json:"completed_at"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+}
+
+type AiMeRunStep struct {
+	ID           pgtype.UUID        `json:"id"`
+	RunID        pgtype.UUID        `json:"run_id"`
+	Sequence     int32              `json:"sequence"`
+	StepType     string             `json:"step_type"`
+	Message      []byte             `json:"message"`
+	ToolCallID   pgtype.UUID        `json:"tool_call_id"`
+	Provider     string             `json:"provider"`
+	Model        string             `json:"model"`
+	Usage        []byte             `json:"usage"`
+	CostMicrousd int64              `json:"cost_microusd"`
+	DurationMs   int64              `json:"duration_ms"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+}
+
+type AiMeToolCall struct {
+	ID               pgtype.UUID        `json:"id"`
+	RunID            pgtype.UUID        `json:"run_id"`
+	ProviderCallID   string             `json:"provider_call_id"`
+	ToolName         string             `json:"tool_name"`
+	Arguments        []byte             `json:"arguments"`
+	Status           string             `json:"status"`
+	RiskLevel        string             `json:"risk_level"`
+	ApprovalBehavior string             `json:"approval_behavior"`
+	Result           []byte             `json:"result"`
+	Error            string             `json:"error"`
+	CreatedIssueID   pgtype.UUID        `json:"created_issue_id"`
+	CreatedTaskID    pgtype.UUID        `json:"created_task_id"`
+	CreatedCommentID pgtype.UUID        `json:"created_comment_id"`
+	IdempotencyKey   string             `json:"idempotency_key"`
+	StartedAt        pgtype.Timestamptz `json:"started_at"`
+	CompletedAt      pgtype.Timestamptz `json:"completed_at"`
+	CreatedAt        pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt        pgtype.Timestamptz `json:"updated_at"`
 }
 
 type Attachment struct {

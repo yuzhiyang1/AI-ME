@@ -213,7 +213,7 @@ WHERE id = $6::uuid
   AND status = 'pending'
   AND execution_status = 'not_started'
   AND final_payload->>'draft_source' = 'pending_ai_model'
-RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at
+RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id
 `
 
 type EnrichPendingFeishuApprovalParams struct {
@@ -279,6 +279,7 @@ func (q *Queries) EnrichPendingFeishuApproval(ctx context.Context, arg EnrichPen
 		&i.ExpiresAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.ToolCallID,
 	)
 	return i, err
 }
