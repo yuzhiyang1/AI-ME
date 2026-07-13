@@ -1006,7 +1006,7 @@ func parseAIMeDecision(raw string) (AIMeThinkResponse, bool) {
 		return AIMeThinkResponse{}, false
 	}
 	var decision AIMeThinkResponse
-	if err := json.Unmarshal([]byte(candidate), &decision); err != nil {
+	if !decodeAIMeDecision(candidate, &decision) {
 		return AIMeThinkResponse{}, false
 	}
 	decision.RiskLevel = normalizeRisk(decision.RiskLevel)
@@ -1014,6 +1014,40 @@ func parseAIMeDecision(raw string) (AIMeThinkResponse, bool) {
 	decision.Actions = normalizeAIMeActions(decision.Actions)
 	decision.Evidence = normalizeAIMeEvidence(decision.Evidence)
 	return decision, true
+}
+
+func decodeAIMeDecision(candidate string, decision *AIMeThinkResponse) bool {
+	if json.Unmarshal([]byte(candidate), decision) == nil {
+		return true
+	}
+	// Some providers occasionally return object-shaped optional collections.
+	// Preserve the valid core decision, but never coerce malformed actions into
+	// executable tool requests.
+	var fields map[string]json.RawMessage
+	if json.Unmarshal([]byte(candidate), &fields) != nil {
+		return false
+	}
+	actions := fields["actions"]
+	evidence := fields["evidence"]
+	delete(fields, "actions")
+	delete(fields, "evidence")
+	sanitized, err := json.Marshal(fields)
+	if err != nil {
+		return false
+	}
+	*decision = AIMeThinkResponse{}
+	if json.Unmarshal(sanitized, decision) != nil {
+		return false
+	}
+	var parsedActions []AIMeSuggestedAction
+	if len(actions) > 0 && json.Unmarshal(actions, &parsedActions) == nil {
+		decision.Actions = parsedActions
+	}
+	var parsedEvidence []AIMeEvidence
+	if len(evidence) > 0 && json.Unmarshal(evidence, &parsedEvidence) == nil {
+		decision.Evidence = parsedEvidence
+	}
+	return true
 }
 
 func extractJSONObject(raw string) string {

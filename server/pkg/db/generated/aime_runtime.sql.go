@@ -577,6 +577,62 @@ func (q *Queries) FailAIMeRun(ctx context.Context, arg FailAIMeRunParams) (AiMeR
 	return i, err
 }
 
+const failAIMeTaskResultRun = `-- name: FailAIMeTaskResultRun :one
+UPDATE ai_me_run SET
+    status = 'failed',
+    last_error = $1::text,
+    completed_at = now(),
+    next_wake_at = NULL,
+    lease_owner = NULL,
+    lease_expires_at = NULL,
+    updated_at = now()
+WHERE id = $2::uuid
+  AND workspace_id = $3::uuid
+  AND source = 'task_result'
+  AND status IN ('queued', 'running', 'succeeded', 'failed')
+RETURNING id, workspace_id, user_id, source, status, input, context_snapshot, policy_snapshot, provider, model, step_count, max_steps, input_tokens, output_tokens, cache_read_tokens, cost_microusd, final_output, last_error, idempotency_key, lease_owner, lease_expires_at, next_wake_at, started_at, completed_at, created_at, updated_at
+`
+
+type FailAIMeTaskResultRunParams struct {
+	LastError   string      `json:"last_error"`
+	ID          pgtype.UUID `json:"id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+}
+
+func (q *Queries) FailAIMeTaskResultRun(ctx context.Context, arg FailAIMeTaskResultRunParams) (AiMeRun, error) {
+	row := q.db.QueryRow(ctx, failAIMeTaskResultRun, arg.LastError, arg.ID, arg.WorkspaceID)
+	var i AiMeRun
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.UserID,
+		&i.Source,
+		&i.Status,
+		&i.Input,
+		&i.ContextSnapshot,
+		&i.PolicySnapshot,
+		&i.Provider,
+		&i.Model,
+		&i.StepCount,
+		&i.MaxSteps,
+		&i.InputTokens,
+		&i.OutputTokens,
+		&i.CacheReadTokens,
+		&i.CostMicrousd,
+		&i.FinalOutput,
+		&i.LastError,
+		&i.IdempotencyKey,
+		&i.LeaseOwner,
+		&i.LeaseExpiresAt,
+		&i.NextWakeAt,
+		&i.StartedAt,
+		&i.CompletedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const failAIMeToolCall = `-- name: FailAIMeToolCall :one
 UPDATE ai_me_tool_call call SET
     status = 'failed',
@@ -1248,6 +1304,70 @@ func (q *Queries) ListAIMeToolCalls(ctx context.Context, arg ListAIMeToolCallsPa
 	return items, nil
 }
 
+const listIncompleteAIMeTaskResultRuns = `-- name: ListIncompleteAIMeTaskResultRuns :many
+SELECT run.id, run.workspace_id
+FROM ai_me_run run
+JOIN ai_me_approval approval
+  ON approval.id::text = run.input->>'approval_id'
+ AND approval.workspace_id = run.workspace_id
+WHERE run.source = 'task_result'
+  AND run.status = 'succeeded'
+  AND approval.source_type = 'feishu'
+  AND approval.status IN ('pending', 'observing')
+  AND approval.execution_status = 'not_started'
+  AND (
+      (
+          COALESCE((approval.final_payload->>'awaiting_task_result')::boolean, false)
+          AND approval.final_payload->>'task_id' = run.input->>'task_id'
+      )
+      OR (
+          NOT COALESCE((approval.final_payload->>'awaiting_task_result')::boolean, false)
+          AND approval.final_payload->>'task_id' = run.input->>'task_id'
+          AND approval.final_payload->>'draft_source' = 'ai_me_task_result'
+          AND approval.final_payload->>'text' LIKE '员工任务已经结束，结果如下：%'
+          AND COALESCE(run.final_output->>'reply_draft', '') <> ''
+          AND approval.final_payload->>'text' IS DISTINCT FROM run.final_output->>'reply_draft'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM ai_me_approval_event event
+              WHERE event.approval_id = approval.id
+                AND event.actor_type = 'member'
+                AND event.created_at > run.completed_at
+          )
+      )
+  )
+ORDER BY run.updated_at, run.id
+LIMIT $1
+`
+
+type ListIncompleteAIMeTaskResultRunsRow struct {
+	ID          pgtype.UUID `json:"id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+}
+
+// A succeeded run still waiting for the same task indicates an interrupted
+// finalization. The fallback-text branch repairs a previously observed case
+// where the durable model decision was saved but the conservative draft won.
+func (q *Queries) ListIncompleteAIMeTaskResultRuns(ctx context.Context, limit int32) ([]ListIncompleteAIMeTaskResultRunsRow, error) {
+	rows, err := q.db.Query(ctx, listIncompleteAIMeTaskResultRuns, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListIncompleteAIMeTaskResultRunsRow{}
+	for rows.Next() {
+		var i ListIncompleteAIMeTaskResultRunsRow
+		if err := rows.Scan(&i.ID, &i.WorkspaceID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listUncontinuedAIMeTerminalTasks = `-- name: ListUncontinuedAIMeTerminalTasks :many
 SELECT
     task.id AS task_id,
@@ -1291,6 +1411,65 @@ func (q *Queries) ListUncontinuedAIMeTerminalTasks(ctx context.Context, limit in
 	for rows.Next() {
 		var i ListUncontinuedAIMeTerminalTasksRow
 		if err := rows.Scan(&i.TaskID, &i.WorkspaceID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUnsyncedAIMeToolApprovalOutcomes = `-- name: ListUnsyncedAIMeToolApprovalOutcomes :many
+SELECT
+    run.id AS run_id,
+    run.workspace_id,
+    call.id AS tool_call_id
+FROM ai_me_run run
+JOIN ai_me_tool_call call ON call.run_id = run.id
+JOIN ai_me_approval approval
+  ON approval.id::text = run.input->>'approval_id'
+ AND approval.workspace_id = run.workspace_id
+WHERE run.source IN ('feishu', 'task_result')
+  AND run.status IN ('succeeded', 'failed', 'rejected', 'cancelled')
+  AND call.approval_behavior = 'requires_approval'
+  AND call.status IN ('succeeded', 'failed', 'rejected', 'cancelled')
+  AND approval.source_type = 'feishu'
+  AND approval.status IN ('pending', 'observing')
+  AND approval.execution_status = 'not_started'
+  AND (
+      (
+          call.created_task_id IS NOT NULL
+          AND COALESCE(approval.final_payload->>'task_id', '') <> call.created_task_id::text
+      )
+      OR (
+          call.created_task_id IS NULL
+          AND COALESCE(approval.final_payload->>'tool_outcome_call_id', '') <> call.id::text
+      )
+  )
+ORDER BY call.updated_at, call.id
+LIMIT $1
+`
+
+type ListUnsyncedAIMeToolApprovalOutcomesRow struct {
+	RunID       pgtype.UUID `json:"run_id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	ToolCallID  pgtype.UUID `json:"tool_call_id"`
+}
+
+// Tool approvals finish independently from their outer Feishu approval. This
+// query finds terminal outcomes that still need to update that outer state.
+func (q *Queries) ListUnsyncedAIMeToolApprovalOutcomes(ctx context.Context, limit int32) ([]ListUnsyncedAIMeToolApprovalOutcomesRow, error) {
+	rows, err := q.db.Query(ctx, listUnsyncedAIMeToolApprovalOutcomes, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListUnsyncedAIMeToolApprovalOutcomesRow{}
+	for rows.Next() {
+		var i ListUnsyncedAIMeToolApprovalOutcomesRow
+		if err := rows.Scan(&i.RunID, &i.WorkspaceID, &i.ToolCallID); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -1351,6 +1530,61 @@ type RecoverAIMeRunFromTerminalToolCallsParams struct {
 
 func (q *Queries) RecoverAIMeRunFromTerminalToolCalls(ctx context.Context, arg RecoverAIMeRunFromTerminalToolCallsParams) (AiMeRun, error) {
 	row := q.db.QueryRow(ctx, recoverAIMeRunFromTerminalToolCalls, arg.WorkspaceID, arg.ID)
+	var i AiMeRun
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.UserID,
+		&i.Source,
+		&i.Status,
+		&i.Input,
+		&i.ContextSnapshot,
+		&i.PolicySnapshot,
+		&i.Provider,
+		&i.Model,
+		&i.StepCount,
+		&i.MaxSteps,
+		&i.InputTokens,
+		&i.OutputTokens,
+		&i.CacheReadTokens,
+		&i.CostMicrousd,
+		&i.FinalOutput,
+		&i.LastError,
+		&i.IdempotencyKey,
+		&i.LeaseOwner,
+		&i.LeaseExpiresAt,
+		&i.NextWakeAt,
+		&i.StartedAt,
+		&i.CompletedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const recoverIncompleteAIMeTaskResultRun = `-- name: RecoverIncompleteAIMeTaskResultRun :one
+UPDATE ai_me_run SET
+    status = 'queued',
+    last_error = 'approval finalization incomplete',
+    completed_at = NULL,
+    next_wake_at = now(),
+    lease_owner = NULL,
+    lease_expires_at = NULL,
+    updated_at = now()
+WHERE id = $1::uuid
+  AND workspace_id = $2::uuid
+  AND source = 'task_result'
+  AND status = 'succeeded'
+RETURNING id, workspace_id, user_id, source, status, input, context_snapshot, policy_snapshot, provider, model, step_count, max_steps, input_tokens, output_tokens, cache_read_tokens, cost_microusd, final_output, last_error, idempotency_key, lease_owner, lease_expires_at, next_wake_at, started_at, completed_at, created_at, updated_at
+`
+
+type RecoverIncompleteAIMeTaskResultRunParams struct {
+	ID          pgtype.UUID `json:"id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+}
+
+func (q *Queries) RecoverIncompleteAIMeTaskResultRun(ctx context.Context, arg RecoverIncompleteAIMeTaskResultRunParams) (AiMeRun, error) {
+	row := q.db.QueryRow(ctx, recoverIncompleteAIMeTaskResultRun, arg.ID, arg.WorkspaceID)
 	var i AiMeRun
 	err := row.Scan(
 		&i.ID,
@@ -1528,6 +1762,84 @@ func (q *Queries) ResumeAIMeToolCallAfterApproval(ctx context.Context, arg Resum
 		&i.CreatedTaskID,
 		&i.CreatedCommentID,
 		&i.IdempotencyKey,
+		&i.StartedAt,
+		&i.CompletedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const retryAIMeTaskResultRun = `-- name: RetryAIMeTaskResultRun :one
+UPDATE ai_me_run SET
+    status = 'queued',
+    input = jsonb_set(
+        input,
+        '{retry_count}',
+        to_jsonb(COALESCE(NULLIF(input->>'retry_count', '')::int, 0) + 1),
+        true
+    ),
+    last_error = $1::text,
+    completed_at = NULL,
+    next_wake_at = now() + make_interval(secs => $2::int),
+    lease_owner = NULL,
+    lease_expires_at = NULL,
+    updated_at = now()
+WHERE id = $3::uuid
+  AND workspace_id = $4::uuid
+  AND source = 'task_result'
+  AND COALESCE(NULLIF(input->>'retry_count', '')::int, 0) < $5::int
+  AND (
+      status IN ('failed', 'succeeded')
+      OR (status = 'running' AND lease_owner = $6::text)
+  )
+RETURNING id, workspace_id, user_id, source, status, input, context_snapshot, policy_snapshot, provider, model, step_count, max_steps, input_tokens, output_tokens, cache_read_tokens, cost_microusd, final_output, last_error, idempotency_key, lease_owner, lease_expires_at, next_wake_at, started_at, completed_at, created_at, updated_at
+`
+
+type RetryAIMeTaskResultRunParams struct {
+	LastError    string      `json:"last_error"`
+	DelaySeconds int32       `json:"delay_seconds"`
+	ID           pgtype.UUID `json:"id"`
+	WorkspaceID  pgtype.UUID `json:"workspace_id"`
+	MaxRetries   int32       `json:"max_retries"`
+	LeaseOwner   string      `json:"lease_owner"`
+}
+
+// Task-result runs retry model or approval-finalization failures with a small,
+// durable budget stored in the run input so no schema-only counter is needed.
+func (q *Queries) RetryAIMeTaskResultRun(ctx context.Context, arg RetryAIMeTaskResultRunParams) (AiMeRun, error) {
+	row := q.db.QueryRow(ctx, retryAIMeTaskResultRun,
+		arg.LastError,
+		arg.DelaySeconds,
+		arg.ID,
+		arg.WorkspaceID,
+		arg.MaxRetries,
+		arg.LeaseOwner,
+	)
+	var i AiMeRun
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.UserID,
+		&i.Source,
+		&i.Status,
+		&i.Input,
+		&i.ContextSnapshot,
+		&i.PolicySnapshot,
+		&i.Provider,
+		&i.Model,
+		&i.StepCount,
+		&i.MaxSteps,
+		&i.InputTokens,
+		&i.OutputTokens,
+		&i.CacheReadTokens,
+		&i.CostMicrousd,
+		&i.FinalOutput,
+		&i.LastError,
+		&i.IdempotencyKey,
+		&i.LeaseOwner,
+		&i.LeaseExpiresAt,
+		&i.NextWakeAt,
 		&i.StartedAt,
 		&i.CompletedAt,
 		&i.CreatedAt,

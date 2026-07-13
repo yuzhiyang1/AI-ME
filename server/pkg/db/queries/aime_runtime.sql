@@ -278,6 +278,133 @@ WHERE id = sqlc.arg('id')::uuid
   AND status IN ('queued', 'running', 'waiting', 'waiting_approval')
 RETURNING *;
 
+-- name: RetryAIMeTaskResultRun :one
+-- Task-result runs retry model or approval-finalization failures with a small,
+-- durable budget stored in the run input so no schema-only counter is needed.
+UPDATE ai_me_run SET
+    status = 'queued',
+    input = jsonb_set(
+        input,
+        '{retry_count}',
+        to_jsonb(COALESCE(NULLIF(input->>'retry_count', '')::int, 0) + 1),
+        true
+    ),
+    last_error = sqlc.arg('last_error')::text,
+    completed_at = NULL,
+    next_wake_at = now() + make_interval(secs => sqlc.arg('delay_seconds')::int),
+    lease_owner = NULL,
+    lease_expires_at = NULL,
+    updated_at = now()
+WHERE id = sqlc.arg('id')::uuid
+  AND workspace_id = sqlc.arg('workspace_id')::uuid
+  AND source = 'task_result'
+  AND COALESCE(NULLIF(input->>'retry_count', '')::int, 0) < sqlc.arg('max_retries')::int
+  AND (
+      status IN ('failed', 'succeeded')
+      OR (status = 'running' AND lease_owner = sqlc.arg('lease_owner')::text)
+  )
+RETURNING *;
+
+-- name: FailAIMeTaskResultRun :one
+UPDATE ai_me_run SET
+    status = 'failed',
+    last_error = sqlc.arg('last_error')::text,
+    completed_at = now(),
+    next_wake_at = NULL,
+    lease_owner = NULL,
+    lease_expires_at = NULL,
+    updated_at = now()
+WHERE id = sqlc.arg('id')::uuid
+  AND workspace_id = sqlc.arg('workspace_id')::uuid
+  AND source = 'task_result'
+  AND status IN ('queued', 'running', 'succeeded', 'failed')
+RETURNING *;
+
+-- name: ListIncompleteAIMeTaskResultRuns :many
+-- A succeeded run still waiting for the same task indicates an interrupted
+-- finalization. The fallback-text branch repairs a previously observed case
+-- where the durable model decision was saved but the conservative draft won.
+SELECT run.id, run.workspace_id
+FROM ai_me_run run
+JOIN ai_me_approval approval
+  ON approval.id::text = run.input->>'approval_id'
+ AND approval.workspace_id = run.workspace_id
+WHERE run.source = 'task_result'
+  AND run.status = 'succeeded'
+  AND approval.source_type = 'feishu'
+  AND approval.status IN ('pending', 'observing')
+  AND approval.execution_status = 'not_started'
+  AND (
+      (
+          COALESCE((approval.final_payload->>'awaiting_task_result')::boolean, false)
+          AND approval.final_payload->>'task_id' = run.input->>'task_id'
+      )
+      OR (
+          NOT COALESCE((approval.final_payload->>'awaiting_task_result')::boolean, false)
+          AND approval.final_payload->>'task_id' = run.input->>'task_id'
+          AND approval.final_payload->>'draft_source' = 'ai_me_task_result'
+          AND approval.final_payload->>'text' LIKE '员工任务已经结束，结果如下：%'
+          AND COALESCE(run.final_output->>'reply_draft', '') <> ''
+          AND approval.final_payload->>'text' IS DISTINCT FROM run.final_output->>'reply_draft'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM ai_me_approval_event event
+              WHERE event.approval_id = approval.id
+                AND event.actor_type = 'member'
+                AND event.created_at > run.completed_at
+          )
+      )
+  )
+ORDER BY run.updated_at, run.id
+LIMIT sqlc.arg('limit');
+
+-- name: RecoverIncompleteAIMeTaskResultRun :one
+UPDATE ai_me_run SET
+    status = 'queued',
+    last_error = 'approval finalization incomplete',
+    completed_at = NULL,
+    next_wake_at = now(),
+    lease_owner = NULL,
+    lease_expires_at = NULL,
+    updated_at = now()
+WHERE id = sqlc.arg('id')::uuid
+  AND workspace_id = sqlc.arg('workspace_id')::uuid
+  AND source = 'task_result'
+  AND status = 'succeeded'
+RETURNING *;
+
+-- name: ListUnsyncedAIMeToolApprovalOutcomes :many
+-- Tool approvals finish independently from their outer Feishu approval. This
+-- query finds terminal outcomes that still need to update that outer state.
+SELECT
+    run.id AS run_id,
+    run.workspace_id,
+    call.id AS tool_call_id
+FROM ai_me_run run
+JOIN ai_me_tool_call call ON call.run_id = run.id
+JOIN ai_me_approval approval
+  ON approval.id::text = run.input->>'approval_id'
+ AND approval.workspace_id = run.workspace_id
+WHERE run.source IN ('feishu', 'task_result')
+  AND run.status IN ('succeeded', 'failed', 'rejected', 'cancelled')
+  AND call.approval_behavior = 'requires_approval'
+  AND call.status IN ('succeeded', 'failed', 'rejected', 'cancelled')
+  AND approval.source_type = 'feishu'
+  AND approval.status IN ('pending', 'observing')
+  AND approval.execution_status = 'not_started'
+  AND (
+      (
+          call.created_task_id IS NOT NULL
+          AND COALESCE(approval.final_payload->>'task_id', '') <> call.created_task_id::text
+      )
+      OR (
+          call.created_task_id IS NULL
+          AND COALESCE(approval.final_payload->>'tool_outcome_call_id', '') <> call.id::text
+      )
+  )
+ORDER BY call.updated_at, call.id
+LIMIT sqlc.arg('limit');
+
 -- name: CreateAIMeToolCall :one
 -- Tool calls use a run-scoped idempotency key because provider call IDs are
 -- not guaranteed to remain stable when a model request is retried.

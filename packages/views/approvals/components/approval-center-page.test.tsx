@@ -248,6 +248,66 @@ describe("ApprovalCenterPage edit then approve", () => {
     expect(screen.getByText(/任务：task-1/)).toHaveTextContent("工作项：issue-1");
     expect(screen.getByText(/任务：task-1/)).toHaveTextContent("续跑：第 1 层");
   });
+
+  it("shows task result review failure as a human-review event", async () => {
+    const failedReviewApproval = makeApproval({
+      summary: "AI-Me 自动复核失败，需要人工查看员工结果。",
+      final_payload: {
+        channel: "feishu",
+        message_id: "msg-1",
+        text: "员工任务已结束，但 AI-Me 自动复核失败。",
+        awaiting_task_result: false,
+        requires_manual_review: true,
+      },
+      events: [
+        {
+          id: "event-review-failed",
+          approval_id: "approval-1",
+          workspace_id: "ws-1",
+          actor_type: "ai_me",
+          actor_id: "member-1",
+          event_type: "edited",
+          from_status: "pending",
+          to_status: "pending",
+          payload: {
+            kind: "task_result_review_failed",
+            task_id: "task-1",
+            task_status: "completed",
+            issue_id: "issue-1",
+            error: "model timeout",
+          },
+          created_at: "2026-07-13T04:10:00.000Z",
+        },
+        {
+          id: "event-tool-stopped",
+          approval_id: "approval-1",
+          workspace_id: "ws-1",
+          actor_type: "ai_me",
+          actor_id: "member-1",
+          event_type: "edited",
+          from_status: "pending",
+          to_status: "pending",
+          payload: {
+            kind: "task_result_tool_stopped",
+            tool_call_id: "call-1",
+            tool_status: "rejected",
+            error: "user rejected the tool action",
+          },
+          created_at: "2026-07-13T04:11:00.000Z",
+        },
+      ],
+    });
+    mockApi.listAIApprovals.mockResolvedValue({ approvals: [failedReviewApproval], total: 1 });
+    mockApi.getAIApproval.mockResolvedValue(failedReviewApproval);
+
+    renderApprovals();
+
+    expect(await screen.findByText("员工结果复核失败")).toBeInTheDocument();
+    expect(screen.getByText(/任务：task-1/)).toHaveTextContent("错误：model timeout");
+    expect(screen.getByText("后续工具已停止")).toBeInTheDocument();
+    expect(screen.getByText(/工具状态：rejected/)).toHaveTextContent("错误：user rejected the tool action");
+    expect(screen.getByRole("button", { name: "批准并发送" })).not.toBeDisabled();
+  });
 });
 
 function renderApprovals() {

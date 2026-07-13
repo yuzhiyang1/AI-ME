@@ -14,7 +14,11 @@ import (
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
-const aiMeMaxContinuationDepth = 3
+const (
+	aiMeMaxContinuationDepth = 3
+	aiMeTaskResultMaxRetries = 2
+	aiMeTaskResultRetryDelay = 5
+)
 
 type aiMeTaskContinuationInput struct {
 	TaskID       string `json:"task_id"`
@@ -170,7 +174,21 @@ func (h *Handler) resumeAIMeTaskResultRun(ctx context.Context, run db.AiMeRun, l
 	model := run.Model
 	provider := run.Provider
 	usage := AIModelUsage{}
-	if input.Depth <= aiMeMaxContinuationDepth && settings.Enabled && aimeModelConfiguredForSettings(h.AIModel, settings) && !h.aimeDraftBudgetExceeded(ctx, run.WorkspaceID) {
+	reusedFinalOutput := false
+	if persisted, ok := parseAIMeDecision(string(run.FinalOutput)); ok && strings.TrimSpace(persisted.ReplyDraft) != "" {
+		decision = persisted
+		usage = AIModelUsage{
+			InputTokens: run.InputTokens, OutputTokens: run.OutputTokens, CacheReadTokens: run.CacheReadTokens,
+		}
+		reusedFinalOutput = true
+	}
+	if reusedFinalOutput {
+		if _, err := h.Queries.CompleteAIMeRun(ctx, db.CompleteAIMeRunParams{
+			FinalOutput: run.FinalOutput, ID: run.ID, WorkspaceID: run.WorkspaceID, LeaseOwner: leaseOwner,
+		}); err != nil {
+			return err
+		}
+	} else if input.Depth <= aiMeMaxContinuationDepth && settings.Enabled && aimeModelConfiguredForSettings(h.AIModel, settings) && !h.aimeDraftBudgetExceeded(ctx, run.WorkspaceID) {
 		systemPrompt := buildAIMeTaskResultSystemPrompt(policy)
 		userPrompt, promptErr := h.buildAIMeTaskResultUserPrompt(ctx, input, task, issue, resultText, contextSummary, policy)
 		if promptErr != nil {
@@ -199,7 +217,11 @@ func (h *Handler) resumeAIMeTaskResultRun(ctx context.Context, run db.AiMeRun, l
 		if persistedRun.Status == "waiting_approval" {
 			return nil
 		}
-		if parsed, ok := parseAIMeDecision(completion.Content); ok && strings.TrimSpace(parsed.ReplyDraft) != "" {
+		// The durable output is canonical. Reading it back also protects the
+		// approval draft from provider-specific transient response shapes.
+		if parsed, ok := parseAIMeDecision(string(persistedRun.FinalOutput)); ok && strings.TrimSpace(parsed.ReplyDraft) != "" {
+			decision = parsed
+		} else if parsed, ok := parseAIMeDecision(completion.Content); ok && strings.TrimSpace(parsed.ReplyDraft) != "" {
 			decision = parsed
 		}
 	} else {
@@ -231,6 +253,26 @@ func (h *Handler) resumeAIMeTaskResultRun(ctx context.Context, run db.AiMeRun, l
 	}
 
 	return h.finalizeFeishuApprovalFromTask(ctx, approval, task, issue, decision, provider, model, usage, resultText, input.Depth)
+}
+
+func (h *Handler) handleAIMeTaskResultRunError(ctx context.Context, run db.AiMeRun, leaseOwner string, cause error) (bool, error) {
+	message := truncateText(cause.Error(), 1000)
+	if _, err := h.Queries.RetryAIMeTaskResultRun(ctx, db.RetryAIMeTaskResultRunParams{
+		LastError: message, DelaySeconds: aiMeTaskResultRetryDelay,
+		ID: run.ID, WorkspaceID: run.WorkspaceID,
+		MaxRetries: aiMeTaskResultMaxRetries, LeaseOwner: leaseOwner,
+	}); err == nil {
+		return true, nil
+	} else if !isNotFound(err) {
+		return false, err
+	}
+	if err := h.finalizeFeishuApprovalFromTaskError(ctx, run, message); err != nil {
+		return false, err
+	}
+	_, err := h.Queries.FailAIMeTaskResultRun(ctx, db.FailAIMeTaskResultRunParams{
+		LastError: message, ID: run.ID, WorkspaceID: run.WorkspaceID,
+	})
+	return false, err
 }
 
 func (h *Handler) markFeishuApprovalWaitingForTask(ctx context.Context, origin db.FindAIMeTaskOriginRow, input aiMeTaskContinuationInput) error {
@@ -318,6 +360,96 @@ func (h *Handler) markFeishuApprovalWaitingForLatestRunTask(ctx context.Context,
 	return approval, nil
 }
 
+func (h *Handler) syncFeishuApprovalFromToolOutcome(ctx context.Context, run db.AiMeRun, call db.AiMeToolCall) error {
+	var input map[string]any
+	if err := json.Unmarshal(run.Input, &input); err != nil {
+		return err
+	}
+	approvalID, err := parseUUIDLoose(stringFromJSON(input["approval_id"]))
+	if err != nil {
+		return err
+	}
+	approval, err := h.Queries.GetAIApprovalInWorkspace(ctx, db.GetAIApprovalInWorkspaceParams{ID: approvalID, WorkspaceID: run.WorkspaceID})
+	if err != nil {
+		return err
+	}
+	if call.Status == "succeeded" && call.CreatedTaskID.Valid {
+		_, err = h.markFeishuApprovalWaitingForLatestRunTask(ctx, approval, run)
+		return err
+	}
+	return h.finalizeFeishuApprovalFromToolOutcome(ctx, approval, call)
+}
+
+func (h *Handler) finalizeFeishuApprovalFromToolOutcome(ctx context.Context, approval db.AiMeApproval, call db.AiMeToolCall) error {
+	if approval.Status != "pending" && approval.Status != "observing" {
+		return nil
+	}
+	payload := approvalPayloadMap(approval.FinalPayload)
+	callID := uuidToString(call.ID)
+	if stringFromJSON(payload["tool_outcome_call_id"]) == callID {
+		return nil
+	}
+	draft := "AI-Me 的后续工具操作执行失败，系统已停止自动处理。请查看关联工作项，编辑本草稿后发送。"
+	summary := "AI-Me 后续工具执行失败，需要人工复核。"
+	kind := "task_result_tool_stopped"
+	switch call.Status {
+	case "succeeded":
+		draft = "AI-Me 已完成获批的后续工具操作，但没有创建新的员工任务。请查看关联工作项，编辑本草稿后发送。"
+		summary = "AI-Me 已完成后续工具操作，需要人工确认回复。"
+		kind = "task_result_tool_completed"
+	case "rejected":
+		draft = "AI-Me 建议的后续工具操作未获批准，系统已停止自动处理。请根据原消息编辑本草稿后发送。"
+		summary = "AI-Me 后续工具未获批准，已转为人工处理。"
+	case "cancelled":
+		draft = "AI-Me 建议的后续工具操作已被接管或取消，系统已停止自动处理。请根据原消息编辑本草稿后发送。"
+		summary = "AI-Me 后续工具已被接管或取消，已转为人工处理。"
+	}
+	payload["text"] = draft
+	payload["draft_source"] = "ai_me_tool_" + call.Status
+	payload["awaiting_task_result"] = false
+	payload["requires_manual_review"] = true
+	payload["tool_outcome_call_id"] = callID
+	payload["tool_outcome_status"] = call.Status
+	payload["tool_outcome_error"] = call.Error
+	confidence, err := numericFromFloat64(1)
+	if err != nil {
+		return err
+	}
+	tx, err := h.TxStarter.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	qtx := h.Queries.WithTx(tx)
+	updated, err := qtx.UpdatePendingFeishuApprovalForTask(ctx, db.UpdatePendingFeishuApprovalForTaskParams{
+		Summary: summary, RiskLevel: "high", Confidence: confidence,
+		FinalPayload: jsonBytesOrObject(payload), AiReasoningSummary: "内部工具审批已结束，AI-Me 已同步外层飞书审批并停止等待员工结果。",
+		CreatedIssueID: call.CreatedIssueID, CreatedTaskID: call.CreatedTaskID,
+		ID: approval.ID, WorkspaceID: approval.WorkspaceID,
+	})
+	if err != nil {
+		return err
+	}
+	eventPayload := map[string]any{
+		"kind": kind, "tool_call_id": callID, "tool_status": call.Status, "error": call.Error,
+	}
+	if _, err := createAIApprovalEvent(ctx, qtx, updated, "ai_me", updated.RequesterUserID, "edited", updated.Status, updated.Status, eventPayload); err != nil {
+		return err
+	}
+	if err := createAIApprovalEvidence(ctx, qtx, updated.WorkspaceID, updated.ID, CreateAIApprovalEvidenceRequest{
+		EvidenceType: "log", Label: "工具审批结果", RefID: callID,
+		Quote:    truncateText(firstNonEmpty(call.Error, "tool status: "+call.Status), 800),
+		Metadata: map[string]any{"tool_name": call.ToolName, "tool_status": call.Status},
+	}); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	h.publish(protocol.EventApprovalUpdated, uuidToString(updated.WorkspaceID), "ai_me", uuidToString(updated.RequesterUserID), map[string]any{"approval": aiApprovalToResponse(updated)})
+	return nil
+}
+
 func (h *Handler) finalizeFeishuApprovalFromTask(ctx context.Context, approval db.AiMeApproval, task db.AgentTaskQueue, issue db.Issue, decision AIMeThinkResponse, provider, model string, usage AIModelUsage, resultText string, depth int) error {
 	payload := approvalPayloadMap(approval.FinalPayload)
 	payload["text"] = strings.TrimSpace(decision.ReplyDraft)
@@ -357,6 +489,84 @@ func (h *Handler) finalizeFeishuApprovalFromTask(ctx context.Context, approval d
 	if err := createAIApprovalEvidence(ctx, qtx, updated.WorkspaceID, updated.ID, CreateAIApprovalEvidenceRequest{
 		EvidenceType: "agent_task", Label: "员工执行结果", RefID: uuidToString(task.ID), Quote: truncateText(resultText, 800),
 		Metadata: map[string]any{"issue_id": uuidToString(issue.ID), "task_status": task.Status},
+	}); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	h.publish(protocol.EventApprovalUpdated, uuidToString(updated.WorkspaceID), "ai_me", uuidToString(updated.RequesterUserID), map[string]any{"approval": aiApprovalToResponse(updated)})
+	return nil
+}
+
+func (h *Handler) finalizeFeishuApprovalFromTaskError(ctx context.Context, run db.AiMeRun, continuationError string) error {
+	var input aiMeTaskContinuationInput
+	if err := json.Unmarshal(run.Input, &input); err != nil {
+		return err
+	}
+	approvalID, err := parseUUIDLoose(input.ApprovalID)
+	if err != nil {
+		return err
+	}
+	taskID, err := parseUUIDLoose(input.TaskID)
+	if err != nil {
+		return err
+	}
+	approval, err := h.Queries.GetAIApprovalInWorkspace(ctx, db.GetAIApprovalInWorkspaceParams{ID: approvalID, WorkspaceID: run.WorkspaceID})
+	if err != nil {
+		return err
+	}
+	if approval.Status != "pending" && approval.Status != "observing" {
+		return nil
+	}
+	payload := approvalPayloadMap(approval.FinalPayload)
+	if waiting, _ := payload["awaiting_task_result"].(bool); !waiting {
+		return nil
+	}
+	task, err := h.Queries.GetAgentTask(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	issue, err := h.Queries.GetIssueInWorkspace(ctx, db.GetIssueInWorkspaceParams{ID: task.IssueID, WorkspaceID: run.WorkspaceID})
+	if err != nil {
+		return err
+	}
+	payload["text"] = "员工任务已结束，但 AI-Me 自动复核失败。请先在关联工作项中查看员工结果，再编辑本草稿后发送。"
+	payload["draft_source"] = "ai_me_task_result_error"
+	payload["awaiting_task_result"] = false
+	payload["requires_manual_review"] = true
+	payload["task_id"] = input.TaskID
+	payload["task_status"] = task.Status
+	payload["issue_id"] = uuidToString(issue.ID)
+	payload["continuation_error"] = continuationError
+	confidence, err := numericFromFloat64(1)
+	if err != nil {
+		return err
+	}
+	tx, err := h.TxStarter.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	qtx := h.Queries.WithTx(tx)
+	updated, err := qtx.UpdatePendingFeishuApprovalForTask(ctx, db.UpdatePendingFeishuApprovalForTaskParams{
+		Summary: "AI-Me 自动复核失败，需要人工查看员工结果。", RiskLevel: "high", Confidence: confidence,
+		FinalPayload: jsonBytesOrObject(payload), AiReasoningSummary: "自动复核已重试但仍失败，系统已停止自动处理并转为人工复核。",
+		CreatedIssueID: issue.ID, CreatedTaskID: task.ID, ID: approval.ID, WorkspaceID: approval.WorkspaceID,
+	})
+	if err != nil {
+		return err
+	}
+	if _, err := createAIApprovalEvent(ctx, qtx, updated, "ai_me", updated.RequesterUserID, "edited", updated.Status, updated.Status, map[string]any{
+		"kind": "task_result_review_failed", "task_id": input.TaskID, "task_status": task.Status,
+		"issue_id": uuidToString(issue.ID), "error": continuationError,
+	}); err != nil {
+		return err
+	}
+	if err := createAIApprovalEvidence(ctx, qtx, updated.WorkspaceID, updated.ID, CreateAIApprovalEvidenceRequest{
+		EvidenceType: "agent_task", Label: "员工执行结果", RefID: input.TaskID,
+		Quote:    truncateText(aiMeTaskResultText(task), 800),
+		Metadata: map[string]any{"issue_id": uuidToString(issue.ID), "task_status": task.Status, "review_error": continuationError},
 	}); err != nil {
 		return err
 	}

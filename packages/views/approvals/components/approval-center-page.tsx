@@ -1376,6 +1376,9 @@ function eventLabel(value: string, payload?: unknown) {
   const kind = isRecord(payload) ? metadataString(payload.kind) : "";
   if (kind === "task_result_waiting") return "等待员工结果";
   if (kind === "task_result_ready") return "员工结果已复核";
+  if (kind === "task_result_review_failed") return "员工结果复核失败";
+  if (kind === "task_result_tool_completed") return "后续工具已完成";
+  if (kind === "task_result_tool_stopped") return "后续工具已停止";
   switch (value) {
     case "created":
       return "创建审批";
@@ -1519,9 +1522,10 @@ function eventPayloadSummary(value: unknown) {
   const note = metadataString(value.note);
   const outcome = metadataString(value.outcome);
   const status = metadataString(value.execution_status);
-  const error = metadataString(value.execution_error);
+  const error = metadataString(value.execution_error) || metadataString(value.error);
   const taskId = metadataString(value.created_task_id) || metadataString(value.task_id);
   const taskStatus = metadataString(value.task_status);
+  const toolStatus = metadataString(value.tool_status);
   const issueId = metadataString(value.issue_id);
   const continuationDepth = metadataString(value.continuation_depth);
   const commentId = metadataString(value.created_comment_id);
@@ -1533,6 +1537,7 @@ function eventPayloadSummary(value: unknown) {
   if (status) parts.push(`状态：${executionLabel(status)}`);
   if (taskId) parts.push(`任务：${taskId}`);
   if (taskStatus) parts.push(`任务状态：${taskStatusLabel(taskStatus as AgentTask["status"])}`);
+  if (toolStatus) parts.push(`工具状态：${toolStatus}`);
   if (issueId) parts.push(`工作项：${issueId}`);
   if (continuationDepth) parts.push(`续跑：第 ${continuationDepth} 层`);
   if (commentId) parts.push(`评论：${commentId}`);

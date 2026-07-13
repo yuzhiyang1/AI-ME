@@ -76,6 +76,33 @@ func TestParseAIMeDecisionNormalizesUnsafeValues(t *testing.T) {
 	}
 }
 
+func TestParseAIMeDecisionKeepsCoreFieldsWhenEvidenceIsObject(t *testing.T) {
+	raw := `{
+		"summary":"员工审查完成",
+		"risk_level":"medium",
+		"confidence":0.92,
+		"need_approval":true,
+		"reply_draft":"已完成检查，请查看 AIM-174。",
+		"reasoning_summary":"根据员工结果生成回复。",
+		"actions":[{"type":"ask_user","title":"等待确认","description":"请确认回复内容。"}],
+		"evidence":{"issue":"AIM-174","test_results":"all passed"}
+	}`
+
+	got, ok := parseAIMeDecision(raw)
+	if !ok {
+		t.Fatal("expected malformed optional evidence to preserve the core decision")
+	}
+	if got.ReplyDraft != "已完成检查，请查看 AIM-174。" || got.Summary != "员工审查完成" {
+		t.Fatalf("core decision = %#v", got)
+	}
+	if len(got.Actions) != 1 || got.Actions[0].Type != "ask_user" {
+		t.Fatalf("valid actions should be preserved: %#v", got.Actions)
+	}
+	if len(got.Evidence) != 0 {
+		t.Fatalf("object-shaped evidence must not be coerced: %#v", got.Evidence)
+	}
+}
+
 func TestAIMeWorkspacePolicyForcesApprovalOutsideWorkingHours(t *testing.T) {
 	settings := aimeWorkspaceSettingsFromJSON([]byte(`{
 		"ai_me": {

@@ -38,7 +38,9 @@ func (h *Handler) RunAIMeRuntimeScheduler(ctx context.Context) {
 }
 
 func (h *Handler) processDueAIMeRuns(ctx context.Context) {
+	h.reconcileAIMeToolApprovalOutcomes(ctx)
 	h.reconcileAIMeTaskContinuations(ctx)
+	h.reconcileIncompleteAIMeTaskResultRuns(ctx)
 	leaseOwner := "aime-worker-" + randomID()
 	runs, err := h.Queries.ClaimDueAIMeRuns(ctx, db.ClaimDueAIMeRunsParams{LeaseOwner: leaseOwner, LeaseSeconds: 120, Limit: 10})
 	if err != nil {
@@ -58,11 +60,55 @@ func (h *Handler) processDueAIMeRuns(ctx context.Context) {
 			}
 		case "task_result":
 			if err := h.resumeAIMeTaskResultRun(ctx, run, leaseOwner); err != nil {
-				_, _ = h.Queries.FailAIMeRun(ctx, db.FailAIMeRunParams{LastError: truncateText(err.Error(), 1000), ID: run.ID, WorkspaceID: run.WorkspaceID, LeaseOwner: leaseOwner})
-				slog.Warn("AI-Me task result run failed", "run_id", uuidToString(run.ID), "error", err)
+				retried, handleErr := h.handleAIMeTaskResultRunError(ctx, run, leaseOwner, err)
+				if handleErr != nil {
+					slog.Warn("AI-Me task result failure handling failed", "run_id", uuidToString(run.ID), "error", handleErr, "cause", err)
+				} else if retried {
+					slog.Warn("AI-Me task result run scheduled for retry", "run_id", uuidToString(run.ID), "error", err)
+				} else {
+					slog.Warn("AI-Me task result run escalated to human review", "run_id", uuidToString(run.ID), "error", err)
+				}
 			}
 		default:
 			_, _ = h.Queries.FailAIMeRun(ctx, db.FailAIMeRunParams{LastError: "unsupported queued AI-Me run source", ID: run.ID, WorkspaceID: run.WorkspaceID, LeaseOwner: leaseOwner})
+		}
+	}
+}
+
+func (h *Handler) reconcileAIMeToolApprovalOutcomes(ctx context.Context) {
+	rows, err := h.Queries.ListUnsyncedAIMeToolApprovalOutcomes(ctx, 50)
+	if err != nil {
+		slog.Warn("AI-Me tool approval outcome reconciliation failed", "error", err)
+		return
+	}
+	for _, row := range rows {
+		run, runErr := h.Queries.GetAIMeRun(ctx, db.GetAIMeRunParams{ID: row.RunID, WorkspaceID: row.WorkspaceID})
+		if runErr != nil {
+			slog.Warn("AI-Me tool approval run reload failed", "run_id", uuidToString(row.RunID), "error", runErr)
+			continue
+		}
+		call, callErr := h.Queries.GetAIMeToolCall(ctx, db.GetAIMeToolCallParams{ID: row.ToolCallID, WorkspaceID: row.WorkspaceID})
+		if callErr != nil {
+			slog.Warn("AI-Me tool approval call reload failed", "tool_call_id", uuidToString(row.ToolCallID), "error", callErr)
+			continue
+		}
+		if err := h.syncFeishuApprovalFromToolOutcome(ctx, run, call); err != nil {
+			slog.Warn("AI-Me outer Feishu approval synchronization failed", "run_id", uuidToString(run.ID), "tool_call_id", uuidToString(call.ID), "error", err)
+		}
+	}
+}
+
+func (h *Handler) reconcileIncompleteAIMeTaskResultRuns(ctx context.Context) {
+	runs, err := h.Queries.ListIncompleteAIMeTaskResultRuns(ctx, 50)
+	if err != nil {
+		slog.Warn("AI-Me task result finalization reconciliation failed", "error", err)
+		return
+	}
+	for _, run := range runs {
+		if _, err := h.Queries.RecoverIncompleteAIMeTaskResultRun(ctx, db.RecoverIncompleteAIMeTaskResultRunParams{
+			ID: run.ID, WorkspaceID: run.WorkspaceID,
+		}); err != nil && !isNotFound(err) {
+			slog.Warn("AI-Me incomplete task result recovery failed", "run_id", uuidToString(run.ID), "error", err)
 		}
 	}
 }
