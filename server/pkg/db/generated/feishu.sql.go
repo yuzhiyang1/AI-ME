@@ -1124,6 +1124,96 @@ func (q *Queries) UpdateFeishuWebhookEventStatus(ctx context.Context, arg Update
 	return i, err
 }
 
+const updatePendingFeishuApprovalForTask = `-- name: UpdatePendingFeishuApprovalForTask :one
+UPDATE ai_me_approval SET
+    summary = $1::text,
+    risk_level = $2::text,
+    confidence = $3::numeric,
+    final_payload = $4::jsonb,
+    ai_reasoning_summary = $5::text,
+    created_issue_id = COALESCE($6::uuid, created_issue_id),
+    created_task_id = COALESCE($7::uuid, created_task_id),
+    updated_at = now()
+WHERE id = $8::uuid
+  AND workspace_id = $9::uuid
+  AND source_type = 'feishu'
+  AND status IN ('pending', 'observing')
+  AND execution_status = 'not_started'
+RETURNING id, workspace_id, requester_user_id, source_type, source_ref_id, source_url, issue_id, inbox_item_id, task_queue_id, memory_id, title, summary, status, risk_level, confidence, reversibility, action_type, action_title, action_description, original_payload, final_payload, ai_reasoning_summary, approval_note, rejection_reason, approved_by, approved_at, rejected_by, rejected_at, observed_by, observed_at, taken_over_by, taken_over_at, executed_at, execution_status, execution_error, created_issue_id, created_task_id, created_comment_id, expires_at, created_at, updated_at, tool_call_id
+`
+
+type UpdatePendingFeishuApprovalForTaskParams struct {
+	Summary            string         `json:"summary"`
+	RiskLevel          string         `json:"risk_level"`
+	Confidence         pgtype.Numeric `json:"confidence"`
+	FinalPayload       []byte         `json:"final_payload"`
+	AiReasoningSummary string         `json:"ai_reasoning_summary"`
+	CreatedIssueID     pgtype.UUID    `json:"created_issue_id"`
+	CreatedTaskID      pgtype.UUID    `json:"created_task_id"`
+	ID                 pgtype.UUID    `json:"id"`
+	WorkspaceID        pgtype.UUID    `json:"workspace_id"`
+}
+
+func (q *Queries) UpdatePendingFeishuApprovalForTask(ctx context.Context, arg UpdatePendingFeishuApprovalForTaskParams) (AiMeApproval, error) {
+	row := q.db.QueryRow(ctx, updatePendingFeishuApprovalForTask,
+		arg.Summary,
+		arg.RiskLevel,
+		arg.Confidence,
+		arg.FinalPayload,
+		arg.AiReasoningSummary,
+		arg.CreatedIssueID,
+		arg.CreatedTaskID,
+		arg.ID,
+		arg.WorkspaceID,
+	)
+	var i AiMeApproval
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.RequesterUserID,
+		&i.SourceType,
+		&i.SourceRefID,
+		&i.SourceUrl,
+		&i.IssueID,
+		&i.InboxItemID,
+		&i.TaskQueueID,
+		&i.MemoryID,
+		&i.Title,
+		&i.Summary,
+		&i.Status,
+		&i.RiskLevel,
+		&i.Confidence,
+		&i.Reversibility,
+		&i.ActionType,
+		&i.ActionTitle,
+		&i.ActionDescription,
+		&i.OriginalPayload,
+		&i.FinalPayload,
+		&i.AiReasoningSummary,
+		&i.ApprovalNote,
+		&i.RejectionReason,
+		&i.ApprovedBy,
+		&i.ApprovedAt,
+		&i.RejectedBy,
+		&i.RejectedAt,
+		&i.ObservedBy,
+		&i.ObservedAt,
+		&i.TakenOverBy,
+		&i.TakenOverAt,
+		&i.ExecutedAt,
+		&i.ExecutionStatus,
+		&i.ExecutionError,
+		&i.CreatedIssueID,
+		&i.CreatedTaskID,
+		&i.CreatedCommentID,
+		&i.ExpiresAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ToolCallID,
+	)
+	return i, err
+}
+
 const upsertFeishuDeliverySending = `-- name: UpsertFeishuDeliverySending :one
 INSERT INTO ai_me_feishu_delivery (
     workspace_id,

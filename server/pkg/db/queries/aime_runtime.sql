@@ -328,6 +328,54 @@ WHERE call.run_id = sqlc.arg('run_id')::uuid
   AND run.workspace_id = sqlc.arg('workspace_id')::uuid
 ORDER BY call.created_at, call.id;
 
+-- name: FindAIMeTaskOrigin :one
+-- Resolves an employee task back to the AI-Me tool call and run that created
+-- it. The newest call wins defensively if imported data contains duplicates.
+SELECT
+    call.id AS tool_call_id,
+    call.run_id AS parent_run_id,
+    call.created_issue_id,
+    run.workspace_id,
+    run.user_id,
+    run.input AS parent_input,
+    run.context_snapshot,
+    run.policy_snapshot,
+    run.provider,
+    run.model
+FROM ai_me_tool_call call
+JOIN ai_me_run run ON run.id = call.run_id
+WHERE call.created_task_id = sqlc.arg('task_id')::uuid
+  AND run.workspace_id = sqlc.arg('workspace_id')::uuid
+ORDER BY call.created_at DESC, call.id DESC
+LIMIT 1;
+
+-- name: ListUncontinuedAIMeTerminalTasks :many
+-- Recovers the small crash window between persisting a terminal employee task
+-- and publishing its in-process event. The continuation key remains the final
+-- idempotency guard when the scanner and event listener race.
+SELECT
+    task.id AS task_id,
+    run.workspace_id
+FROM agent_task_queue task
+JOIN ai_me_tool_call call ON call.created_task_id = task.id
+JOIN ai_me_run run ON run.id = call.run_id
+JOIN ai_me_approval approval
+  ON approval.id::text = run.input->>'approval_id'
+ AND approval.workspace_id = run.workspace_id
+WHERE task.status IN ('completed', 'failed', 'cancelled')
+  AND approval.source_type = 'feishu'
+  AND approval.status IN ('pending', 'observing')
+  AND approval.execution_status = 'not_started'
+  AND NOT EXISTS (
+      SELECT 1
+      FROM ai_me_run continuation
+      WHERE continuation.workspace_id = run.workspace_id
+        AND continuation.idempotency_key = 'task_result:' || task.id::text || ':' || task.status
+  )
+GROUP BY task.id, run.workspace_id, task.completed_at, task.created_at
+ORDER BY COALESCE(task.completed_at, task.created_at), task.id
+LIMIT sqlc.arg('limit');
+
 -- name: StartAIMeToolCall :one
 UPDATE ai_me_tool_call call SET
     status = 'running',

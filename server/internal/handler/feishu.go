@@ -1624,7 +1624,20 @@ func (h *Handler) enrichPendingFeishuApproval(ctx context.Context, item db.Inbox
 	if err := tx.Commit(ctx); err != nil {
 		return db.AiMeApproval{}, err
 	}
-	return updated, nil
+	run, err := h.Queries.FindAIMeRunByIdempotencyKey(ctx, db.FindAIMeRunByIdempotencyKeyParams{
+		WorkspaceID: approval.WorkspaceID, IdempotencyKey: "feishu:" + feishuSourceMessageID(payload),
+	})
+	if err != nil {
+		if isNotFound(err) {
+			return updated, nil
+		}
+		return db.AiMeApproval{}, err
+	}
+	linked, err := h.markFeishuApprovalWaitingForLatestRunTask(ctx, updated, run)
+	if err != nil {
+		return db.AiMeApproval{}, err
+	}
+	return linked, nil
 }
 
 func (h *Handler) generateFeishuReplyDraft(ctx context.Context, workspace db.Workspace, recipient db.Member, payload feishuEventCallback, messageText string, gate feishuInboundGateResult) feishuReplyDraft {

@@ -93,6 +93,58 @@ func TestExecuteApprovalSendExternalMessageRejectsUnsupportedChannel(t *testing.
 	}
 }
 
+func TestApproveAIApprovalRejectsReplyWhileEmployeeTaskIsPending(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("handler test fixture is not available")
+	}
+	ctx := context.Background()
+	messageID := "om_waiting_task_" + randomID()
+	createReq := newRequest("POST", "/api/ai-me/approvals?workspace_id="+testWorkspaceID, CreateAIApprovalRequest{
+		SourceType:         "feishu",
+		SourceRefID:        messageID,
+		Title:              "等待员工完成后回复",
+		Summary:            "员工仍在处理工作项。",
+		RiskLevel:          "high",
+		Reversibility:      "irreversible",
+		ActionType:         "send_external_message",
+		ActionTitle:        "回复飞书消息",
+		ActionDescription:  "员工完成后才可批准发送。",
+		OriginalPayload:    map[string]any{"channel": "feishu", "message_id": messageID},
+		FinalPayload:       map[string]any{"channel": "feishu", "message_id": messageID, "text": "正在处理。", "awaiting_task_result": true},
+		AIReasoningSummary: "等待员工结果。",
+	})
+	w := httptest.NewRecorder()
+	testHandler.CreateAIApproval(w, createReq)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateAIApproval: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var approval AIApprovalResponse
+	if err := json.NewDecoder(w.Body).Decode(&approval); err != nil {
+		t.Fatalf("decode approval: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = testPool.Exec(ctx, `DELETE FROM ai_me_approval WHERE id = $1`, approval.ID)
+	})
+
+	approveReq := withURLParam(
+		newRequest("POST", "/api/ai-me/approvals/"+approval.ID+"/approve?workspace_id="+testWorkspaceID, AIApprovalTransitionRequest{Note: "误点批准"}),
+		"id",
+		approval.ID,
+	)
+	w = httptest.NewRecorder()
+	testHandler.ApproveAIApproval(w, approveReq)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("ApproveAIApproval: expected 409, got %d: %s", w.Code, w.Body.String())
+	}
+	var status string
+	if err := testPool.QueryRow(ctx, `SELECT status FROM ai_me_approval WHERE id = $1`, approval.ID).Scan(&status); err != nil {
+		t.Fatalf("load approval status: %v", err)
+	}
+	if status != "pending" {
+		t.Fatalf("approval status = %q, want pending", status)
+	}
+}
+
 func TestRetryAIApprovalExecutionRetriesFailedFeishuSend(t *testing.T) {
 	if testHandler == nil {
 		t.Skip("handler test fixture is not available")

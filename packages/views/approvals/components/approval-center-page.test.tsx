@@ -204,6 +204,50 @@ describe("ApprovalCenterPage edit then approve", () => {
     expect(await screen.findByText(/状态：失败/)).toHaveTextContent("渠道：feishu");
     expect(screen.getByText(/状态：失败/)).toHaveTextContent("消息：msg-1");
   });
+
+  it("disables external approval while the employee task result is pending", async () => {
+    const waitingApproval = makeApproval({
+      summary: "Codex Worker 正在处理工作项。",
+      final_payload: {
+        channel: "feishu",
+        message_id: "msg-1",
+        text: "已创建工作项，正在处理。",
+        awaiting_task_result: true,
+        task_id: "task-1",
+      },
+      created_task_id: "task-1",
+      events: [
+        {
+          id: "event-waiting-task",
+          approval_id: "approval-1",
+          workspace_id: "ws-1",
+          actor_type: "ai_me",
+          actor_id: "member-1",
+          event_type: "edited",
+          from_status: "pending",
+          to_status: "pending",
+          payload: {
+            kind: "task_result_waiting",
+            task_id: "task-1",
+            issue_id: "issue-1",
+            continuation_depth: 1,
+          },
+          created_at: "2026-07-13T04:00:00.000Z",
+        },
+      ],
+    });
+    mockApi.listAIApprovals.mockResolvedValue({ approvals: [waitingApproval], total: 1 });
+    mockApi.getAIApproval.mockResolvedValue(waitingApproval);
+
+    renderApprovals();
+
+    expect(await screen.findByText("等待员工执行结果")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "批准并发送" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "编辑后批准" })).toBeDisabled();
+    expect(screen.getByText("等待员工结果")).toBeInTheDocument();
+    expect(screen.getByText(/任务：task-1/)).toHaveTextContent("工作项：issue-1");
+    expect(screen.getByText(/任务：task-1/)).toHaveTextContent("续跑：第 1 层");
+  });
 });
 
 function renderApprovals() {

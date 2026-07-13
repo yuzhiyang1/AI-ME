@@ -381,7 +381,8 @@ function ApprovalDetail({ approval, loading }: { approval: AIApproval | null; lo
 
   const canTransition = approval.status === "pending" || approval.status === "observing";
   const canExecuteAction = EXECUTABLE_ACTION_TYPES.has(approval.action_type);
-  const canApprove = canTransition && canExecuteAction;
+  const awaitingTaskResult = approvalAwaitsTaskResult(approval);
+  const canApprove = canTransition && canExecuteAction && !awaitingTaskResult;
   const canEditPayload = canApprove && isEditableApproval(approval);
   const editablePayloadKey = getEditableApprovalPayloadKey(approval);
   const currentEditableText = getEditableApprovalText(approval);
@@ -492,6 +493,18 @@ function ApprovalDetail({ approval, loading }: { approval: AIApproval | null; lo
         <ApprovalFailureNotice approval={approval} />
         <ApprovalExecutionPanel approval={approval} />
 
+        {awaitingTaskResult && (
+          <section className="flex items-start gap-3 rounded-xl border border-[var(--aime-warning-border)] bg-[var(--aime-warning-bg)] p-4">
+            <Clock3 className="mt-0.5 size-4 shrink-0 text-[var(--aime-warning)]" />
+            <div>
+              <h3 className="text-sm font-semibold">等待员工执行结果</h3>
+              <p className="mt-1 text-xs leading-5 text-[var(--aime-text-secondary)]">
+                员工完成后，AI-Me 会自动复核结果并更新这份回复草稿，届时才可批准发送。
+              </p>
+            </div>
+          </section>
+        )}
+
         {isEditableApproval(approval) && (
           <section className="rounded-xl border border-[var(--aime-border)] bg-[var(--aime-surface)] p-4">
             <div className="flex flex-wrap items-start justify-between gap-3">
@@ -564,8 +577,8 @@ function ApprovalDetail({ approval, loading }: { approval: AIApproval | null; lo
             <Eye className="size-3.5" />
             继续观察
           </Button>
-          {canEditPayload && !isEditingPayload && (
-            <Button type="button" variant="outline" disabled={busy} onClick={() => setIsEditingPayload(true)}>
+          {canTransition && isEditableApproval(approval) && !isEditingPayload && (
+            <Button type="button" variant="outline" disabled={busy || awaitingTaskResult} onClick={() => setIsEditingPayload(true)}>
               编辑后批准
             </Button>
           )}
@@ -934,7 +947,7 @@ function ApprovalRiskPanel({ approval, loading }: { approval: AIApproval | null;
                   <div key={event.id} className="flex gap-3 rounded-xl border border-[var(--aime-border)] p-3">
                     <Clock3 className="mt-0.5 size-3.5 shrink-0 text-[var(--aime-text-tertiary)]" />
                     <div className="min-w-0">
-                      <p className="text-sm font-medium">{eventLabel(event.event_type)}</p>
+                      <p className="text-sm font-medium">{eventLabel(event.event_type, event.payload)}</p>
                       <p className="mt-1 text-xs text-[var(--aime-text-tertiary)]">
                         {formatRelative(event.created_at)}
                         {event.from_status && event.to_status
@@ -1359,7 +1372,10 @@ function evidenceLabel(value: string) {
   }
 }
 
-function eventLabel(value: string) {
+function eventLabel(value: string, payload?: unknown) {
+  const kind = isRecord(payload) ? metadataString(payload.kind) : "";
+  if (kind === "task_result_waiting") return "等待员工结果";
+  if (kind === "task_result_ready") return "员工结果已复核";
   switch (value) {
     case "created":
       return "创建审批";
@@ -1426,6 +1442,11 @@ function formatJSON(value: unknown) {
 
 function isEditableApproval(approval: AIApproval) {
   return EDITABLE_APPROVAL_ACTION_TYPES.has(approval.action_type);
+}
+
+function approvalAwaitsTaskResult(approval: AIApproval) {
+  const payload = getPayloadRecord(approval.final_payload);
+  return payload?.awaiting_task_result === true;
 }
 
 function getEditableApprovalText(approval: AIApproval) {
@@ -1499,7 +1520,10 @@ function eventPayloadSummary(value: unknown) {
   const outcome = metadataString(value.outcome);
   const status = metadataString(value.execution_status);
   const error = metadataString(value.execution_error);
-  const taskId = metadataString(value.created_task_id);
+  const taskId = metadataString(value.created_task_id) || metadataString(value.task_id);
+  const taskStatus = metadataString(value.task_status);
+  const issueId = metadataString(value.issue_id);
+  const continuationDepth = metadataString(value.continuation_depth);
   const commentId = metadataString(value.created_comment_id);
   const messageId = metadataString(value.message_id);
   const channel = metadataString(value.channel);
@@ -1508,6 +1532,9 @@ function eventPayloadSummary(value: unknown) {
   if (kind === "quality_review" && note) parts.push(`备注：${note}`);
   if (status) parts.push(`状态：${executionLabel(status)}`);
   if (taskId) parts.push(`任务：${taskId}`);
+  if (taskStatus) parts.push(`任务状态：${taskStatusLabel(taskStatus as AgentTask["status"])}`);
+  if (issueId) parts.push(`工作项：${issueId}`);
+  if (continuationDepth) parts.push(`续跑：第 ${continuationDepth} 层`);
   if (commentId) parts.push(`评论：${commentId}`);
   if (channel) parts.push(`渠道：${channel}`);
   if (messageId) parts.push(`消息：${messageId}`);

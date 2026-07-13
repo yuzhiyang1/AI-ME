@@ -38,6 +38,7 @@ func (h *Handler) RunAIMeRuntimeScheduler(ctx context.Context) {
 }
 
 func (h *Handler) processDueAIMeRuns(ctx context.Context) {
+	h.reconcileAIMeTaskContinuations(ctx)
 	leaseOwner := "aime-worker-" + randomID()
 	runs, err := h.Queries.ClaimDueAIMeRuns(ctx, db.ClaimDueAIMeRunsParams{LeaseOwner: leaseOwner, LeaseSeconds: 120, Limit: 10})
 	if err != nil {
@@ -49,13 +50,34 @@ func (h *Handler) processDueAIMeRuns(ctx context.Context) {
 		if err != nil {
 			continue
 		}
-		if run.Source != "feishu" {
+		switch run.Source {
+		case "feishu":
+			if err := h.resumeFeishuAIMeRun(ctx, run, leaseOwner); err != nil {
+				_, _ = h.Queries.FailAIMeRun(ctx, db.FailAIMeRunParams{LastError: truncateText(err.Error(), 1000), ID: run.ID, WorkspaceID: run.WorkspaceID, LeaseOwner: leaseOwner})
+				slog.Warn("AI-Me Feishu run recovery failed", "run_id", uuidToString(run.ID), "error", err)
+			}
+		case "task_result":
+			if err := h.resumeAIMeTaskResultRun(ctx, run, leaseOwner); err != nil {
+				_, _ = h.Queries.FailAIMeRun(ctx, db.FailAIMeRunParams{LastError: truncateText(err.Error(), 1000), ID: run.ID, WorkspaceID: run.WorkspaceID, LeaseOwner: leaseOwner})
+				slog.Warn("AI-Me task result run failed", "run_id", uuidToString(run.ID), "error", err)
+			}
+		default:
 			_, _ = h.Queries.FailAIMeRun(ctx, db.FailAIMeRunParams{LastError: "unsupported queued AI-Me run source", ID: run.ID, WorkspaceID: run.WorkspaceID, LeaseOwner: leaseOwner})
-			continue
 		}
-		if err := h.resumeFeishuAIMeRun(ctx, run, leaseOwner); err != nil {
-			_, _ = h.Queries.FailAIMeRun(ctx, db.FailAIMeRunParams{LastError: truncateText(err.Error(), 1000), ID: run.ID, WorkspaceID: run.WorkspaceID, LeaseOwner: leaseOwner})
-			slog.Warn("AI-Me Feishu run recovery failed", "run_id", uuidToString(run.ID), "error", err)
+	}
+}
+
+func (h *Handler) reconcileAIMeTaskContinuations(ctx context.Context) {
+	tasks, err := h.Queries.ListUncontinuedAIMeTerminalTasks(ctx, 50)
+	if err != nil {
+		slog.Warn("AI-Me task continuation reconciliation failed", "error", err)
+		return
+	}
+	for _, task := range tasks {
+		workspaceID := uuidToString(task.WorkspaceID)
+		taskID := uuidToString(task.TaskID)
+		if err := h.enqueueAIMeTaskContinuation(ctx, workspaceID, taskID); err != nil {
+			slog.Warn("AI-Me task continuation recovery failed", "workspace_id", workspaceID, "task_id", taskID, "error", err)
 		}
 	}
 }

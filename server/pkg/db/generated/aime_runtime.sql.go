@@ -669,6 +669,64 @@ func (q *Queries) FindAIMeRunByIdempotencyKey(ctx context.Context, arg FindAIMeR
 	return i, err
 }
 
+const findAIMeTaskOrigin = `-- name: FindAIMeTaskOrigin :one
+SELECT
+    call.id AS tool_call_id,
+    call.run_id AS parent_run_id,
+    call.created_issue_id,
+    run.workspace_id,
+    run.user_id,
+    run.input AS parent_input,
+    run.context_snapshot,
+    run.policy_snapshot,
+    run.provider,
+    run.model
+FROM ai_me_tool_call call
+JOIN ai_me_run run ON run.id = call.run_id
+WHERE call.created_task_id = $1::uuid
+  AND run.workspace_id = $2::uuid
+ORDER BY call.created_at DESC, call.id DESC
+LIMIT 1
+`
+
+type FindAIMeTaskOriginParams struct {
+	TaskID      pgtype.UUID `json:"task_id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+}
+
+type FindAIMeTaskOriginRow struct {
+	ToolCallID      pgtype.UUID `json:"tool_call_id"`
+	ParentRunID     pgtype.UUID `json:"parent_run_id"`
+	CreatedIssueID  pgtype.UUID `json:"created_issue_id"`
+	WorkspaceID     pgtype.UUID `json:"workspace_id"`
+	UserID          pgtype.UUID `json:"user_id"`
+	ParentInput     []byte      `json:"parent_input"`
+	ContextSnapshot []byte      `json:"context_snapshot"`
+	PolicySnapshot  []byte      `json:"policy_snapshot"`
+	Provider        string      `json:"provider"`
+	Model           string      `json:"model"`
+}
+
+// Resolves an employee task back to the AI-Me tool call and run that created
+// it. The newest call wins defensively if imported data contains duplicates.
+func (q *Queries) FindAIMeTaskOrigin(ctx context.Context, arg FindAIMeTaskOriginParams) (FindAIMeTaskOriginRow, error) {
+	row := q.db.QueryRow(ctx, findAIMeTaskOrigin, arg.TaskID, arg.WorkspaceID)
+	var i FindAIMeTaskOriginRow
+	err := row.Scan(
+		&i.ToolCallID,
+		&i.ParentRunID,
+		&i.CreatedIssueID,
+		&i.WorkspaceID,
+		&i.UserID,
+		&i.ParentInput,
+		&i.ContextSnapshot,
+		&i.PolicySnapshot,
+		&i.Provider,
+		&i.Model,
+	)
+	return i, err
+}
+
 const findAIMeToolCallByIdempotencyKey = `-- name: FindAIMeToolCallByIdempotencyKey :one
 SELECT call.id, call.run_id, call.provider_call_id, call.tool_name, call.arguments, call.status, call.risk_level, call.approval_behavior, call.result, call.error, call.created_issue_id, call.created_task_id, call.created_comment_id, call.idempotency_key, call.started_at, call.completed_at, call.created_at, call.updated_at
 FROM ai_me_tool_call call
@@ -1180,6 +1238,59 @@ func (q *Queries) ListAIMeToolCalls(ctx context.Context, arg ListAIMeToolCallsPa
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUncontinuedAIMeTerminalTasks = `-- name: ListUncontinuedAIMeTerminalTasks :many
+SELECT
+    task.id AS task_id,
+    run.workspace_id
+FROM agent_task_queue task
+JOIN ai_me_tool_call call ON call.created_task_id = task.id
+JOIN ai_me_run run ON run.id = call.run_id
+JOIN ai_me_approval approval
+  ON approval.id::text = run.input->>'approval_id'
+ AND approval.workspace_id = run.workspace_id
+WHERE task.status IN ('completed', 'failed', 'cancelled')
+  AND approval.source_type = 'feishu'
+  AND approval.status IN ('pending', 'observing')
+  AND approval.execution_status = 'not_started'
+  AND NOT EXISTS (
+      SELECT 1
+      FROM ai_me_run continuation
+      WHERE continuation.workspace_id = run.workspace_id
+        AND continuation.idempotency_key = 'task_result:' || task.id::text || ':' || task.status
+  )
+GROUP BY task.id, run.workspace_id, task.completed_at, task.created_at
+ORDER BY COALESCE(task.completed_at, task.created_at), task.id
+LIMIT $1
+`
+
+type ListUncontinuedAIMeTerminalTasksRow struct {
+	TaskID      pgtype.UUID `json:"task_id"`
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+}
+
+// Recovers the small crash window between persisting a terminal employee task
+// and publishing its in-process event. The continuation key remains the final
+// idempotency guard when the scanner and event listener race.
+func (q *Queries) ListUncontinuedAIMeTerminalTasks(ctx context.Context, limit int32) ([]ListUncontinuedAIMeTerminalTasksRow, error) {
+	rows, err := q.db.Query(ctx, listUncontinuedAIMeTerminalTasks, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListUncontinuedAIMeTerminalTasksRow{}
+	for rows.Next() {
+		var i ListUncontinuedAIMeTerminalTasksRow
+		if err := rows.Scan(&i.TaskID, &i.WorkspaceID); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

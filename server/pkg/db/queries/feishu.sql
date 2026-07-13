@@ -127,6 +127,23 @@ WHERE id = sqlc.arg('id')::uuid
   AND final_payload->>'draft_source' = 'pending_ai_model'
 RETURNING *;
 
+-- name: UpdatePendingFeishuApprovalForTask :one
+UPDATE ai_me_approval SET
+    summary = sqlc.arg('summary')::text,
+    risk_level = sqlc.arg('risk_level')::text,
+    confidence = sqlc.arg('confidence')::numeric,
+    final_payload = sqlc.arg('final_payload')::jsonb,
+    ai_reasoning_summary = sqlc.arg('ai_reasoning_summary')::text,
+    created_issue_id = COALESCE(sqlc.narg('created_issue_id')::uuid, created_issue_id),
+    created_task_id = COALESCE(sqlc.narg('created_task_id')::uuid, created_task_id),
+    updated_at = now()
+WHERE id = sqlc.arg('id')::uuid
+  AND workspace_id = sqlc.arg('workspace_id')::uuid
+  AND source_type = 'feishu'
+  AND status IN ('pending', 'observing')
+  AND execution_status = 'not_started'
+RETURNING *;
+
 -- name: UpdateFeishuWebhookEventStatus :one
 UPDATE ai_me_feishu_webhook_event SET
     workspace_id = COALESCE(sqlc.narg('workspace_id')::uuid, workspace_id),

@@ -5,14 +5,517 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/middleware"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
+	"github.com/multica-ai/multica/server/pkg/protocol"
 )
 
 type scriptedToolCallingAIMeModel struct {
 	completions []AIModelCompletion
+}
+
+func TestTaskCompletedEnqueuesSingleAIMeContinuation(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+	ctx := context.Background()
+	var agentID string
+	if err := testPool.QueryRow(ctx, `
+		SELECT id FROM agent
+		WHERE workspace_id = $1
+		ORDER BY created_at ASC
+		LIMIT 1
+	`, testWorkspaceID).Scan(&agentID); err != nil {
+		t.Fatalf("load agent: %v", err)
+	}
+	var issueID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO issue (
+			workspace_id, title, description, status, priority,
+			assignee_type, assignee_id, creator_type, creator_id
+		)
+		VALUES ($1, 'AI-Me continuation test', '', 'in_review', 'medium', 'agent', $2, 'member', $3)
+		RETURNING id
+	`, testWorkspaceID, agentID, testUserID).Scan(&issueID); err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	var taskID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent_task_queue (agent_id, issue_id, runtime_id, status, result, completed_at)
+		VALUES ($1, $2, $3, 'completed', '{"output":"Tool Calling review complete"}'::jsonb, now())
+		RETURNING id
+	`, agentID, issueID, testRuntimeID).Scan(&taskID); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	var approvalID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO ai_me_approval (
+			workspace_id, requester_user_id, source_type, source_ref_id,
+			title, summary, risk_level, confidence, reversibility,
+			action_type, action_title, action_description,
+			original_payload, final_payload, ai_reasoning_summary
+		)
+		VALUES (
+			$1, $2, 'feishu', $3::text,
+			'是否回复这条飞书消息', '员工正在处理', 'high', 0.8, 'irreversible',
+			'send_external_message', '回复飞书消息', '批准后回复原消息',
+			jsonb_build_object('incoming_text', '检查续跑深度'),
+			jsonb_build_object('text', '正在处理。', 'channel', 'feishu', 'message_id', $3::text),
+			'已创建工作项并交给员工'
+		)
+		RETURNING id
+	`, testWorkspaceID, testUserID, "message-depth-limit-"+randomID()).Scan(&approvalID); err != nil {
+		t.Fatalf("create approval: %v", err)
+	}
+	var runID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO ai_me_run (
+			workspace_id, user_id, source, status, input, context_snapshot,
+			policy_snapshot, provider, model, idempotency_key, completed_at
+		)
+		VALUES (
+			$1, $2, 'feishu', 'succeeded',
+			jsonb_build_object(
+				'approval_id', $4::text,
+				'item_id', gen_random_uuid()::text,
+				'depth', $5::int
+			),
+			'{}'::jsonb, '{}'::jsonb, 'deepseek', 'deepseek-test', $3, now()
+		)
+		RETURNING id
+	`, testWorkspaceID, testUserID, "feishu:continuation-test-"+randomID(), approvalID, aiMeMaxContinuationDepth).Scan(&runID); err != nil {
+		t.Fatalf("create AI-Me run: %v", err)
+	}
+	if _, err := testPool.Exec(ctx, `
+		INSERT INTO ai_me_tool_call (
+			run_id, provider_call_id, tool_name, arguments, status,
+			risk_level, approval_behavior, result, created_issue_id,
+			created_task_id, idempotency_key, completed_at
+		)
+		VALUES (
+			$1, 'call-continuation', 'create_issue', '{}'::jsonb, 'succeeded',
+			'medium', 'auto_execute', '{}'::jsonb, $2, $3, $4, now()
+		)
+	`, runID, issueID, taskID, "call:"+randomID()); err != nil {
+		t.Fatalf("create AI-Me tool call: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = testPool.Exec(ctx, `DELETE FROM ai_me_run WHERE workspace_id = $1 AND idempotency_key = $2`, testWorkspaceID, "task_result:"+taskID+":completed")
+		_, _ = testPool.Exec(ctx, `DELETE FROM ai_me_run WHERE id = $1`, runID)
+		_, _ = testPool.Exec(ctx, `DELETE FROM ai_me_approval WHERE id = $1`, approvalID)
+		_, _ = testPool.Exec(ctx, `DELETE FROM agent_task_queue WHERE id = $1`, taskID)
+		_, _ = testPool.Exec(ctx, `DELETE FROM issue WHERE id = $1`, issueID)
+	})
+
+	event := events.Event{
+		Type:        protocol.EventTaskCompleted,
+		WorkspaceID: testWorkspaceID,
+		ActorType:   "system",
+		Payload: map[string]any{
+			"task_id":  taskID,
+			"issue_id": issueID,
+			"status":   "completed",
+		},
+	}
+	testHandler.processDueAIMeRuns(ctx)
+	var recoveredCount int
+	if err := testPool.QueryRow(ctx, `
+		SELECT count(*)
+		FROM ai_me_run
+		WHERE workspace_id = $1 AND idempotency_key = $2
+	`, testWorkspaceID, "task_result:"+taskID+":completed").Scan(&recoveredCount); err != nil {
+		t.Fatalf("load recovered continuation run: %v", err)
+	}
+	if recoveredCount != 1 {
+		t.Fatalf("recovered continuation run count = %d, want 1", recoveredCount)
+	}
+	testHandler.Bus.Publish(event)
+	testHandler.Bus.Publish(event)
+
+	var count int
+	if err := testPool.QueryRow(ctx, `
+		SELECT count(*)
+		FROM ai_me_run
+		WHERE workspace_id = $1 AND idempotency_key = $2
+	`, testWorkspaceID, "task_result:"+taskID+":completed").Scan(&count); err != nil {
+		t.Fatalf("load continuation run: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("continuation run count = %d, want 1", count)
+	}
+	var source string
+	var input []byte
+	if err := testPool.QueryRow(ctx, `
+		SELECT source, input
+		FROM ai_me_run
+		WHERE workspace_id = $1 AND idempotency_key = $2
+	`, testWorkspaceID, "task_result:"+taskID+":completed").Scan(&source, &input); err != nil {
+		t.Fatalf("load continuation run details: %v", err)
+	}
+	if source != "task_result" {
+		t.Fatalf("continuation source = %q, want task_result", source)
+	}
+	var runInput map[string]any
+	if err := json.Unmarshal(input, &runInput); err != nil {
+		t.Fatalf("decode continuation input: %v", err)
+	}
+	if runInput["task_id"] != taskID || runInput["task_status"] != "completed" || runInput["parent_run_id"] != runID {
+		t.Fatalf("continuation input = %#v", runInput)
+	}
+	if intFromJSON(runInput["depth"]) != aiMeMaxContinuationDepth+1 {
+		t.Fatalf("continuation depth = %v, want %d", runInput["depth"], aiMeMaxContinuationDepth+1)
+	}
+	var awaiting bool
+	var replyText string
+	if err := testPool.QueryRow(ctx, `
+		SELECT COALESCE((final_payload->>'awaiting_task_result')::boolean, false), final_payload->>'text'
+		FROM ai_me_approval
+		WHERE id = $1
+	`, approvalID).Scan(&awaiting, &replyText); err != nil {
+		t.Fatalf("load depth-limited approval: %v", err)
+	}
+	if awaiting {
+		t.Fatal("depth-limited approval should be ready for human review")
+	}
+	if !strings.Contains(replyText, "系统已停止继续调用员工") {
+		t.Fatalf("depth-limited reply = %q", replyText)
+	}
+}
+
+func TestTaskCompletedContinuationUpdatesPendingFeishuReply(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+	ctx := context.Background()
+	var agentID string
+	if err := testPool.QueryRow(ctx, `
+		SELECT id FROM agent WHERE workspace_id = $1 ORDER BY created_at ASC LIMIT 1
+	`, testWorkspaceID).Scan(&agentID); err != nil {
+		t.Fatalf("load agent: %v", err)
+	}
+	var issueID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO issue (
+			workspace_id, title, description, status, priority,
+			assignee_type, assignee_id, creator_type, creator_id
+		)
+		VALUES ($1, 'Review Tool Calling coverage', 'Inspect the current test matrix.', 'in_review', 'medium', 'agent', $2, 'member', $3)
+		RETURNING id
+	`, testWorkspaceID, agentID, testUserID).Scan(&issueID); err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	var taskID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent_task_queue (
+			agent_id, issue_id, runtime_id, status, result, started_at, completed_at
+		)
+		VALUES (
+			$1, $2, $3, 'completed',
+			'{"output":"28 targeted Tool Calling tests passed; Gemini, Pi, Cursor and the end-to-end transcript still need coverage."}'::jsonb,
+			now() - interval '2 minutes', now()
+		)
+		RETURNING id
+	`, agentID, issueID, testRuntimeID).Scan(&taskID); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	var approvalID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO ai_me_approval (
+			workspace_id, requester_user_id, source_type, source_ref_id,
+			title, summary, risk_level, confidence, reversibility,
+			action_type, action_title, action_description,
+			original_payload, final_payload, ai_reasoning_summary
+		)
+		VALUES (
+			$1, $2, 'feishu', $3::text,
+			'是否回复这条飞书消息', '员工正在处理', 'high', 0.8, 'irreversible',
+			'send_external_message', '回复飞书消息', '批准后回复原消息',
+			jsonb_build_object('incoming_text', '检查 Tool Calling 测试完整性'),
+			jsonb_build_object(
+				'text', '已创建工作项，正在等待员工处理。',
+				'channel', 'feishu',
+				'message_id', $3::text,
+				'draft_source', 'ai_model'
+			),
+			'已创建工作项并交给员工'
+		)
+		RETURNING id
+	`, testWorkspaceID, testUserID, "message-continuation-"+randomID()).Scan(&approvalID); err != nil {
+		t.Fatalf("create approval: %v", err)
+	}
+	var parentRunID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO ai_me_run (
+			workspace_id, user_id, source, status, input, context_snapshot,
+			policy_snapshot, provider, model, idempotency_key, completed_at
+		)
+		VALUES (
+			$1, $2, 'feishu', 'succeeded',
+			jsonb_build_object(
+				'approval_id', $3::text,
+				'message_text', '检查 Tool Calling 测试完整性并交给 Codex 处理',
+				'payload', jsonb_build_object(),
+				'gate', jsonb_build_object()
+			),
+			'{}'::jsonb, '{}'::jsonb, 'deepseek', 'deepseek-test', $4::text, now()
+		)
+		RETURNING id
+	`, testWorkspaceID, testUserID, approvalID, "feishu:result-test-"+randomID()).Scan(&parentRunID); err != nil {
+		t.Fatalf("create parent run: %v", err)
+	}
+	if _, err := testPool.Exec(ctx, `
+		INSERT INTO ai_me_tool_call (
+			run_id, provider_call_id, tool_name, arguments, status,
+			risk_level, approval_behavior, result, created_issue_id,
+			created_task_id, idempotency_key, completed_at
+		)
+		VALUES (
+			$1, 'call-result', 'create_issue', '{}'::jsonb, 'succeeded',
+			'medium', 'auto_execute', '{}'::jsonb, $2, $3, $4, now()
+		)
+	`, parentRunID, issueID, taskID, "call:"+randomID()); err != nil {
+		t.Fatalf("create tool call: %v", err)
+	}
+	seedApproval, err := testHandler.Queries.GetAIApprovalInWorkspace(ctx, db.GetAIApprovalInWorkspaceParams{
+		ID: parseUUID(approvalID), WorkspaceID: parseUUID(testWorkspaceID),
+	})
+	if err != nil {
+		t.Fatalf("load seeded approval: %v", err)
+	}
+	seedRun, err := testHandler.Queries.GetAIMeRun(ctx, db.GetAIMeRunParams{
+		ID: parseUUID(parentRunID), WorkspaceID: parseUUID(testWorkspaceID),
+	})
+	if err != nil {
+		t.Fatalf("load seeded run: %v", err)
+	}
+	linkedApproval, err := testHandler.markFeishuApprovalWaitingForLatestRunTask(ctx, seedApproval, seedRun)
+	if err != nil {
+		t.Fatalf("link approval to initial employee task: %v", err)
+	}
+	linkedPayload := approvalPayloadMap(linkedApproval.FinalPayload)
+	if waiting, _ := linkedPayload["awaiting_task_result"].(bool); !waiting {
+		t.Fatal("approval should wait as soon as the initial employee task is created")
+	}
+	if stringFromJSON(linkedPayload["task_id"]) != taskID {
+		t.Fatalf("linked task id = %q, want %q", stringFromJSON(linkedPayload["task_id"]), taskID)
+	}
+	t.Cleanup(func() {
+		_, _ = testPool.Exec(ctx, `DELETE FROM ai_me_run WHERE workspace_id = $1 AND idempotency_key = $2`, testWorkspaceID, "task_result:"+taskID+":completed")
+		_, _ = testPool.Exec(ctx, `DELETE FROM ai_me_run WHERE id = $1`, parentRunID)
+		_, _ = testPool.Exec(ctx, `DELETE FROM ai_me_approval WHERE id = $1`, approvalID)
+		_, _ = testPool.Exec(ctx, `DELETE FROM agent_task_queue WHERE id = $1`, taskID)
+		_, _ = testPool.Exec(ctx, `DELETE FROM issue WHERE id = $1`, issueID)
+	})
+
+	model := &scriptedToolCallingAIMeModel{completions: []AIModelCompletion{{
+		Content: `{"summary":"Codex 已完成 Tool Calling 测试审查。","risk_level":"medium","confidence":0.95,"need_approval":true,"reply_draft":"已完成 Tool Calling 测试审查：现有 28 个定向用例通过，主要缺口是 Gemini、Pi、Cursor 和端到端链路。","reasoning_summary":"根据员工任务结果生成最终回复。","actions":[],"evidence":[]}`,
+		Message: AIModelMessage{Role: "assistant", Content: `{"summary":"Codex 已完成 Tool Calling 测试审查。","risk_level":"medium","confidence":0.95,"need_approval":true,"reply_draft":"已完成 Tool Calling 测试审查：现有 28 个定向用例通过，主要缺口是 Gemini、Pi、Cursor 和端到端链路。","reasoning_summary":"根据员工任务结果生成最终回复。","actions":[],"evidence":[]}`},
+		Usage:   AIModelUsage{InputTokens: 120, OutputTokens: 45},
+	}}}
+	originalModel := testHandler.AIModel
+	testHandler.AIModel = model
+	t.Cleanup(func() { testHandler.AIModel = originalModel })
+
+	testHandler.Bus.Publish(events.Event{
+		Type:        protocol.EventTaskCompleted,
+		WorkspaceID: testWorkspaceID,
+		ActorType:   "system",
+		Payload: map[string]any{
+			"task_id":  taskID,
+			"issue_id": issueID,
+			"status":   "completed",
+		},
+	})
+	testHandler.processDueAIMeRuns(ctx)
+
+	var status, replyText, summary string
+	var awaiting bool
+	if err := testPool.QueryRow(ctx, `
+		SELECT status, final_payload->>'text', summary,
+		       COALESCE((final_payload->>'awaiting_task_result')::boolean, false)
+		FROM ai_me_approval
+		WHERE id = $1
+	`, approvalID).Scan(&status, &replyText, &summary, &awaiting); err != nil {
+		t.Fatalf("load updated approval: %v", err)
+	}
+	if status != "pending" {
+		t.Fatalf("approval status = %q, want pending", status)
+	}
+	if awaiting {
+		t.Fatal("approval should be ready for final review")
+	}
+	if replyText != "已完成 Tool Calling 测试审查：现有 28 个定向用例通过，主要缺口是 Gemini、Pi、Cursor 和端到端链路。" {
+		t.Fatalf("reply text = %q", replyText)
+	}
+	if summary != "Codex 已完成 Tool Calling 测试审查。" {
+		t.Fatalf("summary = %q", summary)
+	}
+	var waitingEvents, readyEvents int
+	if err := testPool.QueryRow(ctx, `
+		SELECT
+			count(*) FILTER (WHERE payload->>'kind' = 'task_result_waiting'),
+			count(*) FILTER (WHERE payload->>'kind' = 'task_result_ready')
+		FROM ai_me_approval_event
+		WHERE approval_id = $1
+	`, approvalID).Scan(&waitingEvents, &readyEvents); err != nil {
+		t.Fatalf("load continuation events: %v", err)
+	}
+	if waitingEvents != 1 || readyEvents != 1 {
+		t.Fatalf("continuation events waiting=%d ready=%d, want 1 each", waitingEvents, readyEvents)
+	}
+}
+
+func TestFailedTaskContinuationCanReassignAndWaitForNextResult(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+	ctx := context.Background()
+	var originalSettings []byte
+	if err := testPool.QueryRow(ctx, `SELECT settings FROM workspace WHERE id = $1`, testWorkspaceID).Scan(&originalSettings); err != nil {
+		t.Fatalf("load workspace settings: %v", err)
+	}
+	if _, err := testPool.Exec(ctx, `
+		UPDATE workspace
+		SET settings = '{"ai_me":{"enabled":true,"autonomy_level":"autonomous","approval_mode":"never","timezone":"Asia/Shanghai","working_hours":{"start":"00:00","end":"23:59"},"model_provider":"deepseek","model_name":"deepseek-test"}}'::jsonb
+		WHERE id = $1
+	`, testWorkspaceID); err != nil {
+		t.Fatalf("enable autonomous AI-Me: %v", err)
+	}
+	var agentID string
+	if err := testPool.QueryRow(ctx, `
+		SELECT id FROM agent
+		WHERE workspace_id = $1 AND name = 'Handler Test Agent'
+		ORDER BY created_at ASC LIMIT 1
+	`, testWorkspaceID).Scan(&agentID); err != nil {
+		t.Fatalf("load test agent: %v", err)
+	}
+	var issueID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO issue (
+			workspace_id, title, description, status, priority,
+			assignee_type, assignee_id, creator_type, creator_id
+		)
+		VALUES ($1, 'Retry failed employee task', 'Retry with a new employee task.', 'in_review', 'high', 'agent', $2, 'member', $3)
+		RETURNING id
+	`, testWorkspaceID, agentID, testUserID).Scan(&issueID); err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+	var failedTaskID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent_task_queue (
+			agent_id, issue_id, runtime_id, status, error, failure_reason, started_at, completed_at
+		)
+		VALUES ($1, $2, $3, 'failed', 'worker process exited', 'runtime_error', now() - interval '1 minute', now())
+		RETURNING id
+	`, agentID, issueID, testRuntimeID).Scan(&failedTaskID); err != nil {
+		t.Fatalf("create failed task: %v", err)
+	}
+	messageID := "message-reassign-" + randomID()
+	var approvalID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO ai_me_approval (
+			workspace_id, requester_user_id, source_type, source_ref_id,
+			title, summary, risk_level, confidence, reversibility,
+			action_type, action_title, action_description,
+			original_payload, final_payload, ai_reasoning_summary
+		)
+		VALUES (
+			$1, $2, 'feishu', $3::text,
+			'是否回复这条飞书消息', '员工正在处理', 'high', 0.8, 'irreversible',
+			'send_external_message', '回复飞书消息', '批准后回复原消息',
+			jsonb_build_object('incoming_text', '请重新处理失败任务'),
+			jsonb_build_object('text', '正在处理。', 'channel', 'feishu', 'message_id', $3::text),
+			'已创建工作项并交给员工'
+		)
+		RETURNING id
+	`, testWorkspaceID, testUserID, messageID).Scan(&approvalID); err != nil {
+		t.Fatalf("create approval: %v", err)
+	}
+	var parentRunID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO ai_me_run (
+			workspace_id, user_id, source, status, input, context_snapshot,
+			policy_snapshot, provider, model, idempotency_key, completed_at
+		)
+		VALUES (
+			$1, $2, 'feishu', 'succeeded',
+			jsonb_build_object('approval_id', $3::text, 'message_text', '请重新处理失败任务'),
+			'{}'::jsonb, '{}'::jsonb, 'deepseek', 'deepseek-test', $4, now()
+		)
+		RETURNING id
+	`, testWorkspaceID, testUserID, approvalID, "feishu:reassign-test-"+randomID()).Scan(&parentRunID); err != nil {
+		t.Fatalf("create parent run: %v", err)
+	}
+	if _, err := testPool.Exec(ctx, `
+		INSERT INTO ai_me_tool_call (
+			run_id, provider_call_id, tool_name, arguments, status,
+			risk_level, approval_behavior, result, created_issue_id,
+			created_task_id, idempotency_key, completed_at
+		)
+		VALUES (
+			$1, 'call-failed-task', 'assign_worker', '{}'::jsonb, 'succeeded',
+			'medium', 'auto_execute', '{}'::jsonb, $2, $3, $4, now()
+		)
+	`, parentRunID, issueID, failedTaskID, "call:"+randomID()); err != nil {
+		t.Fatalf("create parent tool call: %v", err)
+	}
+
+	model := &scriptedToolCallingAIMeModel{completions: []AIModelCompletion{
+		{Message: AIModelMessage{Role: "assistant", ToolCalls: []AIModelToolCall{{
+			ID: "call-reassign-worker", Type: "function",
+			Function: AIModelToolCallFunction{Name: "assign_worker", Arguments: `{"issue_id":"` + issueID + `","target_agent_id":"` + agentID + `","priority":"high","summary":"重试失败的员工任务"}`},
+		}}}, Usage: AIModelUsage{InputTokens: 100, OutputTokens: 20}},
+		{Content: `{"summary":"失败任务已重新分配。","risk_level":"medium","confidence":0.9,"need_approval":true,"reply_draft":"已重新安排员工处理。","reasoning_summary":"第一次执行失败，已创建新的员工任务。","actions":[],"evidence":[]}`, Message: AIModelMessage{Role: "assistant", Content: `{"summary":"失败任务已重新分配。","risk_level":"medium","confidence":0.9,"need_approval":true,"reply_draft":"已重新安排员工处理。","reasoning_summary":"第一次执行失败，已创建新的员工任务。","actions":[],"evidence":[]}`}, Usage: AIModelUsage{InputTokens: 60, OutputTokens: 30}},
+	}}
+	originalModel := testHandler.AIModel
+	testHandler.AIModel = model
+	var createdTaskID string
+	t.Cleanup(func() {
+		testHandler.AIModel = originalModel
+		_, _ = testPool.Exec(ctx, `UPDATE workspace SET settings = $2 WHERE id = $1`, testWorkspaceID, originalSettings)
+		_, _ = testPool.Exec(ctx, `DELETE FROM ai_me_approval WHERE source_type = 'task_result' AND source_ref_id = $1`, failedTaskID)
+		_, _ = testPool.Exec(ctx, `DELETE FROM ai_me_run WHERE workspace_id = $1 AND idempotency_key = $2`, testWorkspaceID, "task_result:"+failedTaskID+":failed")
+		if createdTaskID != "" {
+			_, _ = testPool.Exec(ctx, `DELETE FROM agent_task_queue WHERE id = $1`, createdTaskID)
+		}
+		_, _ = testPool.Exec(ctx, `DELETE FROM ai_me_run WHERE id = $1`, parentRunID)
+		_, _ = testPool.Exec(ctx, `DELETE FROM ai_me_approval WHERE id = $1`, approvalID)
+		_, _ = testPool.Exec(ctx, `DELETE FROM agent_task_queue WHERE id = $1`, failedTaskID)
+		_, _ = testPool.Exec(ctx, `DELETE FROM issue WHERE id = $1`, issueID)
+	})
+
+	testHandler.Bus.Publish(events.Event{
+		Type: protocol.EventTaskFailed, WorkspaceID: testWorkspaceID, ActorType: "system",
+		Payload: map[string]any{"task_id": failedTaskID, "issue_id": issueID, "status": "failed"},
+	})
+	testHandler.processDueAIMeRuns(ctx)
+
+	var awaiting bool
+	if err := testPool.QueryRow(ctx, `
+		SELECT created_task_id::text,
+		       COALESCE((final_payload->>'awaiting_task_result')::boolean, false)
+		FROM ai_me_approval
+		WHERE id = $1
+	`, approvalID).Scan(&createdTaskID, &awaiting); err != nil {
+		t.Fatalf("load reassigned approval: %v", err)
+	}
+	if !awaiting {
+		t.Fatal("approval should keep waiting for the reassigned employee task")
+	}
+	if createdTaskID == failedTaskID || createdTaskID == "" {
+		t.Fatalf("created task id = %q, want a new task", createdTaskID)
+	}
+	var createdTaskStatus string
+	if err := testPool.QueryRow(ctx, `SELECT status FROM agent_task_queue WHERE id = $1`, createdTaskID).Scan(&createdTaskStatus); err != nil {
+		t.Fatalf("load reassigned task: %v", err)
+	}
+	if createdTaskStatus != "queued" {
+		t.Fatalf("reassigned task status = %q, want queued", createdTaskStatus)
+	}
 }
 
 func (m *scriptedToolCallingAIMeModel) Configured() bool { return true }

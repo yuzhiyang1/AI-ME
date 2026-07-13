@@ -796,6 +796,10 @@ func (h *Handler) ApproveAIApproval(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "approval cannot be approved in its current status")
 		return
 	}
+	if h.approvalAwaitsEmployeeTask(r.Context(), existing) {
+		writeError(w, http.StatusConflict, "employee task result is not ready for approval")
+		return
+	}
 	effectivePayload := approvalEffectivePayload(existing, finalPayload)
 	execution := h.executeApprovedAIActionInSavepoint(r.Context(), tx, existing, workspaceUUID, userUUID, effectivePayload)
 	updated, err := qtx.ApproveAIApproval(r.Context(), db.ApproveAIApprovalParams{
@@ -882,6 +886,21 @@ func (h *Handler) ApproveAIApproval(w http.ResponseWriter, r *http.Request) {
 	}
 	h.publishArchivedAIApprovalInboxItems(workspaceID, userID, archivedInboxItems)
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *Handler) approvalAwaitsEmployeeTask(ctx context.Context, approval db.AiMeApproval) bool {
+	payload := approvalPayloadMap(approval.FinalPayload)
+	if waiting, _ := payload["awaiting_task_result"].(bool); waiting {
+		return true
+	}
+	if !approval.CreatedTaskID.Valid {
+		return false
+	}
+	task, err := h.Queries.GetAgentTask(ctx, approval.CreatedTaskID)
+	if err != nil {
+		return true
+	}
+	return task.Status == "queued" || task.Status == "dispatched" || task.Status == "running"
 }
 
 func finishAIMeToolCallAfterApproval(ctx context.Context, q *db.Queries, approval db.AiMeApproval, execution approvedAIActionExecution) error {
