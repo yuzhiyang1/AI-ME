@@ -19,7 +19,11 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     app.include_router(
-        build_router(container.create_work_item, container.list_work_items),
+        build_router(
+            container.create_work_item,
+            container.list_work_items,
+            container.model_gateway,
+        ),
     )
     return app
 

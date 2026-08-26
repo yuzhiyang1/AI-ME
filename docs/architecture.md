@@ -38,6 +38,10 @@ HTTP -> CreateWorkItem -> WorkItem -> WorkItemRepository
 
 它不是最终产品功能集合。新增 Agent Run、SOP、审批、证据等能力时，继续按同样方式完成纵向切片。
 
+## 模型适配层切片
+
+第二个纵向切片是模型适配层：`HTTP -> ModelGateway 端口 -> 协议适配器 -> 厂商 API`，参考 pi 的 provider/api 解耦设计。详见 [模型适配层设计.md](模型适配层设计.md)。
+
 ## Agent Runtime 边界
 
 应用层只认识 `AgentRuntime` 端口。后续可以实现 Python Pi-style Kernel，也可以适配其他运行时，领域层无需修改。
