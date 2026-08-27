@@ -22,7 +22,7 @@ class AgentEvent:
 
 
 class AgentRuntime(Protocol):
-    """Pi-style Python Agent Kernel 将实现的应用端口。"""
+    """AI-ME 自研 Python Agent Runtime 将实现的应用端口。"""
 
     def run(self, request: AgentRunRequest) -> AsyncIterator[AgentEvent]:
         """执行一次 Agent Run 并流式返回标准事件。"""

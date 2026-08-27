@@ -22,11 +22,11 @@ def create_app() -> FastAPI:
         build_router(
             container.create_work_item,
             container.list_work_items,
-            container.model_gateway,
+            container.list_available_models,
+            container.stream_model_completion,
         ),
     )
     return app
 
 
 app = create_app()
-

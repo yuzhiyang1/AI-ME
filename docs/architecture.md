@@ -40,11 +40,11 @@ HTTP -> CreateWorkItem -> WorkItem -> WorkItemRepository
 
 ## 模型适配层切片
 
-第二个纵向切片是模型适配层：`HTTP -> ModelGateway 端口 -> 协议适配器 -> 厂商 API`，参考 pi 的 provider/api 解耦设计。详见 [模型适配层设计.md](模型适配层设计.md)。
+第二个纵向切片是模型适配层：`HTTP -> 应用用例 -> ModelGateway 端口 -> 协议适配器 -> 厂商 API`。厂商目录与传输协议解耦，协议细节只存在于基础设施层。详见 [模型适配层设计.md](模型适配层设计.md)。
 
 ## Agent Runtime 边界
 
-应用层只认识 `AgentRuntime` 端口。后续可以实现 Python Pi-style Kernel，也可以适配其他运行时，领域层无需修改。
+应用层只认识 `AgentRuntime` 端口。后续由 AI-ME 自研 Python Runtime Kernel 实现模型调用、工具执行、审批与运行记录，领域层无需感知具体实现。
 
 ## 暂不引入
 

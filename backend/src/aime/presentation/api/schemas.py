@@ -5,8 +5,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from aime.application.ports.model_gateway import ModelDescriptor
-from aime.domain.llm.messages import ConversationMessage, MessageRole
+from aime.application.ports.model_gateway import ConversationMessage, MessageRole, ModelDescriptor
 from aime.domain.work_items.entities import WorkItem
 from aime.domain.work_items.value_objects import WorkItemStatus
 
@@ -48,7 +47,7 @@ class ModelResponse(BaseModel):
 class ChatMessagePayload(BaseModel):
     """HTTP 层的消息载荷。"""
 
-    role: MessageRole  # 消息角色：system / user / assistant
+    role: MessageRole  # 消息角色：user / assistant；system 只能用顶层字段传入
     content: str = Field(min_length=1)  # 消息正文，非空
 
     def to_domain(self) -> ConversationMessage:
@@ -59,7 +58,7 @@ class ChatCompletionRequest(BaseModel):
     """一次流式补全请求。"""
 
     model: str  # 目标模型引用，形如 "provider/model_id"，见 ModelDescriptor.ref
-    messages: list[ChatMessagePayload]  # 对话历史，按时间升序，至少一条
+    messages: list[ChatMessagePayload] = Field(min_length=1)  # 对话历史，至少一条
     system: str | None = None  # 系统提示词；None 表示不带
     max_tokens: int | None = Field(default=None, gt=0)  # 输出上限（正整数）；None 用协议缺省
     # 采样温度 0.0~2.0；None 用厂商默认
@@ -85,4 +84,3 @@ class WorkItemResponse(BaseModel):
             status=item.status,
             created_at=item.created_at,
         )
-

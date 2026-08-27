@@ -1,148 +1,147 @@
-"""模型适配层的单元测试：事件翻译、路由分发与端口契约。
-
-测试策略：用 SimpleNamespace 伪造最小 SDK 面（见各 _Fake* 桩），
-不依赖 openai/anthropic 包。覆盖：
-- OpenAI 协议：text/thinking 增量翻译、system 折叠、异常转 ERROR；
-- Anthropic 协议：content block 增量翻译、system 独立参数与角色剔除；
-- 网关：按 provider 路由、未知引用产出 ERROR、目录完整性。
-已知盲区：假对象不随 SDK 版本演进，字段变更不会被本文件发现。
-"""
+"""模型网关契约测试：协议翻译、错误结构与厂商路由。"""
 
 from collections.abc import AsyncIterator
 from types import SimpleNamespace as NS
 from typing import Any
 
 from aime.application.ports.model_gateway import (
-    ApiKind,
+    ConversationMessage,
     LlmCompletionRequest,
+    LlmErrorCategory,
+    LlmFinishReason,
+    LlmStreamCompleted,
+    LlmStreamEvent,
+    LlmStreamFailed,
+    LlmTextDelta,
+    LlmThinkingDelta,
+    LlmToolCallDelta,
+    MessageRole,
     ModelDescriptor,
 )
-from aime.domain.llm.events import LlmEventType, LlmStreamEvent
-from aime.domain.llm.messages import ConversationMessage, MessageRole
 from aime.infrastructure.llm.anthropic_messages import AnthropicMessagesApi
-from aime.infrastructure.llm.catalog import BUILTIN_PROVIDERS
-from aime.infrastructure.llm.model_gateway_impl import (
-    ProtocolModelGateway,
-    ProviderRuntime,
-)
+from aime.infrastructure.llm.catalog import BUILTIN_PROVIDERS, ApiKind, ProviderDefinition
+from aime.infrastructure.llm.model_gateway_impl import ProtocolModelGateway, ProviderRuntime
 from aime.infrastructure.llm.openai_completions import OpenAICompletionsApi
 
 USER = ConversationMessage(role=MessageRole.USER, content="你好")
-
-
-def _descriptor(provider: str = "fake", model_id: str = "m1") -> ModelDescriptor:
-    return ModelDescriptor(
-        provider=provider,
-        model_id=model_id,
-        api=ApiKind.OPENAI_COMPLETIONS,
-        display_name="Fake Model",
-        context_window=1000,
-    )
 
 
 async def _collect(stream: AsyncIterator[LlmStreamEvent]) -> list[LlmStreamEvent]:
     return [event async for event in stream]
 
 
-# ---------- OpenAI 协议：SDK 桩与翻译测试 ----------
-
-
-class _FakeOpenAIChunkStream:
-    def __init__(self, chunks: list[Any]) -> None:
-        self._chunks = chunks
+class _FakeStream:
+    def __init__(self, events: list[Any]) -> None:
+        self._events = events
 
     def __aiter__(self) -> AsyncIterator[Any]:
-        async def gen() -> AsyncIterator[Any]:
-            for chunk in self._chunks:
-                yield chunk
+        async def generate() -> AsyncIterator[Any]:
+            for event in self._events:
+                yield event
 
-        return gen()
-
-
-def _openai_chunk(content: str | None, reasoning: str | None = None) -> Any:
-    delta = NS(content=content, reasoning_content=reasoning)
-    return NS(choices=[NS(delta=delta)])
+        return generate()
 
 
 class _FakeCreate:
-    def __init__(self, chunks: list[Any]) -> None:
-        self._chunks = chunks
+    def __init__(self, events: list[Any]) -> None:
+        self._events = events
         self.calls: list[dict[str, Any]] = []
 
-    async def __call__(self, **kwargs: Any) -> _FakeOpenAIChunkStream:
+    async def __call__(self, **kwargs: Any) -> _FakeStream:
         self.calls.append(kwargs)
-        return _FakeOpenAIChunkStream(self._chunks)
+        return _FakeStream(self._events)
 
 
-def _openai_api(create: _FakeCreate) -> OpenAICompletionsApi:
+def _openai_api(create: Any) -> OpenAICompletionsApi:
     client = NS(chat=NS(completions=NS(create=create)))
     return OpenAICompletionsApi(client)  # type: ignore[arg-type]
 
 
-async def test_openai_translates_text_and_thinking_deltas() -> None:
-    create = _FakeCreate([_openai_chunk("你", "思考中"), _openai_chunk("好", None)])
-    api = _openai_api(create)
+async def test_openai_translates_tool_calls_finish_reason_and_usage() -> None:
+    create = _FakeCreate(
+        [
+            NS(
+                choices=[
+                    NS(
+                        delta=NS(
+                            content=None,
+                            reasoning_content="思考",
+                            tool_calls=[
+                                NS(
+                                    index=0,
+                                    id="call_1",
+                                    function=NS(name="search", arguments='{"q":'),
+                                )
+                            ],
+                        ),
+                        finish_reason=None,
+                    )
+                ],
+                usage=None,
+            ),
+            NS(
+                choices=[
+                    NS(
+                        delta=NS(content="答案", reasoning_content=None, tool_calls=[]),
+                        finish_reason="tool_calls",
+                    )
+                ],
+                usage=NS(prompt_tokens=12, completion_tokens=7),
+            ),
+        ]
+    )
 
-    events = await _collect(api.stream("gpt-4o", [USER], "系统", None, None))
+    events = await _collect(_openai_api(create).stream("gpt-4o", [USER], "系统", None, None))
 
-    assert [event.type for event in events] == [
-        LlmEventType.START,
-        LlmEventType.THINKING_DELTA,
-        LlmEventType.TEXT_DELTA,
-        LlmEventType.TEXT_DELTA,
-        LlmEventType.DONE,
-    ]
-    assert events[2].content == "你"
-    # system 折叠为第一条 system 消息
+    assert isinstance(events[1], LlmThinkingDelta)
+    assert isinstance(events[2], LlmToolCallDelta)
+    assert events[2].call_id == "call_1"
+    assert events[2].name == "search"
+    assert events[2].arguments_delta == '{"q":'
+    assert isinstance(events[3], LlmTextDelta)
+    assert events[3].delta == "答案"
+    assert isinstance(events[-1], LlmStreamCompleted)
+    assert events[-1].finish_reason is LlmFinishReason.TOOL_CALLS
+    assert events[-1].usage is not None
+    assert events[-1].usage.input_tokens == 12
+    assert events[-1].usage.output_tokens == 7
     assert create.calls[0]["messages"][0] == {"role": "system", "content": "系统"}
 
 
-async def test_openai_error_ends_stream_with_error_event() -> None:
+async def test_openai_classifies_retryable_provider_error() -> None:
+    error_type = type("ServiceUnavailableError", (Exception,), {"status_code": 503})
+
     class _Boom:
         async def __call__(self, **kwargs: Any) -> Any:
-            raise RuntimeError("网络错误")
+            raise error_type("模型服务暂不可用")
 
-    api = _openai_api(_Boom())  # type: ignore[arg-type]
-    events = await _collect(api.stream("gpt-4o", [USER], None, None, None))
-    assert events[-1].type is LlmEventType.ERROR
-    assert "网络错误" in events[-1].content
+    events = await _collect(_openai_api(_Boom()).stream("gpt-4o", [USER], None, None, None))
 
-
-# ---------- Anthropic 协议：SDK 桩与翻译测试 ----------
-
-
-class _FakeAnthropicStream:
-    def __init__(self, events: list[Any]) -> None:
-        self._events = events
-
-    def __aiter__(self) -> AsyncIterator[Any]:
-        async def gen() -> AsyncIterator[Any]:
-            for event in self._events:
-                yield event
-
-        return gen()
+    assert isinstance(events[-1], LlmStreamFailed)
+    assert events[-1].error.category is LlmErrorCategory.PROVIDER
+    assert events[-1].error.retryable is True
+    assert events[-1].error.code == "provider_unavailable"
 
 
-class _FakeAnthropicCreate:
-    def __init__(self, events: list[Any]) -> None:
-        self._events = events
-        self.calls: list[dict[str, Any]] = []
-
-    async def __call__(self, **kwargs: Any) -> _FakeAnthropicStream:
-        self.calls.append(kwargs)
-        return _FakeAnthropicStream(self._events)
-
-
-def _anthropic_event(delta_type: str, **fields: str) -> Any:
-    return NS(type="content_block_delta", delta=NS(type=delta_type, **fields))
-
-
-async def test_anthropic_translates_block_deltas() -> None:
-    create = _FakeAnthropicCreate(
+async def test_anthropic_translates_tool_use_finish_reason_and_usage() -> None:
+    create = _FakeCreate(
         [
-            _anthropic_event("thinking_delta", thinking="推理"),
-            _anthropic_event("text_delta", text="回答"),
-            NS(type="message_stop"),
+            NS(type="message_start", message=NS(usage=NS(input_tokens=10))),
+            NS(
+                type="content_block_start",
+                index=1,
+                content_block=NS(type="tool_use", id="tool_1", name="lookup"),
+            ),
+            NS(
+                type="content_block_delta",
+                index=1,
+                delta=NS(type="input_json_delta", partial_json='{"id":'),
+            ),
+            NS(
+                type="message_delta",
+                delta=NS(stop_reason="tool_use"),
+                usage=NS(output_tokens=6),
+            ),
         ]
     )
     client = NS(messages=NS(create=create))
@@ -150,20 +149,18 @@ async def test_anthropic_translates_block_deltas() -> None:
 
     events = await _collect(api.stream("claude-sonnet-4-5", [USER], "系统", None, None))
 
-    assert [event.type for event in events] == [
-        LlmEventType.START,
-        LlmEventType.THINKING_DELTA,
-        LlmEventType.TEXT_DELTA,
-        LlmEventType.DONE,
+    tool_events = [event for event in events if isinstance(event, LlmToolCallDelta)]
+    assert [(event.call_id, event.name, event.arguments_delta) for event in tool_events] == [
+        ("tool_1", "lookup", ""),
+        ("tool_1", "lookup", '{"id":'),
     ]
-    call = create.calls[0]
-    # system 走独立参数，messages 里不出现 system 角色
-    assert call["system"] == "系统"
-    assert all(message["role"] != "system" for message in call["messages"])
-    assert call["max_tokens"] == 4096
-
-
-# ---------- 网关：路由分发与引用解析 ----------
+    assert isinstance(events[-1], LlmStreamCompleted)
+    assert events[-1].finish_reason is LlmFinishReason.TOOL_CALLS
+    assert events[-1].usage is not None
+    assert events[-1].usage.input_tokens == 10
+    assert events[-1].usage.output_tokens == 6
+    assert create.calls[0]["system"] == "系统"
+    assert create.calls[0]["messages"] == [{"role": "user", "content": "你好"}]
 
 
 class _RecordingApi:
@@ -179,48 +176,51 @@ class _RecordingApi:
         temperature: float | None,
     ) -> AsyncIterator[LlmStreamEvent]:
         self.calls.append((model_id, messages, system))
-        yield LlmStreamEvent.text("hi")
-        yield LlmStreamEvent.done()
+        yield LlmTextDelta("hi")
+        yield LlmStreamCompleted(LlmFinishReason.STOP)
 
 
-def _gateway_with(*apis: _RecordingApi) -> ProtocolModelGateway:
-    runtimes = [
-        ProviderRuntime(definition=provider, api=api)
-        for provider, api in zip(BUILTIN_PROVIDERS, apis, strict=True)
-    ]
-    return ProtocolModelGateway(runtimes)
+def _provider(provider: str = "fake", model_id: str = "m1") -> ProviderDefinition:
+    return ProviderDefinition(
+        provider=provider,
+        display_name="Fake",
+        api=ApiKind.OPENAI_COMPLETIONS,
+        base_url=None,
+        api_key_env="AIME_FAKE_API_KEY",
+        models=(ModelDescriptor(provider, model_id, "Fake Model", 1000),),
+    )
 
 
 async def test_gateway_routes_by_provider() -> None:
-    openai_api, deepseek_api, anthropic_api = _RecordingApi(), _RecordingApi(), _RecordingApi()
-    gateway = _gateway_with(openai_api, deepseek_api, anthropic_api)
+    api = _RecordingApi()
+    gateway = ProtocolModelGateway([ProviderRuntime(definition=_provider(), api=api)])
 
     events = await _collect(
-        gateway.stream(
-            LlmCompletionRequest(
-                model_ref="deepseek/deepseek-chat",
-                messages=[USER],
-                system="s",
-            )
-        )
+        gateway.stream(LlmCompletionRequest(model_ref="fake/m1", messages=[USER], system="s"))
     )
 
-    assert [event.type for event in events] == [LlmEventType.TEXT_DELTA, LlmEventType.DONE]
-    # 只有 deepseek 协议实例被调用
-    assert deepseek_api.calls and not openai_api.calls and not anthropic_api.calls
+    assert isinstance(events[0], LlmTextDelta)
+    assert api.calls == [("m1", [USER], "s")]
 
 
-async def test_gateway_unknown_model_yields_error_event() -> None:
-    gateway = _gateway_with(_RecordingApi(), _RecordingApi(), _RecordingApi())
+async def test_gateway_unknown_model_yields_structured_error() -> None:
+    gateway = ProtocolModelGateway([])
     events = await _collect(
         gateway.stream(LlmCompletionRequest(model_ref="nope/m1", messages=[USER]))
     )
+
     assert len(events) == 1
-    assert events[0].type is LlmEventType.ERROR
+    assert isinstance(events[0], LlmStreamFailed)
+    assert events[0].error.category is LlmErrorCategory.INVALID_REQUEST
+    assert events[0].error.code == "unknown_model"
+    assert events[0].error.retryable is False
 
 
-def test_builtin_catalog_covers_two_protocols() -> None:
-    apis = {provider.api for provider in BUILTIN_PROVIDERS}
-    assert apis == {ApiKind.OPENAI_COMPLETIONS, ApiKind.ANTHROPIC_MESSAGES}
+def test_builtin_catalog_owns_protocol_binding() -> None:
+    assert not hasattr(BUILTIN_PROVIDERS[0].models[0], "api")
+    assert {provider.api for provider in BUILTIN_PROVIDERS} == {
+        ApiKind.OPENAI_COMPLETIONS,
+        ApiKind.ANTHROPIC_MESSAGES,
+    }
     refs = [model.ref for provider in BUILTIN_PROVIDERS for model in provider.models]
     assert len(refs) == len(set(refs))

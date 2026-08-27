@@ -5,12 +5,20 @@
 加条目并配一个 AIME_*_API_KEY 环境变量，零协议代码。
 
 注意：模型 id、context_window 目前按常识手工维护，接入前建议核对
-厂商官方文档；等厂商多了再考虑 pi 式的 JSON 数据目录 + 生成脚本。
+厂商官方文档；等厂商多了再考虑生成式模型目录。
 """
 
 from dataclasses import dataclass
+from enum import StrEnum
 
-from aime.application.ports.model_gateway import ApiKind, ModelDescriptor
+from aime.application.ports.model_gateway import ModelDescriptor
+
+
+class ApiKind(StrEnum):
+    """基础设施层支持的厂商 API 协议。"""
+
+    OPENAI_COMPLETIONS = "openai-completions"
+    ANTHROPIC_MESSAGES = "anthropic-messages"
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,7 +39,6 @@ class ProviderDefinition:
 
 def _models(
     provider: str,
-    api: ApiKind,
     entries: tuple[tuple[str, str, int], ...],
 ) -> tuple[ModelDescriptor, ...]:
     """从 (model_id, 显示名, 上下文窗口) 三元组批量生成模型元数据。"""
@@ -39,7 +46,6 @@ def _models(
         ModelDescriptor(
             provider=provider,
             model_id=model_id,
-            api=api,
             display_name=display_name,
             context_window=context_window,
         )
@@ -55,7 +61,6 @@ OPENAI = ProviderDefinition(
     api_key_env="AIME_OPENAI_API_KEY",
     models=_models(
         "openai",
-        ApiKind.OPENAI_COMPLETIONS,
         (
             ("gpt-4o", "GPT-4o", 128_000),
             ("gpt-4o-mini", "GPT-4o mini", 128_000),
@@ -73,7 +78,6 @@ DEEPSEEK = ProviderDefinition(
     api_key_env="AIME_DEEPSEEK_API_KEY",
     models=_models(
         "deepseek",
-        ApiKind.OPENAI_COMPLETIONS,
         (
             ("deepseek-chat", "DeepSeek Chat", 128_000),
             ("deepseek-reasoner", "DeepSeek Reasoner", 128_000),
@@ -89,7 +93,6 @@ ANTHROPIC = ProviderDefinition(
     api_key_env="AIME_ANTHROPIC_API_KEY",
     models=_models(
         "anthropic",
-        ApiKind.ANTHROPIC_MESSAGES,
         (
             ("claude-sonnet-4-5", "Claude Sonnet 4.5", 200_000),
             ("claude-haiku-4-5", "Claude Haiku 4.5", 200_000),

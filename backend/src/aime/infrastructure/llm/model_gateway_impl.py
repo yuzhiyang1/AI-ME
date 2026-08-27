@@ -1,6 +1,5 @@
 """ModelGateway 端口的实现：按厂商绑定协议并分发调用。
 
-pi 的分层在 Python 里的对应：
 catalog（厂商元数据） -> ProviderRuntime（认证 + 协议实例） -> Gateway（分发门面）。
 统一消息的协议序列化（如 system 的放置位置）由各协议模块自己完成，
 本模块只做“引用解析 -> 找到运行时 -> 转发”。
@@ -12,13 +11,15 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from aime.application.ports.model_gateway import (
-    ApiKind,
+    ConversationMessage,
     LlmCompletionRequest,
+    LlmError,
+    LlmErrorCategory,
+    LlmStreamEvent,
+    LlmStreamFailed,
     ModelDescriptor,
 )
-from aime.domain.llm.events import LlmStreamEvent
-from aime.domain.llm.messages import ConversationMessage
-from aime.infrastructure.llm.catalog import BUILTIN_PROVIDERS, ProviderDefinition
+from aime.infrastructure.llm.catalog import BUILTIN_PROVIDERS, ApiKind, ProviderDefinition
 
 
 class _ProtocolApi(Protocol):
@@ -75,7 +76,14 @@ class ProtocolModelGateway:
         """转发到对应协议实例；解析失败按端口约定以 ERROR 事件终止。"""
         resolved = self.resolve(request.model_ref)
         if resolved is None:
-            yield LlmStreamEvent.error(f"未知模型引用：{request.model_ref}")
+            yield LlmStreamFailed(
+                LlmError(
+                    category=LlmErrorCategory.INVALID_REQUEST,
+                    code="unknown_model",
+                    message=f"未知模型引用：{request.model_ref}",
+                    retryable=False,
+                )
+            )
             return
         runtime, model = resolved
         stream = runtime.api.stream(
@@ -109,7 +117,10 @@ def build_gateway_from_env(
         api: _ProtocolApi
         if definition.api is ApiKind.OPENAI_COMPLETIONS:
             api = build_openai_completions_api(api_key, definition.base_url)
-        else:
+        elif definition.api is ApiKind.ANTHROPIC_MESSAGES:
             api = build_anthropic_messages_api(api_key, definition.base_url)
+        else:
+            # 新增协议时必须显式装配，避免未知协议被误路由到 Anthropic。
+            raise ValueError(f"不支持的模型协议：{definition.api}")
         runtimes.append(ProviderRuntime(definition=definition, api=api))
     return ProtocolModelGateway(runtimes)
