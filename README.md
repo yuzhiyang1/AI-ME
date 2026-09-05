@@ -24,7 +24,8 @@ desktop/
 └── src/                # Electron 主进程与受控预加载桥
 
 docs/
-└── architecture.md
+├── architecture.md
+└── Agent会话与Runtime设计.md
 ```
 
 ## 默认启动：桌面客户端
@@ -73,12 +74,24 @@ uv run ruff check src tests
 uv run mypy src
 
 cd ..\frontend
+npm test
 npm run build
 
 cd ..\desktop
 npm run typecheck
 npm run build
 ```
+
+## 当前可用能力
+
+- 创建固定绑定本地工作区、模型与权限档位的 Agent 会话；
+- 在同一会话中持续多轮对话，并实时呈现模型文本；
+- 本地持久化 Session、Turn、AgentRun、RuntimeEvent 与 Item；
+- 使用 sequence 自动断线续传，支持切换会话后恢复控制、主动中断与异常退出恢复；
+- 通过同键自动对账、数据库唯一约束和原子终态提交保护幂等请求、单会话单 Turn 与完成/中断竞态；
+- 桌面端安全选择工作区，生产模式与本地 API 同源运行。
+
+模型由环境变量配置。至少配置一个 `AIME_*_API_KEY` 后，创建会话页才会列出对应模型。
 
 ## 架构原则
 

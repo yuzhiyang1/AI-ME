@@ -4,13 +4,19 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Protocol
 
+from aime.application.ports.model_gateway import ConversationMessage
+
 
 @dataclass(frozen=True, slots=True)
 class AgentRunRequest:
-    """提交给 Agent Runtime 的最小运行请求。"""
+    """提交给 Agent Runtime 的一次已持久化执行请求。"""
 
     instruction: str
     session_id: str
+    turn_id: str
+    run_id: str
+    model_ref: str
+    messages: tuple[ConversationMessage, ...]
 
 
 @dataclass(frozen=True, slots=True)

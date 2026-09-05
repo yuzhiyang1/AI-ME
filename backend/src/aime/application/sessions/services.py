@@ -1,0 +1,68 @@
+"""Agent Session 应用服务。"""
+
+from pathlib import Path
+from uuid import UUID
+
+from anyio import to_thread
+
+from aime.application.sessions.commands import CreateSessionCommand
+from aime.domain.sessions.entities import AgentSession
+from aime.domain.sessions.repositories import SessionRepository
+from aime.domain.sessions.value_objects import SessionId
+
+
+class SessionNotFound(LookupError):
+    """请求的 Session 不存在。"""
+
+
+class CreateSession:
+    """校验工作区并创建持久 Session。"""
+
+    def __init__(self, repository: SessionRepository) -> None:
+        self._repository = repository
+
+    async def execute(self, command: CreateSessionCommand) -> AgentSession:
+        """创建 Session；工作区必须是已经存在的目录。"""
+        workspace = await to_thread.run_sync(_resolve_workspace, command.workspace_path)
+        if not workspace.is_dir():
+            raise ValueError("Session 工作区必须是已经存在的目录")
+        default_model = command.default_model.strip()
+        if not default_model:
+            raise ValueError("Session 默认模型不能为空")
+        session = AgentSession.create(
+            workspace_path=str(workspace),
+            default_model=default_model,
+            permission_profile=command.permission_profile,
+        )
+        await self._repository.add(session)
+        return session
+
+
+def _resolve_workspace(workspace_path: str) -> Path:
+    """在线程中解析本地路径，避免阻塞异步请求循环。"""
+    return Path(workspace_path).expanduser().resolve(strict=True)
+
+
+class GetSession:
+    """读取一条持久 Session。"""
+
+    def __init__(self, repository: SessionRepository) -> None:
+        self._repository = repository
+
+    async def execute(self, session_id: UUID) -> AgentSession:
+        """按 ID 返回 Session，不存在时抛出稳定应用异常。"""
+        session = await self._repository.get(SessionId(session_id))
+        if session is None:
+            raise SessionNotFound(f"Session 不存在：{session_id}")
+        return session
+
+
+class ListSessions:
+    """按最近活动时间列出所有持久 Session。"""
+
+    def __init__(self, repository: SessionRepository) -> None:
+        self._repository = repository
+
+    async def execute(self) -> list[AgentSession]:
+        """返回用户侧会话列表。"""
+        return await self._repository.list_all()

@@ -1,10 +1,12 @@
 """AI-ME HTTP 路由。"""
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from dataclasses import asdict
+from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Query, Response, status
 from fastapi.responses import StreamingResponse
 
 from aime.application.models.services import (
@@ -22,13 +24,40 @@ from aime.application.ports.model_gateway import (
     LlmThinkingDelta,
     LlmToolCallDelta,
 )
+from aime.application.sessions.commands import CreateSessionCommand
+from aime.application.sessions.exceptions import (
+    ActiveTurnConflict,
+    IdempotencyConflict,
+    TurnNotActive,
+)
+from aime.application.sessions.services import (
+    CreateSession,
+    GetSession,
+    ListSessions,
+    SessionNotFound,
+)
+from aime.application.sessions.turn_services import (
+    GetActiveTurn,
+    GetTurnByClientRequest,
+    InterruptTurn,
+    ListRuntimeEvents,
+    ListSessionItems,
+    StartTurn,
+    StartTurnCommand,
+)
 from aime.application.work_items.commands import CreateWorkItemCommand
 from aime.application.work_items.services import CreateWorkItem, ListWorkItems
 from aime.presentation.api.schemas import (
     ChatCompletionRequest,
+    CreateSessionRequest,
     CreateWorkItemRequest,
     HealthResponse,
     ModelResponse,
+    RuntimeEventResponse,
+    SessionItemResponse,
+    SessionResponse,
+    StartTurnRequest,
+    TurnResponse,
     WorkItemResponse,
 )
 
@@ -38,6 +67,15 @@ def build_router(
     list_work_items: ListWorkItems,
     list_available_models: ListAvailableModels,
     stream_model_completion: StreamModelCompletion,
+    create_session: CreateSession,
+    get_session: GetSession,
+    list_sessions: ListSessions,
+    start_turn: StartTurn,
+    get_active_turn: GetActiveTurn,
+    get_turn_by_client_request: GetTurnByClientRequest,
+    list_session_items: ListSessionItems,
+    list_runtime_events: ListRuntimeEvents,
+    interrupt_turn: InterruptTurn,
 ) -> APIRouter:
     """使用已经装配好的用例创建路由。"""
     router = APIRouter(prefix="/api")
@@ -92,6 +130,158 @@ def build_router(
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache"},
         )
+
+    @router.post(
+        "/sessions",
+        response_model=SessionResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    async def create_agent_session(payload: CreateSessionRequest) -> SessionResponse:
+        """创建一条固定工作区的持久 Agent Session。"""
+        try:
+            session = await create_session.execute(
+                CreateSessionCommand(
+                    workspace_path=payload.workspace_path,
+                    default_model=payload.default_model,
+                    permission_profile=payload.permission_profile,
+                )
+            )
+        except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=str(exc),
+            ) from exc
+        return SessionResponse.from_domain(session)
+
+    @router.get("/sessions/{session_id}", response_model=SessionResponse)
+    async def get_agent_session(session_id: UUID) -> SessionResponse:
+        """读取一条 Session；不存在时返回 404。"""
+        try:
+            session = await get_session.execute(session_id)
+        except SessionNotFound as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        return SessionResponse.from_domain(session)
+
+    @router.get("/sessions", response_model=list[SessionResponse])
+    async def list_agent_sessions() -> list[SessionResponse]:
+        """按最近活动时间返回会话列表。"""
+        sessions = await list_sessions.execute()
+        return [SessionResponse.from_domain(session) for session in sessions]
+
+    @router.post(
+        "/sessions/{session_id}/turns",
+        response_model=TurnResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    async def start_agent_turn(session_id: UUID, payload: StartTurnRequest) -> TurnResponse:
+        """先持久化用户消息，再异步执行本轮 Agent 工作。"""
+        try:
+            turn = await start_turn.execute(
+                StartTurnCommand(
+                    session_id=session_id,
+                    instruction=payload.input,
+                    client_request_id=payload.client_request_id,
+                )
+            )
+        except SessionNotFound as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except (ActiveTurnConflict, IdempotencyConflict) as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=str(exc),
+            ) from exc
+        return TurnResponse.from_domain(turn)
+
+    @router.get(
+        "/sessions/{session_id}/turns/active",
+        response_model=TurnResponse | None,
+    )
+    async def get_active_agent_turn(session_id: UUID) -> TurnResponse | None:
+        """返回当前活跃 Turn，供页面切换或重载后恢复中断控制。"""
+        try:
+            turn = await get_active_turn.execute(session_id)
+        except SessionNotFound as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        return TurnResponse.from_domain(turn) if turn is not None else None
+
+    @router.get(
+        "/sessions/{session_id}/turns/by-client-request",
+        response_model=TurnResponse | None,
+    )
+    async def get_turn_by_request_key(
+        session_id: UUID,
+        client_request_id: str = Query(alias="clientRequestId", min_length=1, max_length=120),
+    ) -> TurnResponse | None:
+        """按幂等键对账一次结果不确定的 Turn 创建请求。"""
+        try:
+            turn = await get_turn_by_client_request.execute(session_id, client_request_id)
+        except SessionNotFound as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        return TurnResponse.from_domain(turn) if turn is not None else None
+
+    @router.get(
+        "/sessions/{session_id}/items",
+        response_model=list[SessionItemResponse],
+    )
+    async def list_agent_session_items(
+        session_id: UUID,
+        after_sequence: int = Query(default=0, alias="afterSequence", ge=0),
+    ) -> list[SessionItemResponse]:
+        """返回游标之后已经持久化的用户侧 Item。"""
+        try:
+            items = await list_session_items.execute(session_id, after_sequence)
+        except SessionNotFound as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        return [SessionItemResponse.from_domain(item) for item in items]
+
+    @router.get("/sessions/{session_id}/events")
+    async def stream_agent_session_events(
+        session_id: UUID,
+        after_sequence: int = Query(default=0, alias="afterSequence", ge=0),
+    ) -> StreamingResponse:
+        """从游标重放事件，并在活跃 Turn 结束后关闭本次 SSE。"""
+        try:
+            await get_session.execute(session_id)
+        except SessionNotFound as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+        async def to_sse() -> AsyncIterator[str]:
+            cursor = after_sequence
+            while True:
+                events = await list_runtime_events.execute(session_id, cursor)
+                for event in events:
+                    cursor = event.sequence
+                    payload = RuntimeEventResponse.from_domain(event).model_dump(
+                        mode="json",
+                        by_alias=True,
+                    )
+                    body = json.dumps(payload, ensure_ascii=False)
+                    yield f"id: {event.sequence}\ndata: {body}\n\n"
+
+                session = await get_session.execute(session_id)
+                if session.activity.value == "idle":
+                    return
+                await asyncio.sleep(0.05)
+
+        return StreamingResponse(
+            to_sse(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @router.post(
+        "/sessions/{session_id}/turns/{turn_id}/interrupt",
+        status_code=status.HTTP_204_NO_CONTENT,
+    )
+    async def interrupt_agent_turn(session_id: UUID, turn_id: UUID) -> Response:
+        """中断一条仍在本进程执行的 Turn。"""
+        try:
+            await interrupt_turn.execute(session_id, turn_id)
+        except TurnNotActive as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     return router
 
