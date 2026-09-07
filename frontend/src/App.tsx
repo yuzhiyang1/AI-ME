@@ -51,6 +51,7 @@ import {
 } from "./reliableTurnRequest";
 import { MarkdownContent } from "./MarkdownContent";
 import { StreamingMarkdown } from "./StreamingMarkdown";
+import { ToolStepTimeline } from "./ToolStepTimeline";
 
 const permissionLabels: Record<PermissionProfile, string> = {
   read_only: "只读",
@@ -825,11 +826,11 @@ function App() {
                   <Fragment key={item.id}>
                     <MessageItem item={item} />
                     {item.type === "user_message"
-                      ? toolInvocations
-                          .filter((invocation) => invocation.turnId === item.turnId)
-                          .map((invocation) => (
-                            <ToolActivityCard key={invocation.id} invocation={invocation} />
-                          ))
+                      ? <ToolStepTimeline
+                          invocations={toolInvocations.filter(
+                            (invocation) => invocation.turnId === item.turnId,
+                          )}
+                        />
                       : null}
                   </Fragment>
                 ))}
@@ -974,35 +975,6 @@ function LiveMessage({
         )}
       </div>
     </article>
-  );
-}
-
-const toolStatusLabels: Record<ToolInvocation["status"], string> = {
-  prepared: "已准备",
-  waiting_for_approval: "等待确认",
-  running: "执行中",
-  completed: "已完成",
-  failed: "失败",
-  rejected: "已拒绝",
-  uncertain: "结果不确定",
-};
-
-function ToolActivityCard({ invocation }: { invocation: ToolInvocation }) {
-  const argumentHint =
-    typeof invocation.arguments.path === "string"
-      ? invocation.arguments.path
-      : typeof invocation.arguments.command === "string"
-        ? invocation.arguments.command
-        : JSON.stringify(invocation.arguments);
-  return (
-    <div className={`tool-activity ${invocation.isError ? "failed" : ""}`}>
-      <span className="tool-activity-dot" />
-      <div>
-        <strong>{invocation.toolName}</strong>
-        <small>{argumentHint}</small>
-      </div>
-      <span>{toolStatusLabels[invocation.status]}</span>
-    </div>
   );
 }
 

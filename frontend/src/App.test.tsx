@@ -4,7 +4,7 @@ import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { AgentSession, AgentTurn, RuntimeEvent, SessionItem } from "./api";
+import type { AgentSession, AgentTurn, RuntimeEvent, SessionItem, ToolInvocation } from "./api";
 
 const api = vi.hoisted(() => ({
   createModelConfiguration: vi.fn(),
@@ -236,36 +236,60 @@ describe("会话页面异步隔离", () => {
     expect(await screen.findByText("DeepSeek Chat 已可用于新会话")).toBeTruthy();
   });
 
-  it("重新打开会话时在对应用户消息后恢复工具审计记录", async () => {
+  it("按模型步骤展示并行工具，已完成步骤默认折叠且可以展开审计明细", async () => {
     api.listSessionItems.mockResolvedValue([itemA]);
     api.listToolInvocations.mockResolvedValue([
-      {
-        id: "invocation-read",
-        sessionId: sessionA.id,
+      toolInvocation({
+        id: "invocation-search",
         turnId: itemA.turnId,
-        runId: "run-read",
-        callId: "call-read",
         stepIndex: 1,
         callIndex: 0,
-        toolName: "read_file",
-        arguments: { path: "README.md" },
-        assistantText: "",
-        executionSemantics: "parallel",
-        riskLevel: "read",
-        status: "completed",
-        result: { content: "ok" },
-        isError: false,
-        preparedAt: "2026-09-05T00:00:00Z",
+        toolName: "search_text",
+        arguments: { query: "AgentRuntime" },
         startedAt: "2026-09-05T00:00:01Z",
         finishedAt: "2026-09-05T00:00:02Z",
-      },
+      }),
+      toolInvocation({
+        id: "invocation-read",
+        turnId: itemA.turnId,
+        stepIndex: 1,
+        callIndex: 1,
+        toolName: "read_file",
+        arguments: { path: "README.md" },
+        startedAt: "2026-09-05T00:00:01.100Z",
+        finishedAt: "2026-09-05T00:00:02.200Z",
+      }),
+      toolInvocation({
+        id: "invocation-running",
+        turnId: itemA.turnId,
+        stepIndex: 2,
+        callIndex: 0,
+        toolName: "list_files",
+        arguments: { path: "src" },
+        status: "running",
+        startedAt: "2026-09-05T00:00:04Z",
+        finishedAt: null,
+      }),
     ]);
 
+    const user = userEvent.setup();
     render(<App />);
 
-    await screen.findByText("read_file");
+    const completedStep = await screen.findByRole("button", {
+      name: /模型步骤 1.*2 个工具并行完成.*1\.20 秒/,
+    });
+    expect(completedStep.getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByText("README.md")).toBeNull();
+
+    const runningStep = screen.getByRole("button", {
+      name: /模型步骤 2.*1 个工具执行中/,
+    });
+    expect(runningStep.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByText("src")).toBeTruthy();
+
+    await user.click(completedStep);
     expect(screen.getByText("README.md")).toBeTruthy();
-    expect(screen.getByText("已完成")).toBeTruthy();
+    expect(screen.getByText(/AgentRuntime/)).toBeTruthy();
   });
 
   it("切到 B 后忽略 A 延迟返回的 Items，也不会启动 A 的事件流", async () => {
@@ -489,5 +513,29 @@ function assistantItem(id: string, sessionId: string, text: string): SessionItem
   return {
     ...item(id, sessionId, text),
     type: "agent_message",
+  };
+}
+
+function toolInvocation(overrides: Partial<ToolInvocation>): ToolInvocation {
+  return {
+    id: "invocation",
+    sessionId: sessionA.id,
+    turnId: itemA.turnId,
+    runId: "run-tools",
+    callId: "call-tool",
+    stepIndex: 1,
+    callIndex: 0,
+    toolName: "read_file",
+    arguments: {},
+    assistantText: "",
+    executionSemantics: "parallel",
+    riskLevel: "read",
+    status: "completed",
+    result: { content: "ok" },
+    isError: false,
+    preparedAt: "2026-09-05T00:00:00Z",
+    startedAt: "2026-09-05T00:00:01Z",
+    finishedAt: "2026-09-05T00:00:02Z",
+    ...overrides,
   };
 }
