@@ -9,6 +9,7 @@ from alembic.config import Config
 _PREVIEW_BASE_REVISION = "0001_agent_sessions"
 _PREVIEW_TOOL_REVISION = "0003_tool_execution_ledger"
 _PREVIEW_MODEL_REVISION = "0004_model_configurations"
+_PREVIEW_PROJECT_REVISION = "0005_projects_and_session_roots"
 _BASE_APP_TABLES = {
     "agent_sessions",
     "agent_turns",
@@ -18,7 +19,13 @@ _BASE_APP_TABLES = {
 }
 _TOOL_APP_TABLES = {"tool_invocations", "approval_requests", "approval_grants"}
 _MODEL_APP_TABLES = {"model_configurations"}
-_APP_TABLES = _BASE_APP_TABLES | _TOOL_APP_TABLES | _MODEL_APP_TABLES
+_PROJECT_APP_TABLES = {
+    "projects",
+    "project_roots",
+    "project_idempotency_keys",
+    "session_workspace_roots",
+}
+_APP_TABLES = _BASE_APP_TABLES | _TOOL_APP_TABLES | _MODEL_APP_TABLES | _PROJECT_APP_TABLES
 _EXPECTED_COLUMNS: dict[str, dict[str, tuple[str, int | None]]] = {
     "agent_sessions": {
         "id": ("VARCHAR(36)", 1),
@@ -125,6 +132,31 @@ _EXPECTED_COLUMNS: dict[str, dict[str, tuple[str, int | None]]] = {
         "created_at": ("DATETIME", 1),
         "updated_at": ("DATETIME", 1),
     },
+    "projects": {
+        "id": ("VARCHAR(36)", 1),
+        "name": ("VARCHAR(120)", 1),
+        "position": ("INTEGER", 1),
+        "created_at": ("DATETIME", 1),
+        "updated_at": ("DATETIME", 1),
+    },
+    "project_roots": {
+        "project_id": ("VARCHAR(36)", 1),
+        "position": ("INTEGER", 1),
+        "path": ("VARCHAR", 1),
+        "path_key": ("VARCHAR", 1),
+    },
+    "project_idempotency_keys": {
+        "idempotency_key": ("VARCHAR(120)", 1),
+        "project_id": ("VARCHAR(36)", 1),
+        "request_hash": ("VARCHAR(64)", 1),
+        "created_at": ("DATETIME", 1),
+    },
+    "session_workspace_roots": {
+        "session_id": ("VARCHAR(36)", 1),
+        "position": ("INTEGER", 1),
+        "path": ("VARCHAR", 1),
+        "path_key": ("VARCHAR", 1),
+    },
 }
 _REQUIRED_UNIQUE_COLUMNS: dict[str, set[tuple[str, ...]]] = {
     "agent_turns": {("session_id", "client_request_id")},
@@ -138,6 +170,14 @@ _REQUIRED_UNIQUE_COLUMNS: dict[str, set[tuple[str, ...]]] = {
     "approval_requests": {("invocation_id",)},
     "approval_grants": {("session_id", "tool_name")},
     "model_configurations": {("provider", "model_id")},
+    "project_roots": {
+        ("project_id", "position"),
+        ("project_id", "path_key"),
+    },
+    "session_workspace_roots": {
+        ("session_id", "position"),
+        ("session_id", "path_key"),
+    },
 }
 _REQUIRED_FOREIGN_KEYS: dict[str, set[tuple[str, str, str, str]]] = {
     "agent_turns": {("session_id", "agent_sessions", "id", "CASCADE")},
@@ -169,6 +209,11 @@ _REQUIRED_FOREIGN_KEYS: dict[str, set[tuple[str, str, str, str]]] = {
     "approval_grants": {
         ("session_id", "agent_sessions", "id", "CASCADE"),
         ("approval_id", "approval_requests", "id", "CASCADE"),
+    },
+    "project_roots": {("project_id", "projects", "id", "CASCADE")},
+    "project_idempotency_keys": {("project_id", "projects", "id", "CASCADE")},
+    "session_workspace_roots": {
+        ("session_id", "agent_sessions", "id", "CASCADE")
     },
 }
 
@@ -225,13 +270,26 @@ def _adopt_preview_database(database_path: Path, config: Config) -> None:
         present_model_tables = tables & _MODEL_APP_TABLES
         if present_model_tables and present_tool_tables != _TOOL_APP_TABLES:
             raise RuntimeError("未版本化状态库含模型配置，但缺少其之前版本的工具账本")
-        validated_tables = _BASE_APP_TABLES | present_tool_tables | present_model_tables
+        present_project_tables = tables & _PROJECT_APP_TABLES
+        if present_project_tables and present_project_tables != _PROJECT_APP_TABLES:
+            missing_projects = _PROJECT_APP_TABLES - present_project_tables
+            raise RuntimeError(f"未版本化状态库项目结构不完整，缺少：{sorted(missing_projects)}")
+        if present_project_tables and present_model_tables != _MODEL_APP_TABLES:
+            raise RuntimeError("未版本化状态库含项目结构，但缺少其之前版本的模型配置")
+        validated_tables = (
+            _BASE_APP_TABLES
+            | present_tool_tables
+            | present_model_tables
+            | present_project_tables
+        )
         _validate_columns(connection, validated_tables)
         _validate_unique_constraints(connection, validated_tables)
         _validate_foreign_keys(connection, validated_tables)
         _validate_existing_rows(connection)
         _ensure_active_turn_index(connection)
-    if present_model_tables == _MODEL_APP_TABLES:
+    if present_project_tables == _PROJECT_APP_TABLES:
+        preview_revision = _PREVIEW_PROJECT_REVISION
+    elif present_model_tables == _MODEL_APP_TABLES:
         preview_revision = _PREVIEW_MODEL_REVISION
     elif present_tool_tables == _TOOL_APP_TABLES:
         preview_revision = _PREVIEW_TOOL_REVISION
@@ -244,7 +302,9 @@ def _adopt_preview_database(database_path: Path, config: Config) -> None:
 def _validate_columns(connection: sqlite3.Connection, table_names: set[str]) -> None:
     """精确校验预览库的完整列集合、SQLite 类型与可空性。"""
     for table_name in table_names:
-        expected_columns = _EXPECTED_COLUMNS[table_name]
+        expected_columns = dict(_EXPECTED_COLUMNS[table_name])
+        if table_name == "agent_sessions" and _PROJECT_APP_TABLES.issubset(table_names):
+            expected_columns["project_id"] = ("VARCHAR(36)", 0)
         rows = connection.execute(f"PRAGMA table_info('{table_name}')").fetchall()
         actual_columns = {str(row[1]): row for row in rows}
         if actual_columns.keys() != expected_columns.keys():
@@ -289,9 +349,9 @@ def _validate_unique_constraints(connection: sqlite3.Connection, table_names: se
 def _validate_foreign_keys(connection: sqlite3.Connection, table_names: set[str]) -> None:
     """确认聚合账本各表仍保持预期级联外键。"""
     for table_name in table_names:
-        required_foreign_keys: set[tuple[str, str, str, str]] = _REQUIRED_FOREIGN_KEYS.get(
-            table_name, set()
-        )
+        required_foreign_keys = set(_REQUIRED_FOREIGN_KEYS.get(table_name, set()))
+        if table_name == "agent_sessions" and _PROJECT_APP_TABLES.issubset(table_names):
+            required_foreign_keys.add(("project_id", "projects", "id", "SET NULL"))
         actual = {
             (str(row[3]), str(row[2]), str(row[4]), str(row[6]).upper())
             for row in connection.execute(f"PRAGMA foreign_key_list('{table_name}')").fetchall()

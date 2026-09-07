@@ -13,6 +13,7 @@ from aime.application.model_configurations.services import (
 from aime.application.ports.conversation_store import SessionTokenUsage
 from aime.application.ports.model_gateway import ConversationMessage, MessageRole, ModelDescriptor
 from aime.domain.model_configurations.entities import ModelProtocol
+from aime.domain.projects.entities import Project, ProjectRoot
 from aime.domain.sessions.entities import AgentSession, AgentTurn, RuntimeEvent, SessionItem
 from aime.domain.sessions.value_objects import (
     PermissionProfile,
@@ -175,6 +176,63 @@ class CreateSessionRequest(_CamelCaseModel):
     workspace_path: str = Field(min_length=1)
     default_model: str = Field(min_length=1, max_length=200)
     permission_profile: PermissionProfile
+
+
+class ProjectRootRequest(_CamelCaseModel):
+    """项目目录输入；数组顺序决定主目录。"""
+
+    path: str = Field(min_length=1)
+
+
+class CreateProjectRequest(_CamelCaseModel):
+    """创建本地多目录项目。"""
+
+    name: str = Field(min_length=1, max_length=120)
+    roots: list[ProjectRootRequest] = Field(min_length=1)
+    idempotency_key: str = Field(min_length=1, max_length=120)
+
+
+class UpdateProjectRequest(_CamelCaseModel):
+    """完整替换项目名称和有序目录。"""
+
+    name: str = Field(min_length=1, max_length=120)
+    roots: list[ProjectRootRequest] = Field(min_length=1)
+
+
+class ProjectRootResponse(_CamelCaseModel):
+    """项目目录读取模型。"""
+
+    path: str
+    position: int
+    primary: bool
+
+    @classmethod
+    def from_domain(cls, root: ProjectRoot) -> "ProjectRootResponse":
+        """把领域目录转换为显式包含主目录标志的 DTO。"""
+        return cls(path=root.path, position=root.position, primary=root.primary)
+
+
+class ProjectResponse(_CamelCaseModel):
+    """侧栏和项目弹窗使用的稳定 Project 读取模型。"""
+
+    id: UUID
+    name: str
+    roots: list[ProjectRootResponse]
+    position: int
+    created_at: datetime
+    updated_at: datetime
+
+    @classmethod
+    def from_domain(cls, project: Project) -> "ProjectResponse":
+        """把 Project 聚合转换为 HTTP DTO。"""
+        return cls(
+            id=project.id,
+            name=project.name,
+            roots=[ProjectRootResponse.from_domain(root) for root in project.roots],
+            position=project.position,
+            created_at=project.created_at,
+            updated_at=project.updated_at,
+        )
 
 
 class SessionResponse(_CamelCaseModel):

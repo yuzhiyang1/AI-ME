@@ -12,6 +12,13 @@ from aime.application.ports.model_configuration import ModelCredentialStore
 from aime.application.ports.model_gateway import ModelGateway
 from aime.application.ports.tool_execution import ToolRegistry
 from aime.application.ports.tool_execution_store import ToolExecutionStore
+from aime.application.projects.services import (
+    CreateProject,
+    DeleteProject,
+    GetProject,
+    ListProjects,
+    UpdateProject,
+)
 from aime.application.sessions.runtime_coordinator import RuntimeCoordinator
 from aime.application.sessions.services import CreateSession, GetSession, ListSessions
 from aime.application.sessions.turn_services import (
@@ -36,6 +43,7 @@ from aime.infrastructure.persistence.sqlite_database import SqliteDatabase
 from aime.infrastructure.persistence.sqlite_model_configuration_repository import (
     SqliteModelConfigurationRepository,
 )
+from aime.infrastructure.persistence.sqlite_project_repository import SqliteProjectRepository
 from aime.infrastructure.persistence.sqlite_session_repository import SqliteSessionRepository
 from aime.infrastructure.persistence.sqlite_tool_execution_store import SqliteToolExecutionStore
 from aime.infrastructure.runtime.approval_broker import InMemoryApprovalBroker
@@ -64,6 +72,11 @@ class Container:
     decide_approval: DecideApproval
     list_tool_invocations: ListToolInvocations
     model_configuration_service: ModelConfigurationService
+    create_project: CreateProject
+    list_projects: ListProjects
+    get_project: GetProject
+    update_project: UpdateProject
+    delete_project: DeleteProject
     runtime_coordinator: RuntimeCoordinator
     conversation_store: ConversationStore
     tool_execution_store: ToolExecutionStore
@@ -109,6 +122,7 @@ def build_container(
         resolved_model_gateway,
     )
     sessions = SqliteSessionRepository(database.session_factory)
+    projects = SqliteProjectRepository(database.session_factory)
     conversation_store = SqliteConversationStore(database.session_factory)
     tool_execution_store = SqliteToolExecutionStore(database.session_factory)
     approval_broker = InMemoryApprovalBroker()
@@ -142,6 +156,11 @@ def build_container(
         decide_approval=DecideApproval(tool_execution_store, approval_broker),
         list_tool_invocations=ListToolInvocations(tool_execution_store),
         model_configuration_service=model_configuration_service,
+        create_project=CreateProject(projects),
+        list_projects=ListProjects(projects),
+        get_project=GetProject(projects),
+        update_project=UpdateProject(projects),
+        delete_project=DeleteProject(projects),
         runtime_coordinator=runtime_coordinator,
         conversation_store=conversation_store,
         tool_execution_store=tool_execution_store,

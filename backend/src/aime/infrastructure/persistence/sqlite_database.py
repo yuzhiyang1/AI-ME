@@ -12,6 +12,7 @@ from sqlalchemy import (
     Index,
     Integer,
     MetaData,
+    PrimaryKeyConstraint,
     String,
     Table,
     Text,
@@ -29,10 +30,49 @@ from aime.infrastructure.persistence.migration_runner import upgrade_database
 
 metadata = MetaData()
 
+projects_table = Table(
+    "projects",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("name", String(120), nullable=False),
+    Column("position", Integer, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+)
+
+project_roots_table = Table(
+    "project_roots",
+    metadata,
+    Column("project_id", ForeignKey("projects.id", ondelete="CASCADE"), nullable=False),
+    Column("position", Integer, nullable=False),
+    Column("path", String, nullable=False),
+    Column("path_key", String, nullable=False),
+    UniqueConstraint("project_id", "path_key", name="uq_project_root_path_key"),
+)
+
+# SQLAlchemy Core 需要显式声明复合主键，避免 roots 出现同一位置的两条记录。
+project_roots_table.append_constraint(
+    PrimaryKeyConstraint(
+        project_roots_table.c.project_id,
+        project_roots_table.c.position,
+        name="pk_project_roots",
+    )
+)
+
+project_idempotency_keys_table = Table(
+    "project_idempotency_keys",
+    metadata,
+    Column("idempotency_key", String(120), primary_key=True),
+    Column("project_id", ForeignKey("projects.id", ondelete="CASCADE"), nullable=False),
+    Column("request_hash", String(64), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+
 sessions_table = Table(
     "agent_sessions",
     metadata,
     Column("id", String(36), primary_key=True),
+    Column("project_id", ForeignKey("projects.id", ondelete="SET NULL")),
     Column("title", String(120), nullable=False),
     Column("workspace_path", String, nullable=False),
     Column("default_model", String(200), nullable=False),
@@ -43,6 +83,26 @@ sessions_table = Table(
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
     Column("last_event_sequence", Integer, nullable=False, default=0),
+)
+
+Index("ix_agent_sessions_project_updated", sessions_table.c.project_id, sessions_table.c.updated_at)
+
+session_workspace_roots_table = Table(
+    "session_workspace_roots",
+    metadata,
+    Column("session_id", ForeignKey("agent_sessions.id", ondelete="CASCADE"), nullable=False),
+    Column("position", Integer, nullable=False),
+    Column("path", String, nullable=False),
+    Column("path_key", String, nullable=False),
+    UniqueConstraint("session_id", "path_key", name="uq_session_workspace_root_path_key"),
+)
+
+session_workspace_roots_table.append_constraint(
+    PrimaryKeyConstraint(
+        session_workspace_roots_table.c.session_id,
+        session_workspace_roots_table.c.position,
+        name="pk_session_workspace_roots",
+    )
 )
 
 turns_table = Table(

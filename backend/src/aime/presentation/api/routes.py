@@ -30,6 +30,15 @@ from aime.application.ports.model_gateway import (
     LlmThinkingDelta,
     LlmToolCallDelta,
 )
+from aime.application.projects.commands import CreateProjectCommand, UpdateProjectCommand
+from aime.application.projects.services import (
+    CreateProject,
+    DeleteProject,
+    GetProject,
+    ListProjects,
+    ProjectNotFound,
+    UpdateProject,
+)
 from aime.application.sessions.commands import CreateSessionCommand
 from aime.application.sessions.exceptions import (
     ActiveTurnConflict,
@@ -55,16 +64,19 @@ from aime.application.sessions.turn_services import (
 from aime.application.tools.services import ListToolInvocations
 from aime.application.work_items.commands import CreateWorkItemCommand
 from aime.application.work_items.services import CreateWorkItem, ListWorkItems
+from aime.domain.projects.repositories import ProjectIdempotencyConflict
 from aime.presentation.api.schemas import (
     ApprovalResponse,
     ChatCompletionRequest,
     CreateModelConfigurationRequest,
+    CreateProjectRequest,
     CreateSessionRequest,
     CreateWorkItemRequest,
     DecideApprovalRequest,
     HealthResponse,
     ModelConfigurationResponse,
     ModelResponse,
+    ProjectResponse,
     RuntimeEventResponse,
     SessionItemResponse,
     SessionResponse,
@@ -72,6 +84,7 @@ from aime.presentation.api.schemas import (
     StartTurnRequest,
     ToolInvocationResponse,
     TurnResponse,
+    UpdateProjectRequest,
     WorkItemResponse,
 )
 
@@ -95,6 +108,11 @@ def build_router(
     decide_approval: DecideApproval,
     list_tool_invocations: ListToolInvocations,
     model_configuration_service: ModelConfigurationService,
+    create_project: CreateProject,
+    list_projects: ListProjects,
+    get_project: GetProject,
+    update_project: UpdateProject,
+    delete_project: DeleteProject,
 ) -> APIRouter:
     """使用已经装配好的用例创建路由。"""
     router = APIRouter(prefix="/api")
@@ -209,6 +227,76 @@ def build_router(
                 detail=str(exc),
             ) from exc
         return SessionResponse.from_domain(session)
+
+    @router.post(
+        "/projects",
+        response_model=ProjectResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    async def create_local_project(payload: CreateProjectRequest) -> ProjectResponse:
+        """创建一个可包含多个本地目录的持久 Project。"""
+        try:
+            project = await create_project.execute(
+                CreateProjectCommand(
+                    name=payload.name,
+                    roots=tuple(root.path for root in payload.roots),
+                    idempotency_key=payload.idempotency_key,
+                )
+            )
+        except ProjectIdempotencyConflict as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=str(exc),
+            ) from exc
+        return ProjectResponse.from_domain(project)
+
+    @router.get("/projects", response_model=list[ProjectResponse])
+    async def list_local_projects() -> list[ProjectResponse]:
+        """按侧栏顺序读取全部 Project。"""
+        return [ProjectResponse.from_domain(project) for project in await list_projects.execute()]
+
+    @router.get("/projects/{project_id}", response_model=ProjectResponse)
+    async def get_local_project(project_id: UUID) -> ProjectResponse:
+        """读取一个 Project；不存在时返回稳定 404。"""
+        try:
+            project = await get_project.execute(project_id)
+        except ProjectNotFound as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        return ProjectResponse.from_domain(project)
+
+    @router.patch("/projects/{project_id}", response_model=ProjectResponse)
+    async def update_local_project(
+        project_id: UUID,
+        payload: UpdateProjectRequest,
+    ) -> ProjectResponse:
+        """完整替换 Project 名称和有序目录。"""
+        try:
+            project = await update_project.execute(
+                UpdateProjectCommand(
+                    project_id=project_id,
+                    name=payload.name,
+                    roots=tuple(root.path for root in payload.roots),
+                )
+            )
+        except ProjectNotFound as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=str(exc),
+            ) from exc
+        return ProjectResponse.from_domain(project)
+
+    @router.delete("/projects/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
+    async def delete_local_project(project_id: UUID) -> Response:
+        """删除 Project 配置，但不删除其历史会话。"""
+        try:
+            await delete_project.execute(project_id)
+        except ProjectNotFound as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     @router.get("/sessions/{session_id}", response_model=SessionResponse)
     async def get_agent_session(session_id: UUID) -> SessionResponse:

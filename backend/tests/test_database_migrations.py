@@ -32,7 +32,7 @@ async def test_fresh_database_is_upgraded_to_a_versioned_schema(tmp_path: Path) 
             ).fetchall()
         }
 
-    assert version == ("0004_model_configurations",)
+    assert version == ("0005_projects_and_session_roots",)
     assert {
         "agent_sessions",
         "agent_turns",
@@ -43,6 +43,10 @@ async def test_fresh_database_is_upgraded_to_a_versioned_schema(tmp_path: Path) 
         "approval_requests",
         "approval_grants",
         "model_configurations",
+        "projects",
+        "project_roots",
+        "project_idempotency_keys",
+        "session_workspace_roots",
     }.issubset(table_names)
 
 
@@ -71,7 +75,7 @@ async def test_unversioned_preview_database_is_adopted_only_after_schema_validat
             "AND name = 'uq_active_turn_per_session'"
         ).fetchone()
 
-    assert version == ("0004_model_configurations",)
+    assert version == ("0005_projects_and_session_roots",)
     assert active_index == ("uq_active_turn_per_session",)
 
 
@@ -117,7 +121,7 @@ async def test_existing_0001_database_is_upgraded_before_creating_a_queued_run(
             if row[1] == "started_at"
         )
 
-    assert version == ("0004_model_configurations",)
+    assert version == ("0005_projects_and_session_roots",)
     assert upgraded_started_at[3] == 0
     assert execution.run.status.value == "created"
     assert execution.run.started_at is None
