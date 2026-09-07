@@ -395,11 +395,102 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .message.error .message-avatar { color: var(--danger); background: #fff1f1; }
 .message-author { display: block; margin: 2px 0 8px; color: var(--text-muted); font-size: 10px; font-weight: 620; }
 .message-author i { margin-left: 6px; color: var(--brand-strong); font-size: 9px; font-style: normal; font-weight: 540; }
-.message-body p { margin: 0; color: #2b2c35; font-size: 13px; line-height: 1.75; white-space: pre-wrap; }
+.message.user .message-body > p,
+.message.error .message-body > p { margin: 0; color: #2b2c35; font-size: 13px; line-height: 1.75; white-space: pre-wrap; }
 .message.user .message-body { padding: 11px 13px; border: 1px solid var(--line); border-radius: 4px 12px 12px; background: #fff; }
 .message.user .message-author { display: none; }
 .message.error .message-body { padding: 10px 12px; border: 1px solid #f0d3d3; border-radius: 8px; background: #fff7f7; }
-.message.error .message-body p { color: #8c3e3e; }
+.message.error .message-body > p { color: #8c3e3e; }
+
+.markdown-content {
+  min-width: 0;
+  color: #292a33;
+  font-size: 14px;
+  line-height: 1.78;
+  overflow-wrap: anywhere;
+}
+.markdown-pending { white-space: pre-wrap; }
+.markdown-content > :first-child { margin-top: 0; }
+.markdown-content > :last-child { margin-bottom: 0; }
+.markdown-content p { margin: 0 0 12px; }
+.markdown-content h1,
+.markdown-content h2,
+.markdown-content h3,
+.markdown-content h4,
+.markdown-content h5,
+.markdown-content h6 {
+  margin: 24px 0 9px;
+  color: #20212a;
+  font-weight: 680;
+  line-height: 1.38;
+  letter-spacing: -0.018em;
+}
+.markdown-content h1 { font-size: 20px; }
+.markdown-content h2 { font-size: 17px; }
+.markdown-content h3 { font-size: 15px; }
+.markdown-content h4,
+.markdown-content h5,
+.markdown-content h6 { font-size: 14px; }
+.markdown-content strong { color: #20212a; font-weight: 680; }
+.markdown-content ul,
+.markdown-content ol { margin: 8px 0 14px; padding-left: 22px; }
+.markdown-content li { margin: 4px 0; padding-left: 2px; }
+.markdown-content li::marker { color: #7d6abd; }
+.markdown-content li > p { margin-bottom: 5px; }
+.markdown-content blockquote {
+  margin: 14px 0;
+  padding: 9px 13px;
+  border-left: 3px solid var(--brand-line);
+  border-radius: 0 7px 7px 0;
+  color: #595b68;
+  background: #f8f7fc;
+}
+.markdown-content blockquote > :last-child { margin-bottom: 0; }
+.markdown-content a { color: var(--brand-strong); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+.markdown-content a:hover { color: #4f32c1; }
+.markdown-content code {
+  padding: 2px 5px;
+  border: 1px solid #e6e3ef;
+  border-radius: 5px;
+  color: #51436f;
+  background: #f6f4fa;
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  font-size: 0.88em;
+}
+.markdown-content pre {
+  max-width: 100%;
+  margin: 14px 0;
+  padding: 14px 16px;
+  overflow: auto;
+  border: 1px solid #dfdfe7;
+  border-radius: 9px;
+  color: #e8e6ef;
+  background: #23232a;
+  box-shadow: 0 8px 24px rgba(29, 28, 36, 0.08);
+  line-height: 1.62;
+}
+.markdown-content pre code {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  color: inherit;
+  background: transparent;
+  font-size: 12px;
+  white-space: pre;
+}
+.markdown-table-scroll { max-width: 100%; margin: 15px 0; overflow-x: auto; border: 1px solid var(--line-strong); border-radius: 8px; }
+.markdown-content table { width: 100%; border-collapse: collapse; background: #fff; font-size: 12.5px; }
+.markdown-content th,
+.markdown-content td { min-width: 110px; padding: 9px 11px; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+.markdown-content th { color: #4c4d58; background: #f7f7fa; font-weight: 660; }
+.markdown-content tr:last-child td { border-bottom: 0; }
+.markdown-content th:last-child,
+.markdown-content td:last-child { border-right: 0; }
+.markdown-content hr { height: 1px; margin: 22px 0; border: 0; background: var(--line); }
+.markdown-content img { display: block; max-width: 100%; height: auto; margin: 14px 0; border: 1px solid var(--line); border-radius: 9px; }
+.markdown-content input[type="checkbox"] { margin: 0 7px 0 0; accent-color: var(--brand); }
+.markdown-link-blocked,
+.markdown-image-blocked { color: var(--text-muted); }
 
 .typing { display: flex; gap: 4px; padding: 7px 0; }
 .typing span { width: 5px; height: 5px; border-radius: 50%; background: #a797e8; animation: typing 1s ease-in-out infinite; }

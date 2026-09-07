@@ -4,7 +4,7 @@ import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { AgentSession, AgentTurn, SessionItem } from "./api";
+import type { AgentSession, AgentTurn, RuntimeEvent, SessionItem } from "./api";
 
 const api = vi.hoisted(() => ({
   createModelConfiguration: vi.fn(),
@@ -49,7 +49,10 @@ const itemA = item("item-a", sessionA.id, "A 的消息");
 const itemB = item("item-b", sessionB.id, "B 的消息");
 
 describe("会话页面异步隔离", () => {
-  afterEach(cleanup);
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -74,6 +77,85 @@ describe("会话页面异步隔离", () => {
     api.getTurnByClientRequest.mockResolvedValue(null);
     api.startTurn.mockResolvedValue(acceptedTurn);
     api.streamRuntimeEvents.mockResolvedValue(undefined);
+  });
+
+  it("把助手回复渲染为可读的 Markdown，而不是显示原始标记", async () => {
+    api.listSessionItems.mockResolvedValue([
+      assistantItem(
+        "answer-markdown",
+        sessionA.id,
+        [
+          "## 投递结论",
+          "",
+          "- **真实技术纵深**：Agent Loop",
+          "",
+          "| 方向 | 建议 |",
+          "| --- | --- |",
+          "| Agent | 主打 |",
+        ].join("\n"),
+      ),
+    ]);
+
+    render(<App />);
+
+    expect(await screen.findByRole("heading", { level: 2, name: "投递结论" })).toBeTruthy();
+    expect(screen.getByText("真实技术纵深").tagName).toBe("STRONG");
+    expect(screen.getByRole("table")).toBeTruthy();
+    expect(screen.queryByText(/\*\*真实技术纵深\*\*/)).toBeNull();
+  });
+
+  it("Runtime 突发完成时先平滑展示，再交接为持久化消息", async () => {
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    const answer = "平滑输出让长回复更容易阅读。".repeat(20);
+    const userMessage = item("user-stream", sessionA.id, "请给出建议");
+    const agentMessage = assistantItem("agent-stream", sessionA.id, answer);
+    let itemRequests = 0;
+    api.listSessionItems.mockImplementation(async () => {
+      itemRequests += 1;
+      if (itemRequests === 1) return [];
+      if (itemRequests === 2) return [userMessage];
+      return [userMessage, agentMessage];
+    });
+    api.streamRuntimeEvents.mockImplementation(
+      async (
+        _sessionId: string,
+        _cursor: number,
+        onEvent: (event: RuntimeEvent) => void,
+      ) => {
+        onEvent({
+          id: "event-text",
+          sessionId: sessionA.id,
+          turnId: acceptedTurn.id,
+          runId: "run-stream",
+          sequence: 2,
+          type: "text_delta",
+          payload: { text: answer },
+          createdAt: "2026-09-05T00:00:01Z",
+        });
+      },
+    );
+
+    const user = userEvent.setup();
+    render(<App />);
+    await user.type(await screen.findByRole("textbox", { name: "给 AI-ME 发消息" }), "请给出建议");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => expect(itemRequests).toBeGreaterThanOrEqual(3));
+
+    expect(screen.queryByText(answer)).toBeNull();
+    expect(screen.getByText("正在完成")).toBeTruthy();
+
+    for (let tick = 0; tick < 120 && screen.queryByText(answer) === null; tick += 1) {
+      const frame = frames.shift();
+      if (!frame) continue;
+      await act(() => frame(tick * 100));
+    }
+    expect(await screen.findByText(answer)).toBeTruthy();
+    expect(screen.queryByText("正在完成")).toBeNull();
   });
 
   it("恢复会话后展示待审批工具，并允许用户仅批准本次", async () => {
@@ -400,5 +482,12 @@ function item(id: string, sessionId: string, text: string): SessionItem {
     status: "completed",
     content: { text },
     createdAt: "2026-09-05T00:00:00Z",
+  };
+}
+
+function assistantItem(id: string, sessionId: string, text: string): SessionItem {
+  return {
+    ...item(id, sessionId, text),
+    type: "agent_message",
   };
 }

@@ -8,7 +8,9 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from aime.application.ports.agent_runtime import AgentRunRequest
 from aime.application.ports.model_gateway import (
+    ConversationMessage,
     LlmAssistantToolCallMessage,
     LlmCompletionRequest,
     LlmFinishReason,
@@ -19,6 +21,7 @@ from aime.application.ports.model_gateway import (
     LlmToolCallDelta,
     LlmToolDefinition,
     LlmToolResultMessage,
+    MessageRole,
     ModelDescriptor,
 )
 from aime.application.ports.tool_execution import (
@@ -30,6 +33,8 @@ from aime.application.ports.tool_execution import (
 )
 from aime.composition import build_container
 from aime.domain.sessions.value_objects import PermissionProfile
+from aime.infrastructure.runtime.approval_broker import InMemoryApprovalBroker
+from aime.infrastructure.runtime.model_agent_runtime import ModelAgentRuntime
 from aime.main import create_app
 
 
@@ -192,6 +197,65 @@ class _RepeatedFailureGateway:
             '{"same":true}',
         )
         yield LlmStreamCompleted(LlmFinishReason.TOOL_CALLS)
+
+
+class _PausedTextGateway:
+    """首段文本后暂停，暴露 Runtime 是否真实逐段转发。"""
+
+    def __init__(self, release: asyncio.Event) -> None:
+        self.release = release
+
+    def list_models(self) -> list[ModelDescriptor]:
+        return [ModelDescriptor("qa", "stream-model", "Stream Model", 32_000)]
+
+    async def stream(self, request: LlmCompletionRequest) -> AsyncIterator[LlmStreamEvent]:
+        yield LlmStreamStarted()
+        yield LlmTextDelta("第一段")
+        await self.release.wait()
+        yield LlmTextDelta("第二段")
+        yield LlmStreamCompleted(LlmFinishReason.STOP)
+
+
+class _NoExistingToolExecutions:
+    """无工具调用场景只需要声明没有恢复中的执行账本。"""
+
+    async def list_run_invocations(self, run_id: object) -> list[object]:
+        return []
+
+
+def test_runtime_forwards_text_before_provider_stream_completes() -> None:
+    """首段模型文本不得等待整个 Provider 流结束后才交给用户。"""
+
+    async def scenario() -> None:
+        release = asyncio.Event()
+        runtime = ModelAgentRuntime(
+            _PausedTextGateway(release),
+            _NoExistingToolExecutions(),  # type: ignore[arg-type]
+            InMemoryApprovalBroker(),
+        )
+        stream = runtime.run(
+            AgentRunRequest(
+                instruction="测试真实流式",
+                session_id="00000000-0000-4000-8000-000000000001",
+                turn_id="00000000-0000-4000-8000-000000000002",
+                run_id="00000000-0000-4000-8000-000000000003",
+                model_ref="qa/stream-model",
+                messages=(ConversationMessage(MessageRole.USER, "你好"),),
+            )
+        )
+
+        try:
+            first_event = await asyncio.wait_for(anext(stream), timeout=0.1)
+        finally:
+            release.set()
+        assert first_event.type == "text_delta"
+        assert first_event.content == "第一段"
+        remaining = [event async for event in stream]
+        assert [(event.type, event.content) for event in remaining] == [
+            ("text_delta", "第二段")
+        ]
+
+    asyncio.run(scenario())
 
 
 def test_agent_loop_executes_a_read_tool_then_returns_the_final_answer(tmp_path: Path) -> None:

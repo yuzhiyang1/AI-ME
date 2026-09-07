@@ -49,6 +49,8 @@ import {
   reconnectDelay,
   startTurnReliably,
 } from "./reliableTurnRequest";
+import { MarkdownContent } from "./MarkdownContent";
+import { StreamingMarkdown } from "./StreamingMarkdown";
 
 const permissionLabels: Record<PermissionProfile, string> = {
   read_only: "只读",
@@ -78,6 +80,7 @@ function App() {
   const [items, setItems] = useState<SessionItem[]>([]);
   const [draft, setDraft] = useState("");
   const [liveAnswer, setLiveAnswer] = useState("");
+  const [liveAnswerCompleted, setLiveAnswerCompleted] = useState(false);
   const [workspacePath, setWorkspacePath] = useState("");
   const [modelRef, setModelRef] = useState("");
   const [permissionProfile, setPermissionProfile] =
@@ -98,6 +101,12 @@ function App() {
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const streamController = useRef<AbortController | null>(null);
+  const liveAnswerRef = useRef("");
+  const liveAnswerDrainRef = useRef<(() => void) | null>(null);
+  const liveAnswerPublishRef = useRef<{
+    animationFrame: number;
+    fallbackTimer: number;
+  } | null>(null);
   const activeSessionId = useRef<string | null>(null);
   // 会话视图版本用于隔离 A -> B -> A 场景中第一次 A 的迟到异步结果。
   const sessionViewGeneration = useRef(0);
@@ -113,6 +122,8 @@ function App() {
     return () => {
       streamController.current?.abort();
       requestControllers.current.forEach((controller) => controller.abort());
+      cancelLiveAnswerPublication();
+      liveAnswerDrainRef.current?.();
     };
   }, []);
 
@@ -182,7 +193,7 @@ function App() {
     setActiveSession(session);
     setItems([]);
     setDraft("");
-    setLiveAnswer("");
+    resetLiveAnswerPresentation();
     setActiveTurnId(null);
     setApprovals([]);
     setToolInvocations([]);
@@ -321,17 +332,25 @@ function App() {
           ]);
           if (!isCurrentSessionView(sessionId, viewGeneration)) return;
           setActiveSession(updatedSession);
-          setItems(updatedItems);
           setSessions(updatedSessions);
-          setActiveTurnId(activeTurn?.id ?? null);
           setApprovals(pendingApprovals);
           setToolInvocations(updatedInvocations);
-          setSending(activeTurn !== null);
           if (activeTurn === null) {
-            setLiveAnswer("");
+            setActiveTurnId(null);
+            if (liveAnswerRef.current) {
+              setSending(true);
+              await waitForLiveAnswerPresentation();
+              if (!isCurrentSessionView(sessionId, viewGeneration)) return;
+            }
+            setItems(updatedItems);
+            resetLiveAnswerPresentation();
+            setSending(false);
             setError(null);
             return;
           }
+          setItems(updatedItems);
+          setActiveTurnId(activeTurn.id);
+          setSending(true);
           setError(null);
         } catch (reason) {
           if (controller.signal.aborted || !isCurrentSessionView(sessionId, viewGeneration)) {
@@ -369,7 +388,60 @@ function App() {
     if (event.type !== "text_delta") return;
     setActiveTurnId(event.turnId);
     const text = event.payload.text;
-    if (typeof text === "string") setLiveAnswer((current) => current + text);
+    if (typeof text === "string") {
+      liveAnswerRef.current += text;
+      scheduleLiveAnswerPublication();
+    }
+  }
+
+  function waitForLiveAnswerPresentation() {
+    flushLiveAnswerPublication();
+    setLiveAnswerCompleted(true);
+    return new Promise<void>((resolve) => {
+      liveAnswerDrainRef.current = () => {
+        liveAnswerDrainRef.current = null;
+        resolve();
+      };
+    });
+  }
+
+  function resetLiveAnswerPresentation() {
+    cancelLiveAnswerPublication();
+    liveAnswerDrainRef.current?.();
+    liveAnswerDrainRef.current = null;
+    liveAnswerRef.current = "";
+    setLiveAnswer("");
+    setLiveAnswerCompleted(false);
+  }
+
+  function scheduleLiveAnswerPublication() {
+    if (liveAnswerPublishRef.current !== null) return;
+    let published = false;
+    const publish = () => {
+      if (published) return;
+      published = true;
+      cancelLiveAnswerPublication();
+      setLiveAnswer(liveAnswerRef.current);
+    };
+    const pending = { animationFrame: 0, fallbackTimer: 0 };
+    liveAnswerPublishRef.current = pending;
+    pending.animationFrame = requestAnimationFrame(publish);
+    // 后台窗口可能暂停动画帧，100ms 兜底保证文本仍持续可见。
+    pending.fallbackTimer = window.setTimeout(publish, 100);
+  }
+
+  function flushLiveAnswerPublication() {
+    if (liveAnswerPublishRef.current === null) return;
+    cancelLiveAnswerPublication();
+    setLiveAnswer(liveAnswerRef.current);
+  }
+
+  function cancelLiveAnswerPublication() {
+    const pending = liveAnswerPublishRef.current;
+    if (pending === null) return;
+    cancelAnimationFrame(pending.animationFrame);
+    window.clearTimeout(pending.fallbackTimer);
+    liveAnswerPublishRef.current = null;
   }
 
   async function refreshRuntimeFacts(sessionId: string, viewGeneration: number) {
@@ -415,7 +487,7 @@ function App() {
     const instruction = draft.trim();
     const cursor = maxSequence(items);
     setDraft("");
-    setLiveAnswer("");
+    resetLiveAnswerPresentation();
     setSending(true);
     setConfirmingRequest(true);
     setSettlingRequest(false);
@@ -672,7 +744,7 @@ function App() {
     setActiveSession(null);
     setItems([]);
     setDraft("");
-    setLiveAnswer("");
+    resetLiveAnswerPresentation();
     setActiveTurnId(null);
     setConfirmingRequest(false);
     setSettlingRequest(false);
@@ -763,7 +835,11 @@ function App() {
                 ))}
                 {approvals.length === 0 &&
                 (liveAnswer || (sending && !confirmingRequest && !settlingRequest)) ? (
-                  <LiveMessage text={liveAnswer} />
+                  <LiveMessage
+                    text={liveAnswer}
+                    completed={liveAnswerCompleted}
+                    onSettled={() => liveAnswerDrainRef.current?.()}
+                  />
                 ) : null}
                 {approvals.map((approval) => (
                   <ApprovalCard
@@ -800,6 +876,8 @@ function App() {
                       ? "正在完成发送结果的最终对账"
                       : confirmingRequest
                       ? "正在确认请求是否已被本地 Runtime 接受"
+                      : liveAnswerCompleted
+                        ? "正在完成回答的平滑显示"
                       : sending
                         ? "Agent 正在执行当前 Turn"
                         : "Enter 发送 · Shift + Enter 换行"}
@@ -818,6 +896,8 @@ function App() {
                         ? "正在对账"
                         : confirmingRequest
                           ? "停止确认"
+                          : liveAnswerCompleted
+                            ? "正在完成显示"
                           : sending
                             ? "中断"
                             : "发送"
@@ -861,24 +941,37 @@ function App() {
 
 function MessageItem({ item }: { item: SessionItem }) {
   const role = item.type === "user_message" ? "user" : item.type === "error" ? "error" : "agent";
+  const text = itemText(item);
   return (
     <article className={`message ${role}`}>
       <div className="message-avatar">{role === "user" ? "你" : <Bot size={16} />}</div>
       <div className="message-body">
         <span className="message-author">{role === "user" ? "你" : role === "error" ? "运行中断" : "AI-ME"}</span>
-        <p>{itemText(item)}</p>
+        {role === "agent" ? <MarkdownContent text={text} /> : <p>{text}</p>}
       </div>
     </article>
   );
 }
 
-function LiveMessage({ text }: { text: string }) {
+function LiveMessage({
+  text,
+  completed,
+  onSettled,
+}: {
+  text: string;
+  completed: boolean;
+  onSettled: () => void;
+}) {
   return (
     <article className="message agent live">
       <div className="message-avatar"><Bot size={16} /></div>
       <div className="message-body">
-        <span className="message-author">AI-ME <i>正在生成</i></span>
-        {text ? <p>{text}</p> : <div className="typing"><span /><span /><span /></div>}
+        <span className="message-author">AI-ME <i>{completed ? "正在完成" : "正在生成"}</i></span>
+        {text ? (
+          <StreamingMarkdown text={text} completed={completed} onSettled={onSettled} />
+        ) : (
+          <div className="typing"><span /><span /><span /></div>
+        )}
       </div>
     </article>
   );

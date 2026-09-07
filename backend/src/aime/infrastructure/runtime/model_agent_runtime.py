@@ -165,11 +165,13 @@ class ModelAgentRuntime(AgentRuntime):
             )
             async for event in provider_stream:
                 if isinstance(event, LlmTextDelta):
-                    text_parts.append(event.delta)
                     text_chars += len(event.delta)
                     if text_chars > MAX_MODEL_TEXT_CHARS:
                         yield AgentEvent(type="failed", content="模型单步文本超过 Runtime 上限")
                         return
+                    text_parts.append(event.delta)
+                    # Provider 文本必须边接收边发布；完整缓冲只用于工具回填和最终持久化。
+                    yield AgentEvent(type="text_delta", content=event.delta)
                 elif isinstance(event, LlmToolCallDelta):
                     call = pending_calls.setdefault(event.index, _PendingToolCall(event.index))
                     if len(pending_calls) > MAX_TOOL_CALLS_PER_STEP:
@@ -256,8 +258,6 @@ class ModelAgentRuntime(AgentRuntime):
             if not assistant_text.strip():
                 yield AgentEvent(type="failed", content="模型未返回可显示内容")
                 return
-            for part in text_parts:
-                yield AgentEvent(type="text_delta", content=part)
             return
 
         yield AgentEvent(type="failed", content=f"Agent Loop 已达到最大步骤数 {self._max_steps}")
