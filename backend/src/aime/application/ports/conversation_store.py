@@ -41,6 +41,16 @@ class SessionTokenUsage:
         return self.input_tokens + self.output_tokens
 
 
+@dataclass(frozen=True, slots=True)
+class SessionContextUsageSummary:
+    """侧栏圆环所需的最新模型步骤上下文摘要。"""
+
+    current_context_tokens: int | None
+    context_window: int | None
+    percentage: int | None
+    partial: bool
+
+
 class ConversationStore(Protocol):
     """以原子操作维护 Turn、Run、Event 与 Item。"""
 
@@ -92,3 +102,7 @@ class ConversationStore(Protocol):
     ) -> list[RuntimeEvent]: ...
 
     async def get_token_usage(self, session_id: UUID) -> SessionTokenUsage: ...
+
+    async def list_context_usage_summaries(
+        self,
+    ) -> dict[UUID, SessionContextUsageSummary]: ...

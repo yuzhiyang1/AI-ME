@@ -5,13 +5,14 @@ from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import insert, select, update
+from sqlalchemy import and_, func, insert, select, update
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from aime.application.ports.conversation_store import (
     ConversationStore,
+    SessionContextUsageSummary,
     SessionTokenUsage,
     TurnExecution,
 )
@@ -697,6 +698,64 @@ class SqliteConversationStore(ConversationStore):
             unreported_steps=unreported_steps,
             untracked_history=untracked_history,
         )
+
+    async def list_context_usage_summaries(
+        self,
+    ) -> dict[UUID, SessionContextUsageSummary]:
+        """一次查询读取每个 Session 最新的 model_usage，用于侧栏轻量圆环。"""
+        latest_usage = (
+            select(
+                runtime_events_table.c.session_id.label("session_id"),
+                func.max(runtime_events_table.c.sequence).label("sequence"),
+            )
+            .where(runtime_events_table.c.type == "model_usage")
+            .group_by(runtime_events_table.c.session_id)
+            .subquery()
+        )
+        async with self._session_factory() as database_session:
+            rows = (
+                await database_session.execute(
+                    select(
+                        runtime_events_table.c.session_id,
+                        runtime_events_table.c.payload_json,
+                    ).join(
+                        latest_usage,
+                        and_(
+                            runtime_events_table.c.session_id == latest_usage.c.session_id,
+                            runtime_events_table.c.sequence == latest_usage.c.sequence,
+                        ),
+                    )
+                )
+            ).mappings()
+
+        summaries: dict[UUID, SessionContextUsageSummary] = {}
+        for row in rows:
+            decoded: object = json.loads(row["payload_json"])
+            if not isinstance(decoded, dict):
+                continue
+            payload = cast(dict[str, object], decoded)
+            input_tokens = _non_negative_int(payload.get("inputTokens"))
+            output_tokens = _non_negative_int(payload.get("outputTokens"))
+            context_window = _non_negative_int(payload.get("contextWindow"))
+            current = (
+                input_tokens + (output_tokens or 0) if input_tokens is not None else None
+            )
+            percentage = (
+                min(100, round(current / context_window * 100))
+                if current is not None and context_window
+                else None
+            )
+            summaries[UUID(str(row["session_id"]))] = SessionContextUsageSummary(
+                current_context_tokens=current,
+                context_window=context_window,
+                percentage=percentage,
+                partial=(
+                    input_tokens is None
+                    or output_tokens is None
+                    or context_window is None
+                ),
+            )
+        return summaries
 
     async def _existing_execution(
         self,

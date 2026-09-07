@@ -450,6 +450,61 @@ def test_session_usage_marks_steps_without_provider_usage_as_partial(tmp_path: P
     }
 
 
+def test_session_list_returns_context_usage_for_every_session(tmp_path: Path) -> None:
+    """侧栏一次列表请求应同时获得已测量圆环和未测量空心圆状态。"""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    with TestClient(
+        create_app(
+            build_container(
+                state_dir=tmp_path / "state",
+                model_gateway=_UsageModelGateway(),
+            )
+        )
+    ) as client:
+        measured = client.post(
+            "/api/sessions",
+            json={
+                "workspacePath": str(workspace),
+                "defaultModel": "openai/gpt-5",
+                "permissionProfile": "workspace_write",
+            },
+        ).json()["id"]
+        unmeasured = client.post(
+            "/api/sessions",
+            json={
+                "workspacePath": str(workspace),
+                "defaultModel": "openai/gpt-5",
+                "permissionProfile": "workspace_write",
+            },
+        ).json()["id"]
+        client.post(
+            f"/api/sessions/{measured}/turns",
+            json={"input": "测量上下文", "clientRequestId": "list-usage"},
+        )
+        for _ in range(100):
+            items = client.get(f"/api/sessions/{measured}/items").json()
+            if len(items) == 2:
+                break
+            time.sleep(0.01)
+        listed = client.get("/api/sessions").json()
+
+    by_id = {item["id"]: item for item in listed}
+    assert by_id[measured]["contextUsage"] == {
+        "currentContextTokens": 12_800,
+        "contextWindow": 128_000,
+        "percentage": 10,
+        "partial": False,
+    }
+    assert by_id[unmeasured]["contextUsage"] == {
+        "currentContextTokens": None,
+        "contextWindow": None,
+        "percentage": None,
+        "partial": True,
+    }
+
+
 def test_session_rejects_a_second_active_turn(tmp_path: Path) -> None:
     """同一 Session 同时只能有一个活跃 Turn，冲突必须返回稳定的 409。"""
     workspace = tmp_path / "workspace"

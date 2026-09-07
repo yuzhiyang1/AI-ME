@@ -79,6 +79,7 @@ from aime.presentation.api.schemas import (
     ProjectResponse,
     RuntimeEventResponse,
     SessionItemResponse,
+    SessionListItemResponse,
     SessionResponse,
     SessionTokenUsageResponse,
     StartTurnRequest,
@@ -310,11 +311,11 @@ def build_router(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
         return SessionResponse.from_domain(session)
 
-    @router.get("/sessions", response_model=list[SessionResponse])
-    async def list_agent_sessions() -> list[SessionResponse]:
+    @router.get("/sessions", response_model=list[SessionListItemResponse])
+    async def list_agent_sessions() -> list[SessionListItemResponse]:
         """按最近活动时间返回会话列表。"""
-        sessions = await list_sessions.execute()
-        return [SessionResponse.from_domain(session) for session in sessions]
+        items = await list_sessions.execute()
+        return [SessionListItemResponse.from_application(item) for item in items]
 
     @router.get(
         "/sessions/{session_id}/usage",

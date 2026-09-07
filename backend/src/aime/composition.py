@@ -144,7 +144,7 @@ def build_container(
         stream_model_completion=StreamModelCompletion(resolved_model_gateway),
         create_session=CreateSession(sessions, projects),
         get_session=GetSession(sessions),
-        list_sessions=ListSessions(sessions),
+        list_sessions=ListSessions(sessions, conversation_store),
         start_turn=StartTurn(conversation_store, runtime_coordinator),
         get_active_turn=GetActiveTurn(conversation_store),
         get_turn_by_client_request=GetTurnByClientRequest(conversation_store),

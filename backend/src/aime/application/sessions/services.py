@@ -1,10 +1,15 @@
 """Agent Session 应用服务。"""
 
+from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
 
 from anyio import to_thread
 
+from aime.application.ports.conversation_store import (
+    ConversationStore,
+    SessionContextUsageSummary,
+)
 from aime.application.projects.services import ProjectNotFound
 from aime.application.sessions.commands import CreateSessionCommand
 from aime.domain.projects.repositories import ProjectRepository
@@ -15,6 +20,14 @@ from aime.domain.sessions.value_objects import SessionId
 
 class SessionNotFound(LookupError):
     """请求的 Session 不存在。"""
+
+
+@dataclass(frozen=True, slots=True)
+class SessionListItem:
+    """会话主体及其侧栏上下文圆环读取投影。"""
+
+    session: AgentSession
+    context_usage: SessionContextUsageSummary
 
 
 class CreateSession:
@@ -85,9 +98,20 @@ class GetSession:
 class ListSessions:
     """按最近活动时间列出所有持久 Session。"""
 
-    def __init__(self, repository: SessionRepository) -> None:
+    def __init__(
+        self,
+        repository: SessionRepository,
+        conversation_store: ConversationStore,
+    ) -> None:
         self._repository = repository
+        self._conversation_store = conversation_store
 
-    async def execute(self) -> list[AgentSession]:
-        """返回用户侧会话列表。"""
-        return await self._repository.list_all()
+    async def execute(self) -> list[SessionListItem]:
+        """一次批量读取会话和上下文摘要，不产生逐会话 usage 请求。"""
+        sessions = await self._repository.list_all()
+        summaries = await self._conversation_store.list_context_usage_summaries()
+        unknown = SessionContextUsageSummary(None, None, None, partial=True)
+        return [
+            SessionListItem(session, summaries.get(session.id.value, unknown))
+            for session in sessions
+        ]

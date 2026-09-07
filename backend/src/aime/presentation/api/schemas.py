@@ -10,8 +10,12 @@ from aime.application.model_configurations.services import (
     CreateModelConfigurationCommand,
     ModelConfigurationView,
 )
-from aime.application.ports.conversation_store import SessionTokenUsage
+from aime.application.ports.conversation_store import (
+    SessionContextUsageSummary,
+    SessionTokenUsage,
+)
 from aime.application.ports.model_gateway import ConversationMessage, MessageRole, ModelDescriptor
+from aime.application.sessions.services import SessionListItem
 from aime.domain.model_configurations.entities import ModelProtocol
 from aime.domain.projects.entities import Project, ProjectRoot
 from aime.domain.sessions.entities import AgentSession, AgentTurn, RuntimeEvent, SessionItem
@@ -268,6 +272,43 @@ class SessionResponse(_CamelCaseModel):
             pinned=session.pinned,
             created_at=session.created_at,
             updated_at=session.updated_at,
+        )
+
+
+class SessionContextUsageResponse(_CamelCaseModel):
+    """侧栏上下文占用圆环的轻量读取模型。"""
+
+    current_context_tokens: int | None
+    context_window: int | None
+    percentage: int | None
+    partial: bool
+
+    @classmethod
+    def from_application(
+        cls,
+        summary: SessionContextUsageSummary,
+    ) -> "SessionContextUsageResponse":
+        """把应用摘要转换为 HTTP DTO。"""
+        return cls(
+            current_context_tokens=summary.current_context_tokens,
+            context_window=summary.context_window,
+            percentage=summary.percentage,
+            partial=summary.partial,
+        )
+
+
+class SessionListItemResponse(SessionResponse):
+    """Session 列表项及其批量上下文摘要。"""
+
+    context_usage: SessionContextUsageResponse
+
+    @classmethod
+    def from_application(cls, item: SessionListItem) -> "SessionListItemResponse":
+        """复用 Session DTO，并追加列表专用上下文摘要。"""
+        session = SessionResponse.from_domain(item.session)
+        return cls(
+            **session.model_dump(),
+            context_usage=SessionContextUsageResponse.from_application(item.context_usage),
         )
 
 
