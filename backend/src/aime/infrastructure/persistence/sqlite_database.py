@@ -169,6 +169,21 @@ approval_grants_table = Table(
     UniqueConstraint("session_id", "tool_name", name="uq_approval_grant_session_tool"),
 )
 
+model_configurations_table = Table(
+    "model_configurations",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("provider", String(64), nullable=False),
+    Column("model_id", String(200), nullable=False),
+    Column("display_name", String(200), nullable=False),
+    Column("protocol", String(32), nullable=False),
+    Column("base_url", String(1000)),
+    Column("context_window", Integer, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("provider", "model_id", name="uq_model_configuration_ref"),
+)
+
 
 class SqliteDatabase:
     """拥有异步 SQLite engine，并统一管理初始化与关闭。"""

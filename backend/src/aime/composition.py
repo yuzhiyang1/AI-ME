@@ -5,8 +5,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from aime.application.approvals.services import DecideApproval, ListPendingApprovals
+from aime.application.model_configurations.services import ModelConfigurationService
 from aime.application.models.services import ListAvailableModels, StreamModelCompletion
 from aime.application.ports.conversation_store import ConversationStore
+from aime.application.ports.model_configuration import ModelCredentialStore
 from aime.application.ports.model_gateway import ModelGateway
 from aime.application.ports.tool_execution import ToolRegistry
 from aime.application.ports.tool_execution_store import ToolExecutionStore
@@ -22,12 +24,17 @@ from aime.application.sessions.turn_services import (
 )
 from aime.application.tools.services import ListToolInvocations
 from aime.application.work_items.services import CreateWorkItem, ListWorkItems
+from aime.infrastructure.credentials.system_keyring import SystemModelCredentialStore
+from aime.infrastructure.llm.configurable_gateway import ConfigurableModelGateway
 from aime.infrastructure.llm.model_gateway_impl import build_gateway_from_env
 from aime.infrastructure.persistence.in_memory_work_item_repository import (
     InMemoryWorkItemRepository,
 )
 from aime.infrastructure.persistence.sqlite_conversation_store import SqliteConversationStore
 from aime.infrastructure.persistence.sqlite_database import SqliteDatabase
+from aime.infrastructure.persistence.sqlite_model_configuration_repository import (
+    SqliteModelConfigurationRepository,
+)
 from aime.infrastructure.persistence.sqlite_session_repository import SqliteSessionRepository
 from aime.infrastructure.persistence.sqlite_tool_execution_store import SqliteToolExecutionStore
 from aime.infrastructure.runtime.approval_broker import InMemoryApprovalBroker
@@ -54,6 +61,7 @@ class Container:
     list_pending_approvals: ListPendingApprovals
     decide_approval: DecideApproval
     list_tool_invocations: ListToolInvocations
+    model_configuration_service: ModelConfigurationService
     runtime_coordinator: RuntimeCoordinator
     conversation_store: ConversationStore
     tool_execution_store: ToolExecutionStore
@@ -62,6 +70,7 @@ class Container:
     async def initialize(self) -> None:
         """初始化需要进程生命周期管理的基础设施。"""
         await self.database.initialize()
+        await self.model_configuration_service.initialize()
         await self.tool_execution_store.recover_unsettled_invocations()
         await self.conversation_store.recover_incomplete_runs()
         for execution in await self.conversation_store.list_resumable_executions():
@@ -77,6 +86,7 @@ def build_container(
     *,
     state_dir: Path | None = None,
     model_gateway: ModelGateway | None = None,
+    model_credential_store: ModelCredentialStore | None = None,
     tool_registry: ToolRegistry | None = None,
 ) -> Container:
     """创建应用所需的依赖图。
@@ -85,9 +95,17 @@ def build_container(
     空模型列表的网关（不加载任何厂商 SDK），其余用例不受影响。
     """
     work_items = InMemoryWorkItemRepository()
-    resolved_model_gateway = model_gateway or build_gateway_from_env()
+    environment_gateway = model_gateway or build_gateway_from_env()
+    resolved_model_gateway = ConfigurableModelGateway(environment_gateway)
     resolved_state_dir = state_dir or _default_state_dir()
     database = SqliteDatabase(resolved_state_dir)
+    model_configurations = SqliteModelConfigurationRepository(database.session_factory)
+    credential_store = model_credential_store or SystemModelCredentialStore()
+    model_configuration_service = ModelConfigurationService(
+        model_configurations,
+        credential_store,
+        resolved_model_gateway,
+    )
     sessions = SqliteSessionRepository(database.session_factory)
     conversation_store = SqliteConversationStore(database.session_factory)
     tool_execution_store = SqliteToolExecutionStore(database.session_factory)
@@ -120,6 +138,7 @@ def build_container(
         list_pending_approvals=ListPendingApprovals(tool_execution_store),
         decide_approval=DecideApproval(tool_execution_store, approval_broker),
         list_tool_invocations=ListToolInvocations(tool_execution_store),
+        model_configuration_service=model_configuration_service,
         runtime_coordinator=runtime_coordinator,
         conversation_store=conversation_store,
         tool_execution_store=tool_execution_store,

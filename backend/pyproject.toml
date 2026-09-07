@@ -12,6 +12,7 @@ dependencies = [
     "alembic>=1.16,<2",
     "anthropic>=0.68,<1",
     "fastapi>=0.116,<1",
+    "keyring>=25,<26",
     "openai>=1.108,<2",
     "pydantic-settings>=2.10,<3",
     "sqlalchemy[asyncio]>=2.0,<3",

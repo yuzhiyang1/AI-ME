@@ -38,6 +38,8 @@ Runtime 内部保留更精细的对象：
 
 ```text
 GET  /api/models
+GET  /api/settings/models
+POST /api/settings/models
 GET  /api/sessions
 POST /api/sessions
 GET  /api/sessions/{sessionId}

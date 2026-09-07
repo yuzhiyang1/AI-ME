@@ -12,6 +12,31 @@ export interface ModelDescriptor {
   contextWindow: number;
 }
 
+export type ModelProtocol = "openai_completions" | "anthropic_messages";
+
+export interface ModelConfiguration {
+  id: string;
+  modelRef: string;
+  provider: string;
+  modelId: string;
+  displayName: string;
+  protocol: ModelProtocol;
+  baseUrl: string | null;
+  contextWindow: number;
+  credentialStored: boolean;
+  createdAt: string;
+}
+
+export interface CreateModelConfigurationInput {
+  provider: string;
+  modelId: string;
+  displayName: string;
+  protocol: ModelProtocol;
+  baseUrl: string | null;
+  apiKey: string;
+  contextWindow: number;
+}
+
 export interface AgentSession {
   id: string;
   title: string;
@@ -157,6 +182,19 @@ export async function listModels(): Promise<ModelDescriptor[]> {
     displayName: model.display_name,
     contextWindow: model.context_window,
   }));
+}
+
+export function listModelConfigurations(): Promise<ModelConfiguration[]> {
+  return request<ModelConfiguration[]>("/api/settings/models");
+}
+
+export function createModelConfiguration(
+  input: CreateModelConfigurationInput,
+): Promise<ModelConfiguration> {
+  return request<ModelConfiguration>("/api/settings/models", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
 }
 
 export function listSessions(): Promise<AgentSession[]> {

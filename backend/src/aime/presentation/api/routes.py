@@ -11,6 +11,10 @@ from fastapi.responses import StreamingResponse
 
 from aime.application.approvals.exceptions import ApprovalAlreadyResolved, ApprovalNotFound
 from aime.application.approvals.services import DecideApproval, ListPendingApprovals
+from aime.application.model_configurations.services import (
+    ModelConfigurationService,
+    ModelCredentialUnavailable,
+)
 from aime.application.models.services import (
     ListAvailableModels,
     StreamModelCompletion,
@@ -53,10 +57,12 @@ from aime.application.work_items.services import CreateWorkItem, ListWorkItems
 from aime.presentation.api.schemas import (
     ApprovalResponse,
     ChatCompletionRequest,
+    CreateModelConfigurationRequest,
     CreateSessionRequest,
     CreateWorkItemRequest,
     DecideApprovalRequest,
     HealthResponse,
+    ModelConfigurationResponse,
     ModelResponse,
     RuntimeEventResponse,
     SessionItemResponse,
@@ -85,6 +91,7 @@ def build_router(
     list_pending_approvals: ListPendingApprovals,
     decide_approval: DecideApproval,
     list_tool_invocations: ListToolInvocations,
+    model_configuration_service: ModelConfigurationService,
 ) -> APIRouter:
     """使用已经装配好的用例创建路由。"""
     router = APIRouter(prefix="/api")
@@ -111,6 +118,44 @@ def build_router(
     async def list_models() -> list[ModelResponse]:
         """列出当前已配置可用的模型（未配 key 的厂商不会出现）。"""
         return [ModelResponse.from_domain(model) for model in list_available_models.execute()]
+
+    @router.get(
+        "/settings/models",
+        response_model=list[ModelConfigurationResponse],
+    )
+    async def list_model_configurations() -> list[ModelConfigurationResponse]:
+        """列出设置页创建的模型配置，响应中永远不包含 API Key。"""
+        try:
+            views = await model_configuration_service.list()
+        except ModelCredentialUnavailable as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from exc
+        return [ModelConfigurationResponse.from_view(view) for view in views]
+
+    @router.post(
+        "/settings/models",
+        response_model=ModelConfigurationResponse,
+        status_code=status.HTTP_201_CREATED,
+    )
+    async def create_model_configuration(
+        payload: CreateModelConfigurationRequest,
+    ) -> ModelConfigurationResponse:
+        """安全保存并立即激活用户新增的模型。"""
+        try:
+            view = await model_configuration_service.create(payload.to_command())
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
+        except ModelCredentialUnavailable as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from exc
+        return ModelConfigurationResponse.from_view(view)
 
     @router.post("/dev/chat/completions")
     async def chat_completions(payload: ChatCompletionRequest) -> StreamingResponse:

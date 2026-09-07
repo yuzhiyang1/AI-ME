@@ -3,10 +3,15 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import AliasGenerator, BaseModel, ConfigDict, Field
+from pydantic import AliasGenerator, BaseModel, ConfigDict, Field, SecretStr
 from pydantic.alias_generators import to_camel
 
+from aime.application.model_configurations.services import (
+    CreateModelConfigurationCommand,
+    ModelConfigurationView,
+)
 from aime.application.ports.model_gateway import ConversationMessage, MessageRole, ModelDescriptor
+from aime.domain.model_configurations.entities import ModelProtocol
 from aime.domain.sessions.entities import AgentSession, AgentTurn, RuntimeEvent, SessionItem
 from aime.domain.sessions.value_objects import (
     PermissionProfile,
@@ -105,6 +110,62 @@ class _CamelCaseModel(BaseModel):
         alias_generator=AliasGenerator(validation_alias=to_camel, serialization_alias=to_camel),
         populate_by_name=True,
     )
+
+
+class CreateModelConfigurationRequest(_CamelCaseModel):
+    """设置页新增一个本地模型配置。"""
+
+    provider: str = Field(min_length=1, max_length=64)
+    model_id: str = Field(min_length=1, max_length=200)
+    display_name: str = Field(min_length=1, max_length=200)
+    protocol: ModelProtocol
+    base_url: str | None = Field(default=None, max_length=1000)
+    api_key: SecretStr
+    context_window: int = Field(gt=0, le=10_000_000)
+
+    def to_command(self) -> CreateModelConfigurationCommand:
+        """只在请求边界提取密钥明文，不让它进入响应模型。"""
+        return CreateModelConfigurationCommand(
+            provider=self.provider,
+            model_id=self.model_id,
+            display_name=self.display_name,
+            protocol=self.protocol,
+            base_url=self.base_url,
+            api_key=self.api_key.get_secret_value(),
+            context_window=self.context_window,
+        )
+
+
+class ModelConfigurationResponse(_CamelCaseModel):
+    """设置页可读取的非敏感模型配置。"""
+
+    id: UUID
+    model_ref: str
+    provider: str
+    model_id: str
+    display_name: str
+    protocol: ModelProtocol
+    base_url: str | None
+    context_window: int
+    credential_stored: bool
+    created_at: datetime
+
+    @classmethod
+    def from_view(cls, view: ModelConfigurationView) -> "ModelConfigurationResponse":
+        """将应用视图转换为明确不含 API Key 的响应。"""
+        configuration = view.configuration
+        return cls(
+            id=configuration.id,
+            model_ref=configuration.model_ref,
+            provider=configuration.provider,
+            model_id=configuration.model_id,
+            display_name=configuration.display_name,
+            protocol=configuration.protocol,
+            base_url=configuration.base_url,
+            context_window=configuration.context_window,
+            credential_stored=view.credential_stored,
+            created_at=configuration.created_at,
+        )
 
 
 class CreateSessionRequest(_CamelCaseModel):

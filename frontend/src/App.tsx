@@ -12,6 +12,7 @@ import {
   ShieldCheck,
   Sparkles,
   Square,
+  X,
 } from "lucide-react";
 import { Fragment, useEffect, useRef, useState } from "react";
 
@@ -22,16 +23,20 @@ import {
   type AgentSession,
   type AgentTurn,
   type ModelDescriptor,
+  type ModelConfiguration,
+  type CreateModelConfigurationInput,
   type PermissionProfile,
   type RuntimeEvent,
   type SessionItem,
   type ToolInvocation,
   createSession,
+  createModelConfiguration,
   decideApproval,
   getActiveTurn,
   getSession,
   interruptTurn,
   listModels,
+  listModelConfigurations,
   listPendingApprovals,
   listSessionItems,
   listSessions,
@@ -87,6 +92,10 @@ function App() {
   const [toolInvocations, setToolInvocations] = useState<ToolInvocation[]>([]);
   const [decidingApprovalId, setDecidingApprovalId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [modelConfigurations, setModelConfigurations] = useState<ModelConfiguration[]>([]);
+  const [settingsLoading, setSettingsLoading] = useState(false);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const streamController = useRef<AbortController | null>(null);
   const activeSessionId = useRef<string | null>(null);
@@ -126,6 +135,40 @@ function App() {
     } finally {
       setLoading(false);
     }
+  }
+
+  async function openSettings() {
+    setSettingsOpen(true);
+    setSettingsLoading(true);
+    setSettingsError(null);
+    try {
+      setModelConfigurations(await listModelConfigurations());
+    } catch (reason) {
+      setSettingsError(messageFrom(reason));
+    } finally {
+      setSettingsLoading(false);
+    }
+  }
+
+  async function saveModelConfiguration(input: CreateModelConfigurationInput) {
+    const configuration = await createModelConfiguration(input);
+    setModelConfigurations((current) => [
+      ...current.filter((item) => item.modelRef !== configuration.modelRef),
+      configuration,
+    ]);
+    const descriptor: ModelDescriptor = {
+      ref: configuration.modelRef,
+      provider: configuration.provider,
+      modelId: configuration.modelId,
+      displayName: configuration.displayName,
+      contextWindow: configuration.contextWindow,
+    };
+    setModels((current) => [
+      ...current.filter((model) => model.ref !== descriptor.ref),
+      descriptor,
+    ]);
+    setModelRef((current) => current || descriptor.ref);
+    return configuration;
   }
 
   async function openSession(session: AgentSession) {
@@ -679,7 +722,9 @@ function App() {
             <span><strong>本地 Runtime</strong><small>数据保存在这台电脑</small></span>
             <span className="online-dot" />
           </div>
-          <button className="settings-row" type="button"><Settings size={15} /> 设置</button>
+          <button className="settings-row" type="button" onClick={() => void openSettings()}>
+            <Settings size={15} /> 设置
+          </button>
         </div>
       </aside>
 
@@ -796,9 +841,20 @@ function App() {
             onModelChange={setModelRef}
             onPermissionChange={setPermissionProfile}
             onSubmit={() => void submitSession()}
+            onOpenSettings={() => void openSettings()}
           />
         )}
       </main>
+
+      {settingsOpen ? (
+        <ModelSettingsDialog
+          configurations={modelConfigurations}
+          loading={settingsLoading}
+          loadError={settingsError}
+          onClose={() => setSettingsOpen(false)}
+          onCreate={saveModelConfiguration}
+        />
+      ) : null}
     </div>
   );
 }
@@ -910,6 +966,7 @@ interface NewSessionPanelProps {
   onModelChange: (value: string) => void;
   onPermissionChange: (value: PermissionProfile) => void;
   onSubmit: () => void;
+  onOpenSettings: () => void;
 }
 
 function NewSessionPanel(props: NewSessionPanelProps) {
@@ -960,13 +1017,206 @@ function NewSessionPanel(props: NewSessionPanelProps) {
           </div>
         </div>
 
-        {props.models.length === 0 ? <p className="model-guidance">请先在后端环境中配置一个 AIME_*_API_KEY，然后重新启动应用。</p> : null}
+        {props.models.length === 0 ? (
+          <p className="model-guidance">
+            还没有可用模型。<button type="button" onClick={props.onOpenSettings}>打开模型设置</button>
+            ，保存后即可创建会话。
+          </p>
+        ) : null}
         {props.error ? <div className="inline-error"><CircleAlert size={14} />{props.error}</div> : null}
         <button className="create-session-button" type="button" disabled={!canCreate} onClick={props.onSubmit}>
           {props.creating ? "正在创建…" : "创建会话"}<Send size={15} />
         </button>
       </div>
     </section>
+  );
+}
+
+type ModelPresetId = "deepseek" | "openai" | "anthropic" | "custom";
+
+interface ModelPreset {
+  provider: string;
+  modelId: string;
+  displayName: string;
+  protocol: CreateModelConfigurationInput["protocol"];
+  baseUrl: string;
+  contextWindow: number;
+}
+
+const modelPresets: Record<ModelPresetId, ModelPreset> = {
+  deepseek: {
+    provider: "deepseek",
+    modelId: "deepseek-chat",
+    displayName: "DeepSeek Chat",
+    protocol: "openai_completions",
+    baseUrl: "https://api.deepseek.com/v1",
+    contextWindow: 128000,
+  },
+  openai: {
+    provider: "openai",
+    modelId: "gpt-4o",
+    displayName: "GPT-4o",
+    protocol: "openai_completions",
+    baseUrl: "",
+    contextWindow: 128000,
+  },
+  anthropic: {
+    provider: "anthropic",
+    modelId: "claude-sonnet-4-5",
+    displayName: "Claude Sonnet 4.5",
+    protocol: "anthropic_messages",
+    baseUrl: "",
+    contextWindow: 200000,
+  },
+  custom: {
+    provider: "custom",
+    modelId: "",
+    displayName: "",
+    protocol: "openai_completions",
+    baseUrl: "http://127.0.0.1:11434/v1",
+    contextWindow: 128000,
+  },
+};
+
+function ModelSettingsDialog({
+  configurations,
+  loading,
+  loadError,
+  onClose,
+  onCreate,
+}: {
+  configurations: ModelConfiguration[];
+  loading: boolean;
+  loadError: string | null;
+  onClose: () => void;
+  onCreate: (input: CreateModelConfigurationInput) => Promise<ModelConfiguration>;
+}) {
+  const [presetId, setPresetId] = useState<ModelPresetId>("deepseek");
+  const [form, setForm] = useState<ModelPreset>(modelPresets.deepseek);
+  const [apiKey, setApiKey] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+
+  function choosePreset(value: ModelPresetId) {
+    setPresetId(value);
+    setForm(modelPresets[value]);
+    setFormError(null);
+    setSuccess(null);
+  }
+
+  function updateForm<K extends keyof ModelPreset>(key: K, value: ModelPreset[K]) {
+    setForm((current) => ({ ...current, [key]: value }));
+  }
+
+  async function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSaving(true);
+    setFormError(null);
+    setSuccess(null);
+    try {
+      const saved = await onCreate({
+        provider: form.provider,
+        modelId: form.modelId,
+        displayName: form.displayName,
+        protocol: form.protocol,
+        baseUrl: form.baseUrl.trim() || null,
+        apiKey,
+        contextWindow: form.contextWindow,
+      });
+      setApiKey("");
+      setSuccess(`${saved.displayName} 已可用于新会话`);
+    } catch (reason) {
+      setFormError(messageFrom(reason));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="settings-overlay" role="presentation">
+      <section className="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="model-settings-title">
+        <header>
+          <div>
+            <small>LOCAL MODEL ACCESS</small>
+            <h2 id="model-settings-title">模型配置</h2>
+            <p>新增模型后立即生效，不需要环境变量或重启应用。</p>
+          </div>
+          <button type="button" aria-label="关闭设置" onClick={onClose}><X size={17} /></button>
+        </header>
+
+        <div className="settings-content">
+          <div className="configured-models">
+            <h3>已配置模型</h3>
+            {loading ? <p>正在读取本机配置…</p> : null}
+            {!loading && configurations.length === 0 ? <p>还没有通过设置添加模型。</p> : null}
+            {configurations.map((configuration) => (
+              <div className="configured-model-row" key={configuration.id}>
+                <span><strong>{configuration.displayName}</strong><small>{configuration.modelRef}</small></span>
+                <i className={configuration.credentialStored ? "available" : ""}>
+                  {configuration.credentialStored ? "可用" : "密钥缺失"}
+                </i>
+              </div>
+            ))}
+            {loadError ? <div className="inline-error"><CircleAlert size={14} />{loadError}</div> : null}
+          </div>
+
+          <form className="model-config-form" onSubmit={(event) => void submit(event)}>
+            <h3>新增模型</h3>
+            <label>
+              <span>服务商预设</span>
+              <select value={presetId} onChange={(event) => choosePreset(event.target.value as ModelPresetId)}>
+                <option value="deepseek">DeepSeek</option>
+                <option value="openai">OpenAI</option>
+                <option value="anthropic">Anthropic</option>
+                <option value="custom">OpenAI 兼容服务</option>
+              </select>
+            </label>
+            <div className="settings-form-grid">
+              <label>
+                <span>厂商标识</span>
+                <input value={form.provider} onChange={(event) => updateForm("provider", event.target.value)} required />
+              </label>
+              <label>
+                <span>协议</span>
+                <select value={form.protocol} onChange={(event) => updateForm("protocol", event.target.value as ModelPreset["protocol"])}>
+                  <option value="openai_completions">OpenAI Chat Completions</option>
+                  <option value="anthropic_messages">Anthropic Messages</option>
+                </select>
+              </label>
+              <label>
+                <span>模型 ID</span>
+                <input value={form.modelId} onChange={(event) => updateForm("modelId", event.target.value)} required />
+              </label>
+              <label>
+                <span>显示名称</span>
+                <input value={form.displayName} onChange={(event) => updateForm("displayName", event.target.value)} required />
+              </label>
+            </div>
+            <label>
+              <span>API 地址 <i>官方地址可留空</i></span>
+              <input value={form.baseUrl} onChange={(event) => updateForm("baseUrl", event.target.value)} placeholder="https://api.example.com/v1" />
+            </label>
+            <div className="settings-form-grid api-key-row">
+              <label>
+                <span>API Key</span>
+                <input type="password" autoComplete="new-password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} required />
+              </label>
+              <label>
+                <span>上下文窗口</span>
+                <input type="number" min="1" max="10000000" value={form.contextWindow} onChange={(event) => updateForm("contextWindow", Number(event.target.value))} required />
+              </label>
+            </div>
+            <p className="credential-note"><ShieldCheck size={14} />API Key 保存到 Windows 凭据保险库，页面和接口均不会再次显示明文。</p>
+            {formError ? <div className="inline-error"><CircleAlert size={14} />{formError}</div> : null}
+            {success ? <p className="settings-success">{success}</p> : null}
+            <button className="save-model-button" type="submit" disabled={saving}>
+              {saving ? "正在保存…" : "保存并启用"}
+            </button>
+          </form>
+        </div>
+      </section>
+    </div>
   );
 }
 

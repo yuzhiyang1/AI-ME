@@ -8,6 +8,7 @@ from alembic.config import Config
 
 _PREVIEW_BASE_REVISION = "0001_agent_sessions"
 _PREVIEW_TOOL_REVISION = "0003_tool_execution_ledger"
+_PREVIEW_MODEL_REVISION = "0004_model_configurations"
 _BASE_APP_TABLES = {
     "agent_sessions",
     "agent_turns",
@@ -16,7 +17,8 @@ _BASE_APP_TABLES = {
     "session_items",
 }
 _TOOL_APP_TABLES = {"tool_invocations", "approval_requests", "approval_grants"}
-_APP_TABLES = _BASE_APP_TABLES | _TOOL_APP_TABLES
+_MODEL_APP_TABLES = {"model_configurations"}
+_APP_TABLES = _BASE_APP_TABLES | _TOOL_APP_TABLES | _MODEL_APP_TABLES
 _EXPECTED_COLUMNS: dict[str, dict[str, tuple[str, int | None]]] = {
     "agent_sessions": {
         "id": ("VARCHAR(36)", 1),
@@ -112,6 +114,17 @@ _EXPECTED_COLUMNS: dict[str, dict[str, tuple[str, int | None]]] = {
         "approval_id": ("VARCHAR(36)", 1),
         "created_at": ("DATETIME", 1),
     },
+    "model_configurations": {
+        "id": ("VARCHAR(36)", 1),
+        "provider": ("VARCHAR(64)", 1),
+        "model_id": ("VARCHAR(200)", 1),
+        "display_name": ("VARCHAR(200)", 1),
+        "protocol": ("VARCHAR(32)", 1),
+        "base_url": ("VARCHAR(1000)", 0),
+        "context_window": ("INTEGER", 1),
+        "created_at": ("DATETIME", 1),
+        "updated_at": ("DATETIME", 1),
+    },
 }
 _REQUIRED_UNIQUE_COLUMNS: dict[str, set[tuple[str, ...]]] = {
     "agent_turns": {("session_id", "client_request_id")},
@@ -124,6 +137,7 @@ _REQUIRED_UNIQUE_COLUMNS: dict[str, set[tuple[str, ...]]] = {
     },
     "approval_requests": {("invocation_id",)},
     "approval_grants": {("session_id", "tool_name")},
+    "model_configurations": {("provider", "model_id")},
 }
 _REQUIRED_FOREIGN_KEYS: dict[str, set[tuple[str, str, str, str]]] = {
     "agent_turns": {("session_id", "agent_sessions", "id", "CASCADE")},
@@ -208,17 +222,21 @@ def _adopt_preview_database(database_path: Path, config: Config) -> None:
         if present_tool_tables and present_tool_tables != _TOOL_APP_TABLES:
             missing_tools = _TOOL_APP_TABLES - present_tool_tables
             raise RuntimeError(f"未版本化状态库工具账本不完整，缺少：{sorted(missing_tools)}")
-        validated_tables = _BASE_APP_TABLES | present_tool_tables
+        present_model_tables = tables & _MODEL_APP_TABLES
+        if present_model_tables and present_tool_tables != _TOOL_APP_TABLES:
+            raise RuntimeError("未版本化状态库含模型配置，但缺少其之前版本的工具账本")
+        validated_tables = _BASE_APP_TABLES | present_tool_tables | present_model_tables
         _validate_columns(connection, validated_tables)
         _validate_unique_constraints(connection, validated_tables)
         _validate_foreign_keys(connection, validated_tables)
         _validate_existing_rows(connection)
         _ensure_active_turn_index(connection)
-    preview_revision = (
-        _PREVIEW_TOOL_REVISION
-        if present_tool_tables == _TOOL_APP_TABLES
-        else _PREVIEW_BASE_REVISION
-    )
+    if present_model_tables == _MODEL_APP_TABLES:
+        preview_revision = _PREVIEW_MODEL_REVISION
+    elif present_tool_tables == _TOOL_APP_TABLES:
+        preview_revision = _PREVIEW_TOOL_REVISION
+    else:
+        preview_revision = _PREVIEW_BASE_REVISION
     command.stamp(config, preview_revision)
     command.upgrade(config, "head")
 

@@ -55,6 +55,7 @@ def create_app(
             resolved_container.list_pending_approvals,
             resolved_container.decide_approval,
             resolved_container.list_tool_invocations,
+            resolved_container.model_configuration_service,
         ),
     )
     resolved_frontend_dist = (

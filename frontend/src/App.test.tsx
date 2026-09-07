@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession, AgentTurn, SessionItem } from "./api";
 
 const api = vi.hoisted(() => ({
+  createModelConfiguration: vi.fn(),
   createSession: vi.fn(),
   decideApproval: vi.fn(),
   getActiveTurn: vi.fn(),
@@ -14,6 +15,7 @@ const api = vi.hoisted(() => ({
   getTurnByClientRequest: vi.fn(),
   interruptTurn: vi.fn(),
   listModels: vi.fn(),
+  listModelConfigurations: vi.fn(),
   listPendingApprovals: vi.fn(),
   listSessionItems: vi.fn(),
   listSessions: vi.fn(),
@@ -62,6 +64,7 @@ describe("会话页面异步隔离", () => {
         contextWindow: 32_000,
       },
     ]);
+    api.listModelConfigurations.mockResolvedValue([]);
     api.getSession.mockImplementation(async (sessionId: string) =>
       sessionId === sessionA.id ? sessionA : sessionB,
     );
@@ -112,6 +115,43 @@ describe("会话页面异步隔离", () => {
       ),
     );
     await waitFor(() => expect(screen.queryByText("工具执行需要你的确认")).toBeNull());
+  });
+
+  it("可以在设置中新增模型并立即进入可用模型列表", async () => {
+    api.listSessions.mockResolvedValue([]);
+    api.listModels.mockResolvedValue([]);
+    api.createModelConfiguration.mockResolvedValue({
+      id: "model-config-1",
+      modelRef: "deepseek/deepseek-chat",
+      provider: "deepseek",
+      modelId: "deepseek-chat",
+      displayName: "DeepSeek Chat",
+      protocol: "openai_completions",
+      baseUrl: "https://api.deepseek.com/v1",
+      contextWindow: 128000,
+      credentialStored: true,
+      createdAt: "2026-09-07T00:00:00Z",
+    });
+
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "设置" }));
+    await screen.findByRole("heading", { name: "模型配置" });
+    await user.type(screen.getByLabelText("API Key"), "sk-local-secret");
+    await user.click(screen.getByRole("button", { name: "保存并启用" }));
+
+    await waitFor(() =>
+      expect(api.createModelConfiguration).toHaveBeenCalledWith({
+        provider: "deepseek",
+        modelId: "deepseek-chat",
+        displayName: "DeepSeek Chat",
+        protocol: "openai_completions",
+        baseUrl: "https://api.deepseek.com/v1",
+        apiKey: "sk-local-secret",
+        contextWindow: 128000,
+      }),
+    );
+    expect(await screen.findByText("DeepSeek Chat 已可用于新会话")).toBeTruthy();
   });
 
   it("重新打开会话时在对应用户消息后恢复工具审计记录", async () => {
