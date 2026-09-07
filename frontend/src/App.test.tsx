@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   AgentSession,
   AgentTurn,
+  Project,
   RuntimeEvent,
   SessionItem,
   SessionTokenUsage,
@@ -15,8 +16,10 @@ import type {
 
 const api = vi.hoisted(() => ({
   createModelConfiguration: vi.fn(),
+  createProject: vi.fn(),
   createSession: vi.fn(),
   decideApproval: vi.fn(),
+  deleteProject: vi.fn(),
   getActiveTurn: vi.fn(),
   getSession: vi.fn(),
   getSessionUsage: vi.fn(),
@@ -25,11 +28,13 @@ const api = vi.hoisted(() => ({
   listModels: vi.fn(),
   listModelConfigurations: vi.fn(),
   listPendingApprovals: vi.fn(),
+  listProjects: vi.fn(),
   listSessionItems: vi.fn(),
   listSessions: vi.fn(),
   listToolInvocations: vi.fn(),
   startTurn: vi.fn(),
   streamRuntimeEvents: vi.fn(),
+  updateProject: vi.fn(),
 }));
 
 vi.mock("./api", () => {
@@ -45,6 +50,17 @@ import App from "./App";
 
 const sessionA = session("session-a", "会话 A");
 const sessionB = session("session-b", "会话 B");
+const projectA: Project = {
+  id: "project-a",
+  name: "AI-ME",
+  roots: [
+    { path: "D:\\workspac\\AI-ME", position: 0, primary: true },
+    { path: "D:\\workspac\\maka", position: 1, primary: false },
+  ],
+  position: 0,
+  createdAt: "2026-09-07T00:00:00Z",
+  updatedAt: "2026-09-07T00:00:00Z",
+};
 const acceptedTurn: AgentTurn = {
   id: "turn-a",
   sessionId: sessionA.id,
@@ -59,6 +75,7 @@ const itemB = item("item-b", sessionB.id, "B 的消息");
 describe("会话页面异步隔离", () => {
   afterEach(() => {
     cleanup();
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
 
@@ -66,6 +83,7 @@ describe("会话页面异步隔离", () => {
     vi.clearAllMocks();
     Element.prototype.scrollIntoView = vi.fn();
     api.listSessions.mockResolvedValue([sessionA, sessionB]);
+    api.listProjects.mockResolvedValue([]);
     api.listModels.mockResolvedValue([
       {
         ref: "qa/model",
@@ -245,6 +263,45 @@ describe("会话页面异步隔离", () => {
     expect(await screen.findByText("DeepSeek Chat 已可用于新会话")).toBeTruthy();
   });
 
+  it("可以创建多目录项目并从项目下创建会话", async () => {
+    api.listSessions.mockResolvedValueOnce([]).mockResolvedValue([]);
+    api.listProjects.mockResolvedValueOnce([]).mockResolvedValue([projectA]);
+    api.createProject.mockResolvedValue(projectA);
+    const projectSession = {
+      ...session("project-session", "新任务"),
+      projectId: projectA.id,
+      workspacePath: projectA.roots[0].path,
+      workspaceRoots: projectA.roots.map((root) => root.path),
+    };
+    api.createSession.mockResolvedValue(projectSession);
+    api.getSession.mockResolvedValue(projectSession);
+    api.listSessionItems.mockResolvedValue([]);
+    vi.spyOn(window, "prompt").mockReturnValue("D:\\workspac\\AI-ME");
+
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole("button", { name: "新增项目" }));
+    await user.type(screen.getByRole("textbox", { name: "项目名称" }), "AI-ME");
+    await user.click(screen.getByRole("button", { name: "添加文件夹" }));
+    await user.click(screen.getByRole("button", { name: "保存项目" }));
+
+    await waitFor(() => expect(api.createProject).toHaveBeenCalledWith(
+      { name: "AI-ME", roots: ["D:\\workspac\\AI-ME"] },
+      expect.any(String),
+    ));
+    await user.click(await screen.findByRole("button", { name: "在 AI-ME 中新建会话" }));
+    expect(screen.getByRole("group", { name: "AI-ME 会话目录" }).textContent).toContain(
+      "D:\\workspac\\maka",
+    );
+    await user.click(screen.getByRole("button", { name: "创建会话" }));
+
+    await waitFor(() => expect(api.createSession).toHaveBeenCalledWith({
+      projectId: projectA.id,
+      defaultModel: "qa/model",
+      permissionProfile: "workspace_write",
+    }));
+  });
+
   it("按模型步骤展示并行工具，已完成步骤默认折叠且可以展开审计明细", async () => {
     api.listSessionItems.mockResolvedValue([itemA]);
     api.listToolInvocations.mockResolvedValue([
@@ -324,6 +381,10 @@ describe("会话页面异步隔离", () => {
     const progress = screen.getByRole("progressbar", { name: "上下文占用" });
     expect(progress.getAttribute("aria-valuenow")).toBe("56");
     expect(progress.getAttribute("aria-valuetext")).toBe("18,000 / 32,000 Token");
+    expect(
+      screen.getByRole("progressbar", { name: "会话 A上下文占用" })
+        .getAttribute("aria-valuenow"),
+    ).toBe("56");
   });
 
   it("模型没有返回用量时明确提示统计不完整", async () => {
@@ -532,7 +593,9 @@ function session(id: string, title: string): AgentSession {
   return {
     id,
     title,
+    projectId: null,
     workspacePath: `D:\\workspace\\${id}`,
+    workspaceRoots: [`D:\\workspace\\${id}`],
     defaultModel: "qa/model",
     permissionProfile: "workspace_write",
     lifecycle: "active",

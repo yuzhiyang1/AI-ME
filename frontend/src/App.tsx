@@ -4,8 +4,6 @@ import {
   CircleAlert,
   Folder,
   FolderOpen,
-  MessageSquare,
-  PanelLeft,
   Plus,
   Send,
   Settings,
@@ -26,13 +24,16 @@ import {
   type ModelConfiguration,
   type CreateModelConfigurationInput,
   type PermissionProfile,
+  type Project,
   type RuntimeEvent,
   type SessionItem,
   type SessionTokenUsage,
   type ToolInvocation,
   createSession,
+  createProject,
   createModelConfiguration,
   decideApproval,
+  deleteProject,
   getActiveTurn,
   getSession,
   getSessionUsage,
@@ -40,10 +41,12 @@ import {
   listModels,
   listModelConfigurations,
   listPendingApprovals,
+  listProjects,
   listSessionItems,
   listSessions,
   listToolInvocations,
   streamRuntimeEvents,
+  updateProject,
 } from "./api";
 import {
   TurnRequestUncertainError,
@@ -54,6 +57,8 @@ import {
 import { MarkdownContent } from "./MarkdownContent";
 import { StreamingMarkdown } from "./StreamingMarkdown";
 import { SessionUsageBar } from "./SessionUsageBar";
+import { ProjectDialog } from "./ProjectDialog";
+import { SessionSidebar } from "./SessionSidebar";
 import { ToolStepTimeline } from "./ToolStepTimeline";
 
 const permissionLabels: Record<PermissionProfile, string> = {
@@ -66,11 +71,6 @@ function BrandMark() {
   return <span className="brand-mark">ME</span>;
 }
 
-function shortWorkspace(path: string) {
-  const parts = path.replaceAll("\\", "/").split("/").filter(Boolean);
-  return parts.at(-1) ?? path;
-}
-
 function itemText(item: SessionItem) {
   const value = item.type === "error" ? item.content.message : item.content.text;
   return typeof value === "string" ? value : "";
@@ -79,6 +79,7 @@ function itemText(item: SessionItem) {
 function App() {
   const isDesktop = window.aiMeDesktop?.mode === "desktop";
   const [sessions, setSessions] = useState<AgentSession[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
   const [models, setModels] = useState<ModelDescriptor[]>([]);
   const [activeSession, setActiveSession] = useState<AgentSession | null>(null);
   const [items, setItems] = useState<SessionItem[]>([]);
@@ -105,6 +106,9 @@ function App() {
   const [settingsLoading, setSettingsLoading] = useState(false);
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [newSessionProject, setNewSessionProject] = useState<Project | null>(null);
+  const [projectDialogOpen, setProjectDialogOpen] = useState(false);
+  const [editingProject, setEditingProject] = useState<Project | null>(null);
   const streamController = useRef<AbortController | null>(null);
   const liveAnswerRef = useRef("");
   const liveAnswerDrainRef = useRef<(() => void) | null>(null);
@@ -121,6 +125,7 @@ function App() {
   const requestControllers = useRef(new Map<string, AbortController>());
   const settlingRequestKeys = useRef(new Map<string, string>());
   const timelineEnd = useRef<HTMLDivElement | null>(null);
+  const projectCreateKey = useRef(crypto.randomUUID());
 
   useEffect(() => {
     void bootstrap();
@@ -138,16 +143,25 @@ function App() {
 
   async function bootstrap() {
     setLoading(true);
+    const [projectResult, sessionResult, modelResult] = await Promise.allSettled([
+        listProjects(),
+        listSessions(),
+        listModels(),
+    ]);
     try {
-      const [loadedSessions, loadedModels] = await Promise.all([listSessions(), listModels()]);
-      setSessions(loadedSessions);
-      setModels(loadedModels);
-      setModelRef(loadedModels[0]?.ref ?? "");
-      if (loadedSessions[0]) {
-        await openSession(loadedSessions[0]);
+      if (projectResult.status === "fulfilled") setProjects(projectResult.value);
+      if (modelResult.status === "fulfilled") {
+        setModels(modelResult.value);
+        setModelRef(modelResult.value[0]?.ref ?? "");
       }
-    } catch (reason) {
-      setError(messageFrom(reason));
+      if (sessionResult.status === "fulfilled") {
+        setSessions(sessionResult.value);
+        if (sessionResult.value[0]) await openSession(sessionResult.value[0]);
+      }
+      const failures = [projectResult, sessionResult, modelResult]
+        .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+        .map((result) => messageFrom(result.reason));
+      if (failures.length > 0) setError(failures.join("；"));
     } finally {
       setLoading(false);
     }
@@ -185,6 +199,52 @@ function App() {
     ]);
     setModelRef((current) => current || descriptor.ref);
     return configuration;
+  }
+
+  function showProjectDialog(project: Project | null) {
+    setEditingProject(project);
+    if (project === null) projectCreateKey.current = crypto.randomUUID();
+    setProjectDialogOpen(true);
+  }
+
+  async function saveProject(input: { name: string; roots: string[] }) {
+    if (editingProject) {
+      await updateProject(editingProject.id, input);
+    } else {
+      await createProject(input, projectCreateKey.current);
+    }
+    setProjects(await listProjects());
+    setProjectDialogOpen(false);
+    setEditingProject(null);
+  }
+
+  async function removeProject(project: Project) {
+    const confirmed = window.confirm(
+      "删除项目后，其中的会话会移到任务，历史消息与运行记录不会删除。",
+    );
+    if (!confirmed) return;
+    setError(null);
+    try {
+      await deleteProject(project.id);
+      const [loadedProjects, loadedSessions] = await Promise.all([
+        listProjects(),
+        listSessions(),
+      ]);
+      setProjects(loadedProjects);
+      setSessions(loadedSessions);
+      setActiveSession((current) =>
+        current?.projectId === project.id ? { ...current, projectId: null } : current,
+      );
+    } catch (reason) {
+      setError(messageFrom(reason));
+    }
+  }
+
+  async function chooseProjectFolder() {
+    const selected = await window.aiMeDesktop?.selectWorkspace();
+    if (selected) return selected;
+    if (!isDesktop) return window.prompt("输入文件夹绝对路径")?.trim() || null;
+    return null;
   }
 
   async function openSession(session: AgentSession) {
@@ -254,6 +314,7 @@ function App() {
       setApprovals(pendingApprovals);
       setToolInvocations(loadedInvocations);
       setSessionUsage(loadedUsage);
+      updateSidebarUsage(session.id, loadedUsage);
       setConfirmingRequest(hasInFlightRequest && activeTurn === null);
       setSettlingRequest(hasSettlingRequest);
       setSessionLoading(false);
@@ -479,10 +540,38 @@ function App() {
   async function refreshSessionUsage(sessionId: string, viewGeneration: number) {
     try {
       const usage = await getSessionUsage(sessionId);
-      if (isCurrentSessionView(sessionId, viewGeneration)) setSessionUsage(usage);
+      if (isCurrentSessionView(sessionId, viewGeneration)) {
+        setSessionUsage(usage);
+        updateSidebarUsage(sessionId, usage);
+      }
     } catch (reason) {
       if (isCurrentSessionView(sessionId, viewGeneration)) setError(messageFrom(reason));
     }
+  }
+
+  function updateSidebarUsage(sessionId: string, usage: SessionTokenUsage) {
+    const sessionModel = sessions.find((session) => session.id === sessionId)?.defaultModel;
+    const contextWindow = usage.contextWindow
+      ?? models.find((model) => model.ref === sessionModel)?.contextWindow
+      ?? null;
+    const current = usage.currentContextTokens;
+    const percentage =
+      current !== null && contextWindow !== null && contextWindow > 0
+        ? Math.min(100, Math.round((current / contextWindow) * 100))
+        : null;
+    setSessions((items) => items.map((session) =>
+      session.id === sessionId
+        ? {
+            ...session,
+            contextUsage: {
+              currentContextTokens: current,
+              contextWindow,
+              percentage,
+              partial: usage.unreportedSteps > 0 || usage.untrackedHistory,
+            },
+          }
+        : session,
+    ));
   }
 
   async function resolveApproval(approval: ApprovalRequest, decision: ApprovalDecision) {
@@ -736,17 +825,26 @@ function App() {
   }
 
   async function submitSession() {
-    if (!workspacePath.trim() || !modelRef || creating) return;
+    if ((!newSessionProject && !workspacePath.trim()) || !modelRef || creating) return;
     setCreating(true);
     setError(null);
     try {
-      const created = await createSession({
-        workspacePath: workspacePath.trim(),
-        defaultModel: modelRef,
-        permissionProfile,
-      });
+      const created = await createSession(
+        newSessionProject
+          ? {
+              projectId: newSessionProject.id,
+              defaultModel: modelRef,
+              permissionProfile,
+            }
+          : {
+              workspacePath: workspacePath.trim(),
+              defaultModel: modelRef,
+              permissionProfile,
+            },
+      );
       setSessions(await listSessions());
       setWorkspacePath("");
+      setNewSessionProject(null);
       await openSession(created);
     } catch (reason) {
       setError(messageFrom(reason));
@@ -760,7 +858,7 @@ function App() {
     if (selected) setWorkspacePath(selected);
   }
 
-  function showNewSession() {
+  function showNewSession(project: Project | null = null) {
     sessionViewGeneration.current += 1;
     streamController.current?.abort();
     const previousSessionId = activeSessionId.current;
@@ -777,6 +875,8 @@ function App() {
     setSessionLoading(false);
     setSending(false);
     setError(null);
+    setNewSessionProject(project);
+    if (project === null) setWorkspacePath("");
   }
 
   return (
@@ -791,28 +891,22 @@ function App() {
       <aside className="session-sidebar">
         <div className="sidebar-head">
           {!isDesktop ? <div className="web-brand"><BrandMark /><strong>AI-ME</strong></div> : null}
-          <button className="new-session-button" type="button" onClick={showNewSession}>
+          <button className="new-session-button" type="button" onClick={() => showNewSession()}>
             <Plus size={16} /> 新对话
           </button>
         </div>
 
-        <div className="session-section-label"><span>会话</span><PanelLeft size={14} /></div>
-        <nav className="session-list" aria-label="Agent 会话">
-          {loading ? <p className="sidebar-hint">正在恢复本地会话…</p> : null}
-          {!loading && sessions.length === 0 ? <p className="sidebar-hint">还没有会话，从新对话开始。</p> : null}
-          {sessions.map((session) => (
-            <button
-              className={`session-row${activeSession?.id === session.id ? " is-active" : ""}`}
-              key={session.id}
-              type="button"
-              onClick={() => void openSession(session)}
-            >
-              <span className="session-icon"><MessageSquare size={14} /></span>
-              <span className="session-copy"><strong>{session.title}</strong><small>{shortWorkspace(session.workspacePath)}</small></span>
-              {session.activity !== "idle" ? <span className="running-dot" /> : null}
-            </button>
-          ))}
-        </nav>
+        <SessionSidebar
+          projects={projects}
+          sessions={sessions}
+          activeSessionId={activeSession?.id ?? null}
+          loading={loading}
+          onOpenSession={(session) => void openSession(session)}
+          onCreateProject={() => showProjectDialog(null)}
+          onEditProject={(project) => showProjectDialog(project)}
+          onDeleteProject={(project) => void removeProject(project)}
+          onCreateSession={(project) => showNewSession(project)}
+        />
 
         <div className="sidebar-foot">
           <div className="runtime-state">
@@ -949,6 +1043,7 @@ function App() {
             modelRef={modelRef}
             permissionProfile={permissionProfile}
             creating={creating}
+            project={newSessionProject}
             onWorkspaceChange={setWorkspacePath}
             onChooseWorkspace={() => void chooseWorkspace()}
             onModelChange={setModelRef}
@@ -968,6 +1063,13 @@ function App() {
           onCreate={saveModelConfiguration}
         />
       ) : null}
+      <ProjectDialog
+        open={projectDialogOpen}
+        project={editingProject}
+        onClose={() => setProjectDialogOpen(false)}
+        onChooseFolder={chooseProjectFolder}
+        onSave={saveProject}
+      />
     </div>
   );
 }
@@ -1058,6 +1160,7 @@ interface NewSessionPanelProps {
   modelRef: string;
   permissionProfile: PermissionProfile;
   creating: boolean;
+  project: Project | null;
   onWorkspaceChange: (value: string) => void;
   onChooseWorkspace: () => void;
   onModelChange: (value: string) => void;
@@ -1067,30 +1170,50 @@ interface NewSessionPanelProps {
 }
 
 function NewSessionPanel(props: NewSessionPanelProps) {
-  const canCreate = Boolean(props.workspacePath.trim() && props.modelRef && !props.creating);
+  const canCreate = Boolean(
+    (props.project || props.workspacePath.trim()) && props.modelRef && !props.creating,
+  );
   return (
     <section className="new-session-view">
       <div className="new-session-card">
         <span className="new-session-mark"><Bot size={25} /></span>
         <div className="new-session-heading">
-          <span>LOCAL AGENT SESSION</span>
-          <h1>开始一段新的工作会话</h1>
-          <p>会话会固定绑定一个本地工作区，消息、运行事件与恢复状态都保存在本机。</p>
+          <span>{props.project ? "PROJECT AGENT SESSION" : "LOCAL AGENT SESSION"}</span>
+          <h1>{props.project ? `在 ${props.project.name} 中开始会话` : "开始一段新的工作会话"}</h1>
+          <p>
+            {props.project
+              ? "会话会复制项目当前的目录配置；以后编辑项目不会改变这次会话的运行快照。"
+              : "独立会话不绑定项目，但仍会固定一个本地工作区，运行状态只保存在本机。"}
+          </p>
         </div>
 
         <div className="session-form">
-          <label>
-            <span>工作区</span>
-            <div className="workspace-field">
-              <FolderOpen size={16} />
-              <input
-                value={props.workspacePath}
-                onChange={(event) => props.onWorkspaceChange(event.target.value)}
-                placeholder="选择或输入一个已存在的目录"
-              />
-              {props.isDesktop ? <button type="button" onClick={props.onChooseWorkspace}>选择</button> : null}
+          {props.project ? (
+            <div className="session-project-roots" role="group" aria-label={`${props.project.name} 会话目录`}>
+              <span>项目目录</span>
+              {props.project.roots.map((root) => (
+                <div key={root.path} title={root.path}>
+                  <FolderOpen size={14} />
+                  <span>{root.path}</span>
+                  {root.primary ? <em>主要</em> : null}
+                </div>
+              ))}
             </div>
-          </label>
+          ) : (
+            <label>
+              <span>工作区</span>
+              <div className="workspace-field">
+                <FolderOpen size={16} />
+                <input
+                  aria-label="独立会话工作区"
+                  value={props.workspacePath}
+                  onChange={(event) => props.onWorkspaceChange(event.target.value)}
+                  placeholder="选择或输入一个已存在的目录"
+                />
+                {props.isDesktop ? <button type="button" onClick={props.onChooseWorkspace}>选择</button> : null}
+              </div>
+            </label>
+          )}
 
           <div className="form-grid">
             <label>

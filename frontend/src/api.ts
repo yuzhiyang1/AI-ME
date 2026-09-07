@@ -40,7 +40,9 @@ export interface CreateModelConfigurationInput {
 export interface AgentSession {
   id: string;
   title: string;
+  projectId: string | null;
   workspacePath: string;
+  workspaceRoots: string[];
   defaultModel: string;
   permissionProfile: PermissionProfile;
   lifecycle: "active" | "archived";
@@ -48,6 +50,34 @@ export interface AgentSession {
   pinned: boolean;
   createdAt: string;
   updatedAt: string;
+  contextUsage?: SessionContextUsage;
+}
+
+export interface SessionContextUsage {
+  currentContextTokens: number | null;
+  contextWindow: number | null;
+  percentage: number | null;
+  partial: boolean;
+}
+
+export interface ProjectRoot {
+  path: string;
+  position: number;
+  primary: boolean;
+}
+
+export interface Project {
+  id: string;
+  name: string;
+  roots: ProjectRoot[];
+  position: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SaveProjectInput {
+  name: string;
+  roots: string[];
 }
 
 export interface SessionItem {
@@ -84,11 +114,16 @@ export interface SessionTokenUsage {
   untrackedHistory: boolean;
 }
 
-export interface CreateSessionInput {
-  workspacePath: string;
+interface CreateSessionBaseInput {
   defaultModel: string;
   permissionProfile: PermissionProfile;
 }
+
+export type CreateSessionInput = CreateSessionBaseInput &
+  (
+    | { projectId: string; workspacePath?: never }
+    | { projectId?: null; workspacePath: string }
+  );
 
 export interface AgentTurn {
   id: string;
@@ -210,6 +245,44 @@ export function createModelConfiguration(
 
 export function listSessions(): Promise<AgentSession[]> {
   return request<AgentSession[]>("/api/sessions");
+}
+
+export function listProjects(): Promise<Project[]> {
+  return request<Project[]>("/api/projects");
+}
+
+export function createProject(
+  input: SaveProjectInput,
+  idempotencyKey: string,
+): Promise<Project> {
+  return request<Project>("/api/projects", {
+    method: "POST",
+    body: JSON.stringify({
+      name: input.name,
+      roots: input.roots.map((path) => ({ path })),
+      idempotencyKey,
+    }),
+  });
+}
+
+export function updateProject(projectId: string, input: SaveProjectInput): Promise<Project> {
+  return request<Project>(`/api/projects/${projectId}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      name: input.name,
+      roots: input.roots.map((path) => ({ path })),
+    }),
+  });
+}
+
+export async function deleteProject(projectId: string): Promise<void> {
+  const response = await fetch(`${apiBaseUrl}/api/projects/${projectId}`, {
+    method: "DELETE",
+  });
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as { detail?: string } | null;
+    throw new ApiError(body?.detail ?? `删除项目失败（${response.status}）`, response.status);
+  }
 }
 
 export function getSession(sessionId: string): Promise<AgentSession> {

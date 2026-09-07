@@ -1,4 +1,5 @@
-import type { SessionTokenUsage } from "./api";
+import type { SessionContextUsage, SessionTokenUsage } from "./api";
+import { SessionContextRing } from "./SessionContextRing";
 
 type SessionUsageBarProps = {
   usage: SessionTokenUsage | null;
@@ -15,6 +16,12 @@ export function SessionUsageBar({ usage, fallbackContextWindow }: SessionUsageBa
   const contextTokens = usage?.currentContextTokens ?? null;
   const contextWindow = usage?.contextWindow ?? fallbackContextWindow;
   const percentage = contextPercentage(contextTokens, contextWindow);
+  const contextUsage: SessionContextUsage = {
+    currentContextTokens: contextTokens,
+    contextWindow,
+    percentage,
+    partial: (usage?.unreportedSteps ?? 0) > 0 || usage?.untrackedHistory === true,
+  };
   const progressText =
     contextTokens !== null && contextWindow !== null
       ? `${formatTokens(contextTokens)} / ${formatTokens(contextWindow)} Token`
@@ -29,27 +36,7 @@ export function SessionUsageBar({ usage, fallbackContextWindow }: SessionUsageBa
       title="上下文为最近模型步骤的输入加输出占模型窗口的近似进度；输入、输出和合计为本会话累计值"
     >
       <div className="context-usage">
-        <div
-          className={`context-ring ${contextTone(percentage)}`}
-          role="progressbar"
-          aria-label="上下文占用"
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-valuenow={percentage ?? undefined}
-          aria-valuetext={progressText}
-        >
-          <svg viewBox="0 0 20 20" aria-hidden="true">
-            <circle className="context-ring-track" cx="10" cy="10" r="7.5" />
-            <circle
-              className="context-ring-value"
-              cx="10"
-              cy="10"
-              r="7.5"
-              pathLength="100"
-              style={{ strokeDashoffset: 100 - (percentage ?? 0) }}
-            />
-          </svg>
-        </div>
+        <SessionContextRing usage={contextUsage} label="上下文占用" valueText={progressText} />
         <div className="context-usage-copy">
           <span>上下文</span>
           <strong>{percentage === null ? "等待首次模型用量" : `已使用 ${percentage}%`}</strong>
@@ -72,11 +59,4 @@ function formatTokens(value: number) {
 function contextPercentage(tokens: number | null, window: number | null) {
   if (tokens === null || window === null || window <= 0) return null;
   return Math.min(100, Math.round((tokens / window) * 100));
-}
-
-function contextTone(percentage: number | null) {
-  if (percentage === null) return "unknown";
-  if (percentage >= 85) return "danger";
-  if (percentage >= 70) return "warning";
-  return "healthy";
 }
