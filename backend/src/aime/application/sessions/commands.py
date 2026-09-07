@@ -1,6 +1,7 @@
 """Agent Session 用例输入。"""
 
 from dataclasses import dataclass
+from uuid import UUID
 
 from aime.domain.sessions.value_objects import PermissionProfile
 
@@ -9,6 +10,7 @@ from aime.domain.sessions.value_objects import PermissionProfile
 class CreateSessionCommand:
     """创建 Session 所需的用户输入。"""
 
-    workspace_path: str
+    workspace_path: str | None
     default_model: str
     permission_profile: PermissionProfile
+    project_id: UUID | None = None

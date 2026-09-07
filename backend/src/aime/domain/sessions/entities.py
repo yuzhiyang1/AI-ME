@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from aime.domain.sessions.value_objects import (
     AgentRunId,
@@ -27,7 +27,9 @@ class AgentSession:
 
     id: SessionId
     title: SessionTitle
+    project_id: UUID | None
     workspace_path: str
+    workspace_roots: tuple[str, ...]
     default_model: str
     permission_profile: PermissionProfile
     lifecycle: SessionLifecycle
@@ -40,7 +42,9 @@ class AgentSession:
     def create(
         cls,
         *,
+        project_id: UUID | None,
         workspace_path: str,
+        workspace_roots: tuple[str, ...],
         default_model: str,
         permission_profile: PermissionProfile,
     ) -> "AgentSession":
@@ -49,7 +53,9 @@ class AgentSession:
         return cls(
             id=SessionId(uuid4()),
             title=SessionTitle("新任务"),
+            project_id=project_id,
             workspace_path=workspace_path,
+            workspace_roots=workspace_roots,
             default_model=default_model,
             permission_profile=permission_profile,
             lifecycle=SessionLifecycle.ACTIVE,

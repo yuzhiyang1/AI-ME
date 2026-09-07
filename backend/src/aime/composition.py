@@ -142,7 +142,7 @@ def build_container(
         list_work_items=ListWorkItems(work_items),
         list_available_models=ListAvailableModels(resolved_model_gateway),
         stream_model_completion=StreamModelCompletion(resolved_model_gateway),
-        create_session=CreateSession(sessions),
+        create_session=CreateSession(sessions, projects),
         get_session=GetSession(sessions),
         list_sessions=ListSessions(sessions),
         start_turn=StartTurn(conversation_store, runtime_coordinator),

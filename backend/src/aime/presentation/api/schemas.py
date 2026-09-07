@@ -171,9 +171,10 @@ class ModelConfigurationResponse(_CamelCaseModel):
 
 
 class CreateSessionRequest(_CamelCaseModel):
-    """创建一条固定绑定本地工作区的 Agent Session。"""
+    """创建项目会话或选择单目录的独立 Agent Session。"""
 
-    workspace_path: str = Field(min_length=1)
+    project_id: UUID | None = None
+    workspace_path: str | None = Field(default=None, min_length=1)
     default_model: str = Field(min_length=1, max_length=200)
     permission_profile: PermissionProfile
 
@@ -240,7 +241,9 @@ class SessionResponse(_CamelCaseModel):
 
     id: UUID
     title: str
+    project_id: UUID | None
     workspace_path: str
+    workspace_roots: list[str]
     default_model: str
     permission_profile: PermissionProfile
     lifecycle: SessionLifecycle
@@ -255,7 +258,9 @@ class SessionResponse(_CamelCaseModel):
         return cls(
             id=session.id.value,
             title=session.title.value,
+            project_id=session.project_id,
             workspace_path=session.workspace_path,
+            workspace_roots=list(session.workspace_roots),
             default_model=session.default_model,
             permission_profile=session.permission_profile,
             lifecycle=session.lifecycle,

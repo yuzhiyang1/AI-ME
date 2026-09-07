@@ -119,7 +119,9 @@ def test_user_can_reopen_a_persisted_session(tmp_path: Path) -> None:
     assert reopened.json() == {
         "id": session_id,
         "title": "新任务",
+        "projectId": None,
         "workspacePath": str(workspace.resolve()),
+        "workspaceRoots": [str(workspace.resolve())],
         "defaultModel": "openai/gpt-5",
         "permissionProfile": "workspace_write",
         "lifecycle": "active",
@@ -128,6 +130,141 @@ def test_user_can_reopen_a_persisted_session(tmp_path: Path) -> None:
         "createdAt": reopened.json()["createdAt"],
         "updatedAt": reopened.json()["updatedAt"],
     }
+
+
+def test_project_session_snapshots_all_project_roots(tmp_path: Path) -> None:
+    """项目会话复制创建瞬间的完整 roots，并以第一项作为主目录。"""
+    primary = tmp_path / "primary"
+    secondary = tmp_path / "secondary"
+    primary.mkdir()
+    secondary.mkdir()
+
+    with TestClient(create_app(build_container(state_dir=tmp_path / "state"))) as client:
+        project = client.post(
+            "/api/projects",
+            json={
+                "name": "AI-ME",
+                "roots": [{"path": str(primary)}, {"path": str(secondary)}],
+                "idempotencyKey": "session-project",
+            },
+        ).json()
+        created = client.post(
+            "/api/sessions",
+            json={
+                "projectId": project["id"],
+                "defaultModel": "openai/gpt-5",
+                "permissionProfile": "workspace_write",
+            },
+        )
+
+    assert created.status_code == 201
+    assert created.json()["projectId"] == project["id"]
+    assert created.json()["workspacePath"] == str(primary.resolve())
+    assert created.json()["workspaceRoots"] == [
+        str(primary.resolve()),
+        str(secondary.resolve()),
+    ]
+
+
+def test_standalone_session_has_no_project_and_one_root(tmp_path: Path) -> None:
+    """独立会话仍要求用户选择目录，并形成单 root 运行快照。"""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    with TestClient(create_app(build_container(state_dir=tmp_path / "state"))) as client:
+        created = client.post(
+            "/api/sessions",
+            json={
+                "workspacePath": str(workspace),
+                "defaultModel": "openai/gpt-5",
+                "permissionProfile": "workspace_write",
+            },
+        )
+
+    assert created.status_code == 201
+    assert created.json()["projectId"] is None
+    assert created.json()["workspaceRoots"] == [str(workspace.resolve())]
+
+
+def test_session_rejects_ambiguous_or_missing_workspace_source(tmp_path: Path) -> None:
+    """项目来源和独立目录必须二选一，不能让运行目录语义含糊。"""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    with TestClient(create_app(build_container(state_dir=tmp_path / "state"))) as client:
+        project = client.post(
+            "/api/projects",
+            json={
+                "name": "AI-ME",
+                "roots": [{"path": str(workspace)}],
+                "idempotencyKey": "exclusive-source",
+            },
+        ).json()
+        ambiguous = client.post(
+            "/api/sessions",
+            json={
+                "projectId": project["id"],
+                "workspacePath": str(workspace),
+                "defaultModel": "openai/gpt-5",
+                "permissionProfile": "workspace_write",
+            },
+        )
+        missing = client.post(
+            "/api/sessions",
+            json={
+                "defaultModel": "openai/gpt-5",
+                "permissionProfile": "workspace_write",
+            },
+        )
+
+    assert ambiguous.status_code == 422
+    assert missing.status_code == 422
+
+
+def test_project_edit_and_delete_do_not_change_existing_session_snapshot(
+    tmp_path: Path,
+) -> None:
+    """项目只是创建模板；编辑或删除后，已有 Session 的 roots 与历史仍保持。"""
+    primary = tmp_path / "primary"
+    secondary = tmp_path / "secondary"
+    replacement = tmp_path / "replacement"
+    primary.mkdir()
+    secondary.mkdir()
+    replacement.mkdir()
+
+    with TestClient(create_app(build_container(state_dir=tmp_path / "state"))) as client:
+        project = client.post(
+            "/api/projects",
+            json={
+                "name": "AI-ME",
+                "roots": [{"path": str(primary)}, {"path": str(secondary)}],
+                "idempotencyKey": "snapshot-semantics",
+            },
+        ).json()
+        session = client.post(
+            "/api/sessions",
+            json={
+                "projectId": project["id"],
+                "defaultModel": "openai/gpt-5",
+                "permissionProfile": "workspace_write",
+            },
+        ).json()
+        client.patch(
+            f"/api/projects/{project['id']}",
+            json={"name": "changed", "roots": [{"path": str(replacement)}]},
+        )
+        unchanged = client.get(f"/api/sessions/{session['id']}").json()
+        client.delete(f"/api/projects/{project['id']}")
+        unbound = client.get(f"/api/sessions/{session['id']}").json()
+        items = client.get(f"/api/sessions/{session['id']}/items")
+
+    expected_roots = [str(primary.resolve()), str(secondary.resolve())]
+    assert unchanged["projectId"] == project["id"]
+    assert unchanged["workspaceRoots"] == expected_roots
+    assert unbound["projectId"] is None
+    assert unbound["workspaceRoots"] == expected_roots
+    assert items.status_code == 200
+    assert items.json() == []
 
 
 def test_user_can_send_a_turn_and_reopen_the_conversation(tmp_path: Path) -> None:

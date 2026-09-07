@@ -127,6 +127,41 @@ async def test_existing_0001_database_is_upgraded_before_creating_a_queued_run(
     assert execution.run.started_at is None
 
 
+async def test_existing_sessions_are_backfilled_as_standalone_single_root_tasks(
+    tmp_path: Path,
+) -> None:
+    """从 0004 升级时，已有会话必须保留并获得单 root 快照。"""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    database_path = state_dir / "ai-me.db"
+    command.upgrade(_alembic_config(database_path), "0004_model_configurations")
+    workspace = str((tmp_path / "legacy-workspace").resolve())
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "INSERT INTO agent_sessions "
+            "(id, title, workspace_path, default_model, permission_profile, lifecycle, "
+            "activity, pinned, created_at, updated_at, last_event_sequence) "
+            "VALUES (?, '旧会话', ?, 'openai/gpt-5', 'workspace_write', 'active', "
+            "'idle', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 0)",
+            ("00000000-0000-0000-0000-000000000001", workspace),
+        )
+
+    database = SqliteDatabase(state_dir)
+    await database.initialize()
+    await database.close()
+
+    with sqlite3.connect(database_path) as connection:
+        session_row = connection.execute(
+            "SELECT project_id, workspace_path FROM agent_sessions"
+        ).fetchone()
+        root_row = connection.execute(
+            "SELECT position, path FROM session_workspace_roots"
+        ).fetchone()
+
+    assert session_row == (None, workspace)
+    assert root_row == (0, workspace)
+
+
 async def test_unversioned_preview_database_without_constraints_is_rejected(
     tmp_path: Path,
 ) -> None:

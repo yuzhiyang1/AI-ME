@@ -219,8 +219,11 @@ def build_router(
                     workspace_path=payload.workspace_path,
                     default_model=payload.default_model,
                     permission_profile=payload.permission_profile,
+                    project_id=payload.project_id,
                 )
             )
+        except ProjectNotFound as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
         except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,

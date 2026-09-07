@@ -1,5 +1,7 @@
 """SessionRepository 的 SQLite 实现。"""
 
+import os
+from collections import defaultdict
 from uuid import UUID
 
 from sqlalchemy import insert, select
@@ -15,7 +17,10 @@ from aime.domain.sessions.value_objects import (
     SessionLifecycle,
     SessionTitle,
 )
-from aime.infrastructure.persistence.sqlite_database import sessions_table
+from aime.infrastructure.persistence.sqlite_database import (
+    session_workspace_roots_table,
+    sessions_table,
+)
 
 
 class SqliteSessionRepository(SessionRepository):
@@ -30,6 +35,7 @@ class SqliteSessionRepository(SessionRepository):
             await database_session.execute(
                 insert(sessions_table).values(
                     id=str(session.id.value),
+                    project_id=str(session.project_id) if session.project_id is not None else None,
                     title=session.title.value,
                     workspace_path=session.workspace_path,
                     default_model=session.default_model,
@@ -42,6 +48,18 @@ class SqliteSessionRepository(SessionRepository):
                     last_event_sequence=0,
                 )
             )
+            await database_session.execute(
+                insert(session_workspace_roots_table),
+                [
+                    {
+                        "session_id": str(session.id.value),
+                        "position": position,
+                        "path": path,
+                        "path_key": os.path.normcase(path),
+                    }
+                    for position, path in enumerate(session.workspace_roots)
+                ],
+            )
 
     async def get(self, session_id: SessionId) -> AgentSession | None:
         """按稳定 ID 读取 Session。"""
@@ -51,7 +69,8 @@ class SqliteSessionRepository(SessionRepository):
                     select(sessions_table).where(sessions_table.c.id == str(session_id.value))
                 )
             ).mappings().one_or_none()
-        return _to_domain(row) if row is not None else None
+            roots = await _load_roots(database_session, [str(session_id.value)])
+        return _to_domain(row, roots[str(session_id.value)]) if row is not None else None
 
     async def list_all(self) -> list[AgentSession]:
         """按最近更新时间列出 Session。"""
@@ -60,16 +79,42 @@ class SqliteSessionRepository(SessionRepository):
                 await database_session.execute(
                     select(sessions_table).order_by(sessions_table.c.updated_at.desc())
                 )
-            ).mappings()
-            return [_to_domain(row) for row in rows]
+            ).mappings().all()
+            roots = await _load_roots(database_session, [str(row["id"]) for row in rows])
+            return [_to_domain(row, roots[str(row["id"])]) for row in rows]
 
 
-def _to_domain(row: RowMapping) -> AgentSession:
+async def _load_roots(
+    database_session: AsyncSession,
+    session_ids: list[str],
+) -> dict[str, tuple[str, ...]]:
+    """批量读取 Session 的有序运行目录快照。"""
+    grouped: defaultdict[str, list[str]] = defaultdict(list)
+    if not session_ids:
+        return {}
+    rows = (
+        await database_session.execute(
+            select(session_workspace_roots_table)
+            .where(session_workspace_roots_table.c.session_id.in_(session_ids))
+            .order_by(
+                session_workspace_roots_table.c.session_id,
+                session_workspace_roots_table.c.position,
+            )
+        )
+    ).mappings()
+    for row in rows:
+        grouped[str(row["session_id"])].append(str(row["path"]))
+    return {session_id: tuple(paths) for session_id, paths in grouped.items()}
+
+
+def _to_domain(row: RowMapping, workspace_roots: tuple[str, ...]) -> AgentSession:
     """把 SQLAlchemy 行映射转换回纯领域对象。"""
     return AgentSession(
         id=SessionId(UUID(row["id"])),
         title=SessionTitle(row["title"]),
+        project_id=UUID(str(row["project_id"])) if row["project_id"] is not None else None,
         workspace_path=row["workspace_path"],
+        workspace_roots=workspace_roots,
         default_model=row["default_model"],
         permission_profile=PermissionProfile(row["permission_profile"]),
         lifecycle=SessionLifecycle(row["lifecycle"]),

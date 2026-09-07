@@ -5,7 +5,9 @@ from uuid import UUID
 
 from anyio import to_thread
 
+from aime.application.projects.services import ProjectNotFound
 from aime.application.sessions.commands import CreateSessionCommand
+from aime.domain.projects.repositories import ProjectRepository
 from aime.domain.sessions.entities import AgentSession
 from aime.domain.sessions.repositories import SessionRepository
 from aime.domain.sessions.value_objects import SessionId
@@ -18,19 +20,42 @@ class SessionNotFound(LookupError):
 class CreateSession:
     """校验工作区并创建持久 Session。"""
 
-    def __init__(self, repository: SessionRepository) -> None:
+    def __init__(
+        self,
+        repository: SessionRepository,
+        project_repository: ProjectRepository | None = None,
+    ) -> None:
         self._repository = repository
+        self._project_repository = project_repository
 
     async def execute(self, command: CreateSessionCommand) -> AgentSession:
         """创建 Session；工作区必须是已经存在的目录。"""
-        workspace = await to_thread.run_sync(_resolve_workspace, command.workspace_path)
-        if not workspace.is_dir():
-            raise ValueError("Session 工作区必须是已经存在的目录")
+        if command.project_id is not None and command.workspace_path is not None:
+            raise ValueError("项目会话不能覆盖项目目录")
+        if command.project_id is None and command.workspace_path is None:
+            raise ValueError("独立会话必须选择工作目录")
+        if command.project_id is not None:
+            if self._project_repository is None:
+                raise RuntimeError("项目会话创建缺少 ProjectRepository")
+            project = await self._project_repository.get(command.project_id)
+            if project is None:
+                raise ProjectNotFound("项目不存在或已删除")
+            workspace_roots = tuple(root.path for root in project.roots)
+            workspace_path = workspace_roots[0]
+        else:
+            assert command.workspace_path is not None
+            workspace = await to_thread.run_sync(_resolve_workspace, command.workspace_path)
+            if not workspace.is_dir():
+                raise ValueError("Session 工作区必须是已经存在的目录")
+            workspace_path = str(workspace)
+            workspace_roots = (workspace_path,)
         default_model = command.default_model.strip()
         if not default_model:
             raise ValueError("Session 默认模型不能为空")
         session = AgentSession.create(
-            workspace_path=str(workspace),
+            project_id=command.project_id,
+            workspace_path=workspace_path,
+            workspace_roots=workspace_roots,
             default_model=default_model,
             permission_profile=command.permission_profile,
         )
