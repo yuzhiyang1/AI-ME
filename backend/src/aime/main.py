@@ -52,6 +52,9 @@ def create_app(
             resolved_container.list_session_items,
             resolved_container.list_runtime_events,
             resolved_container.interrupt_turn,
+            resolved_container.list_pending_approvals,
+            resolved_container.decide_approval,
+            resolved_container.list_tool_invocations,
         ),
     )
     resolved_frontend_dist = (

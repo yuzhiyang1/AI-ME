@@ -59,12 +59,6 @@ Turn 创建接口先在一个事务里写入排队中的 Turn、AgentRun、用�
 
 ## 当前边界与下一期
 
-当前 `ModelAgentRuntime` 是文本版 Runtime，实现多轮模型调用、流式文本事件、错误收敛、中断和恢复。下一期在同一个 `AgentRuntime` 端口后增加：
+`ModelAgentRuntime` 已经在同一个端口后实现 Agent Loop、OpenAI/Anthropic 工具协议、内置文件与 PowerShell 工具、并行/独占调度、工作区边界、T1/T2 工具账本、持久审批和崩溃恢复。详细语义见 [Agent Loop 与工具执行设计](./AgentLoop与工具执行设计.md)。
 
-1. 工具注册表与模型工具协议；
-2. 工作区路径沙箱、命令策略和输出上限；
-3. `ToolInvocation` 账本、危险操作审批和幂等键；
-4. Skill/MCP 适配与能力快照；
-5. checkpoint、重试策略、context 压缩与 Eval 数据集。
-
-这些属于生产级 Agent 的后续核心能力；当前切片是它们共同依赖的会话与执行账本，而不是一个临时聊天 Demo。
+下一期继续增加 Skill/MCP 能力快照、context 压缩、模型重试预算、隔离执行和 Eval 数据集。这些能力复用现有 Session、Turn、Run、RuntimeEvent、ToolInvocation 与 ApprovalRequest，不需要推翻客户端会话协议。

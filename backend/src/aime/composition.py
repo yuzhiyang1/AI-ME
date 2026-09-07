@@ -4,9 +4,12 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from aime.application.approvals.services import DecideApproval, ListPendingApprovals
 from aime.application.models.services import ListAvailableModels, StreamModelCompletion
 from aime.application.ports.conversation_store import ConversationStore
 from aime.application.ports.model_gateway import ModelGateway
+from aime.application.ports.tool_execution import ToolRegistry
+from aime.application.ports.tool_execution_store import ToolExecutionStore
 from aime.application.sessions.runtime_coordinator import RuntimeCoordinator
 from aime.application.sessions.services import CreateSession, GetSession, ListSessions
 from aime.application.sessions.turn_services import (
@@ -17,6 +20,7 @@ from aime.application.sessions.turn_services import (
     ListSessionItems,
     StartTurn,
 )
+from aime.application.tools.services import ListToolInvocations
 from aime.application.work_items.services import CreateWorkItem, ListWorkItems
 from aime.infrastructure.llm.model_gateway_impl import build_gateway_from_env
 from aime.infrastructure.persistence.in_memory_work_item_repository import (
@@ -25,6 +29,8 @@ from aime.infrastructure.persistence.in_memory_work_item_repository import (
 from aime.infrastructure.persistence.sqlite_conversation_store import SqliteConversationStore
 from aime.infrastructure.persistence.sqlite_database import SqliteDatabase
 from aime.infrastructure.persistence.sqlite_session_repository import SqliteSessionRepository
+from aime.infrastructure.persistence.sqlite_tool_execution_store import SqliteToolExecutionStore
+from aime.infrastructure.runtime.approval_broker import InMemoryApprovalBroker
 from aime.infrastructure.runtime.model_agent_runtime import ModelAgentRuntime
 
 
@@ -45,14 +51,21 @@ class Container:
     list_session_items: ListSessionItems
     list_runtime_events: ListRuntimeEvents
     interrupt_turn: InterruptTurn
+    list_pending_approvals: ListPendingApprovals
+    decide_approval: DecideApproval
+    list_tool_invocations: ListToolInvocations
     runtime_coordinator: RuntimeCoordinator
     conversation_store: ConversationStore
+    tool_execution_store: ToolExecutionStore
     database: SqliteDatabase
 
     async def initialize(self) -> None:
         """初始化需要进程生命周期管理的基础设施。"""
         await self.database.initialize()
+        await self.tool_execution_store.recover_unsettled_invocations()
         await self.conversation_store.recover_incomplete_runs()
+        for execution in await self.conversation_store.list_resumable_executions():
+            self.runtime_coordinator.resume(execution)
 
     async def close(self) -> None:
         """按装配根拥有的顺序关闭基础设施。"""
@@ -64,6 +77,7 @@ def build_container(
     *,
     state_dir: Path | None = None,
     model_gateway: ModelGateway | None = None,
+    tool_registry: ToolRegistry | None = None,
 ) -> Container:
     """创建应用所需的依赖图。
 
@@ -76,8 +90,19 @@ def build_container(
     database = SqliteDatabase(resolved_state_dir)
     sessions = SqliteSessionRepository(database.session_factory)
     conversation_store = SqliteConversationStore(database.session_factory)
-    agent_runtime = ModelAgentRuntime(resolved_model_gateway)
-    runtime_coordinator = RuntimeCoordinator(agent_runtime, conversation_store)
+    tool_execution_store = SqliteToolExecutionStore(database.session_factory)
+    approval_broker = InMemoryApprovalBroker()
+    agent_runtime = ModelAgentRuntime(
+        resolved_model_gateway,
+        tool_execution_store,
+        approval_broker,
+        tool_registry,
+    )
+    runtime_coordinator = RuntimeCoordinator(
+        agent_runtime,
+        conversation_store,
+        tool_store=tool_execution_store,
+    )
     return Container(
         create_work_item=CreateWorkItem(work_items),
         list_work_items=ListWorkItems(work_items),
@@ -92,8 +117,12 @@ def build_container(
         list_session_items=ListSessionItems(conversation_store),
         list_runtime_events=ListRuntimeEvents(conversation_store),
         interrupt_turn=InterruptTurn(runtime_coordinator),
+        list_pending_approvals=ListPendingApprovals(tool_execution_store),
+        decide_approval=DecideApproval(tool_execution_store, approval_broker),
+        list_tool_invocations=ListToolInvocations(tool_execution_store),
         runtime_coordinator=runtime_coordinator,
         conversation_store=conversation_store,
+        tool_execution_store=tool_execution_store,
         database=database,
     )
 

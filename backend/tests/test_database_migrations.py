@@ -32,13 +32,16 @@ async def test_fresh_database_is_upgraded_to_a_versioned_schema(tmp_path: Path) 
             ).fetchall()
         }
 
-    assert version == ("0002_nullable_run_started_at",)
+    assert version == ("0003_tool_execution_ledger",)
     assert {
         "agent_sessions",
         "agent_turns",
         "agent_runs",
         "runtime_events",
         "session_items",
+        "tool_invocations",
+        "approval_requests",
+        "approval_grants",
     }.issubset(table_names)
 
 
@@ -67,7 +70,7 @@ async def test_unversioned_preview_database_is_adopted_only_after_schema_validat
             "AND name = 'uq_active_turn_per_session'"
         ).fetchone()
 
-    assert version == ("0002_nullable_run_started_at",)
+    assert version == ("0003_tool_execution_ledger",)
     assert active_index == ("uq_active_turn_per_session",)
 
 
@@ -113,7 +116,7 @@ async def test_existing_0001_database_is_upgraded_before_creating_a_queued_run(
             if row[1] == "started_at"
         )
 
-    assert version == ("0002_nullable_run_started_at",)
+    assert version == ("0003_tool_execution_ledger",)
     assert upgraded_started_at[3] == 0
     assert execution.run.status.value == "created"
     assert execution.run.started_at is None
@@ -158,9 +161,7 @@ async def test_unversioned_preview_database_with_wrong_active_index_is_rejected(
     await preview_engine.dispose()
     with sqlite3.connect(database_path) as connection:
         connection.execute("DROP INDEX uq_active_turn_per_session")
-        connection.execute(
-            "CREATE INDEX uq_active_turn_per_session ON agent_turns (session_id)"
-        )
+        connection.execute("CREATE INDEX uq_active_turn_per_session ON agent_turns (session_id)")
 
     database = SqliteDatabase(state_dir)
     with pytest.raises(RuntimeError, match="活跃 Turn 唯一索引"):

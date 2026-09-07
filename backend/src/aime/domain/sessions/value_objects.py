@@ -95,6 +95,7 @@ class AgentRunStatus(StrEnum):
 
     CREATED = "created"
     RUNNING = "running"
+    WAITING_FOR_USER = "waiting_for_user"
     COMPLETED = "completed"
     FAILED = "failed"
     INTERRUPTED = "interrupted"

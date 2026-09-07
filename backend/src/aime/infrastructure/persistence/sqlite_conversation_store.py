@@ -18,6 +18,7 @@ from aime.domain.sessions.entities import AgentRun, AgentTurn, RuntimeEvent, Ses
 from aime.domain.sessions.value_objects import (
     AgentRunId,
     AgentRunStatus,
+    PermissionProfile,
     RuntimeEventId,
     SessionActivity,
     SessionId,
@@ -60,13 +61,17 @@ class SqliteConversationStore(ConversationStore):
             # 两个请求同时通过前置查询时，由数据库约束决定胜者，再读取最终事实。
             async with self._session_factory() as database_session:
                 existing = (
-                    await database_session.execute(
-                        select(turns_table).where(
-                            turns_table.c.session_id == str(session_id),
-                            turns_table.c.client_request_id == client_request_id,
+                    (
+                        await database_session.execute(
+                            select(turns_table).where(
+                                turns_table.c.session_id == str(session_id),
+                                turns_table.c.client_request_id == client_request_id,
+                            )
                         )
                     )
-                ).mappings().one_or_none()
+                    .mappings()
+                    .one_or_none()
+                )
                 if existing is not None:
                     return await self._existing_execution(database_session, existing, instruction)
                 active = (
@@ -101,13 +106,17 @@ class SqliteConversationStore(ConversationStore):
                 raise SessionNotFound(f"Session 不存在：{session_id}")
 
             existing = (
-                await database_session.execute(
-                    select(turns_table).where(
-                        turns_table.c.session_id == str(session_id),
-                        turns_table.c.client_request_id == client_request_id,
+                (
+                    await database_session.execute(
+                        select(turns_table).where(
+                            turns_table.c.session_id == str(session_id),
+                            turns_table.c.client_request_id == client_request_id,
+                        )
                     )
                 )
-            ).mappings().one_or_none()
+                .mappings()
+                .one_or_none()
+            )
             if existing is not None:
                 return await self._existing_execution(database_session, existing, instruction)
 
@@ -206,7 +215,15 @@ class SqliteConversationStore(ConversationStore):
                 started_at=None,
                 finished_at=None,
             )
-            return TurnExecution(turn, run, instruction, tuple(messages), True)
+            return TurnExecution(
+                turn,
+                run,
+                instruction,
+                tuple(messages),
+                True,
+                workspace_path=str(session_row["workspace_path"]),
+                permission_profile=PermissionProfile(str(session_row["permission_profile"])),
+            )
 
     async def mark_run_started(self, execution: TurnExecution) -> bool:
         """拿到全局并发名额后，原子把排队执行推进到 running。"""
@@ -251,6 +268,67 @@ class SqliteConversationStore(ConversationStore):
             item_payload={"text": response_text},
         )
 
+    async def mark_run_waiting(self, execution: TurnExecution) -> bool:
+        """工具需要审批时，把 Run、Turn 和 Session 原子置为等待用户。"""
+        async with self._session_factory.begin() as database_session:
+            now = datetime.now(UTC)
+            changed = await database_session.execute(
+                update(agent_runs_table)
+                .where(
+                    agent_runs_table.c.id == str(execution.run.id.value),
+                    agent_runs_table.c.status == AgentRunStatus.RUNNING.value,
+                    agent_runs_table.c.terminal_event_id.is_(None),
+                )
+                .values(status=AgentRunStatus.WAITING_FOR_USER.value)
+            )
+            if cast(Any, changed).rowcount != 1:
+                current = (
+                    await database_session.execute(
+                        select(agent_runs_table.c.status).where(
+                            agent_runs_table.c.id == str(execution.run.id.value)
+                        )
+                    )
+                ).scalar_one_or_none()
+                return current == AgentRunStatus.WAITING_FOR_USER.value
+            await database_session.execute(
+                update(turns_table)
+                .where(turns_table.c.id == str(execution.turn.id.value))
+                .values(status=TurnStatus.WAITING_FOR_USER.value)
+            )
+            await database_session.execute(
+                update(sessions_table)
+                .where(sessions_table.c.id == str(execution.run.session_id.value))
+                .values(activity=SessionActivity.WAITING_FOR_USER.value, updated_at=now)
+            )
+        return True
+
+    async def mark_run_resumed(self, execution: TurnExecution) -> bool:
+        """审批完成并重新取得并发名额后恢复运行状态。"""
+        async with self._session_factory.begin() as database_session:
+            now = datetime.now(UTC)
+            changed = await database_session.execute(
+                update(agent_runs_table)
+                .where(
+                    agent_runs_table.c.id == str(execution.run.id.value),
+                    agent_runs_table.c.status == AgentRunStatus.WAITING_FOR_USER.value,
+                    agent_runs_table.c.terminal_event_id.is_(None),
+                )
+                .values(status=AgentRunStatus.RUNNING.value)
+            )
+            if cast(Any, changed).rowcount != 1:
+                return False
+            await database_session.execute(
+                update(turns_table)
+                .where(turns_table.c.id == str(execution.turn.id.value))
+                .values(status=TurnStatus.IN_PROGRESS.value)
+            )
+            await database_session.execute(
+                update(sessions_table)
+                .where(sessions_table.c.id == str(execution.run.session_id.value))
+                .values(activity=SessionActivity.RUNNING.value, updated_at=now)
+            )
+        return True
+
     async def append_run_event(
         self,
         execution: TurnExecution,
@@ -268,7 +346,11 @@ class SqliteConversationStore(ConversationStore):
             ).one_or_none()
             if (
                 run_row is None
-                or run_row.status != AgentRunStatus.RUNNING.value
+                or run_row.status
+                not in {
+                    AgentRunStatus.RUNNING.value,
+                    AgentRunStatus.WAITING_FOR_USER.value,
+                }
                 or run_row.terminal_event_id is not None
             ):
                 raise RuntimeError("不能为已经结束的 AgentRun 追加事件")
@@ -332,22 +414,30 @@ class SqliteConversationStore(ConversationStore):
         """启动时把没有 terminal fact 的遗留 Run 收敛为 interrupted。"""
         async with self._session_factory() as database_session:
             run_rows = (
-                await database_session.execute(
-                    select(agent_runs_table).where(
-                        agent_runs_table.c.status.in_(
-                            [AgentRunStatus.CREATED.value, AgentRunStatus.RUNNING.value]
-                        ),
-                        agent_runs_table.c.terminal_event_id.is_(None),
+                (
+                    await database_session.execute(
+                        select(agent_runs_table).where(
+                            agent_runs_table.c.status.in_(
+                                [AgentRunStatus.CREATED.value, AgentRunStatus.RUNNING.value]
+                            ),
+                            agent_runs_table.c.terminal_event_id.is_(None),
+                        )
                     )
                 )
-            ).mappings().all()
+                .mappings()
+                .all()
+            )
             executions: list[TurnExecution] = []
             for run_row in run_rows:
                 turn_row = (
-                    await database_session.execute(
-                        select(turns_table).where(turns_table.c.id == run_row["turn_id"])
+                    (
+                        await database_session.execute(
+                            select(turns_table).where(turns_table.c.id == run_row["turn_id"])
+                        )
                     )
-                ).mappings().one()
+                    .mappings()
+                    .one()
+                )
                 executions.append(
                     TurnExecution(
                         turn=_turn_from_row(turn_row),
@@ -376,23 +466,81 @@ class SqliteConversationStore(ConversationStore):
         async with self._session_factory() as database_session:
             await _required_session_row(database_session, session_id)
             row = (
-                await database_session.execute(
-                    select(turns_table)
-                    .where(
-                        turns_table.c.session_id == str(session_id),
-                        turns_table.c.status.in_(
-                            [
-                                TurnStatus.QUEUED.value,
-                                TurnStatus.IN_PROGRESS.value,
-                                TurnStatus.WAITING_FOR_USER.value,
-                            ]
+                (
+                    await database_session.execute(
+                        select(turns_table)
+                        .where(
+                            turns_table.c.session_id == str(session_id),
+                            turns_table.c.status.in_(
+                                [
+                                    TurnStatus.QUEUED.value,
+                                    TurnStatus.IN_PROGRESS.value,
+                                    TurnStatus.WAITING_FOR_USER.value,
+                                ]
+                            ),
+                        )
+                        .order_by(turns_table.c.created_at.desc())
+                        .limit(1)
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+        return _turn_from_row(row) if row is not None else None
+
+    async def list_resumable_executions(self) -> list[TurnExecution]:
+        """重建等待审批的执行，让新进程继续同一个 Run。"""
+        async with self._session_factory() as database_session:
+            run_rows = (
+                (
+                    await database_session.execute(
+                        select(agent_runs_table).where(
+                            agent_runs_table.c.status == AgentRunStatus.WAITING_FOR_USER.value,
+                            agent_runs_table.c.terminal_event_id.is_(None),
+                        )
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            executions: list[TurnExecution] = []
+            for run_row in run_rows:
+                turn_row = (
+                    (
+                        await database_session.execute(
+                            select(turns_table).where(turns_table.c.id == run_row["turn_id"])
+                        )
+                    )
+                    .mappings()
+                    .one()
+                )
+                session_row = await _required_session_row(
+                    database_session, UUID(str(run_row["session_id"]))
+                )
+                user_item = (
+                    await database_session.execute(
+                        select(session_items_table.c.content_json).where(
+                            session_items_table.c.turn_id == turn_row["id"],
+                            session_items_table.c.type == SessionItemType.USER_MESSAGE.value,
+                        )
+                    )
+                ).one()
+                session_id = UUID(str(run_row["session_id"]))
+                messages = await _model_messages(database_session, session_id)
+                executions.append(
+                    TurnExecution(
+                        turn=_turn_from_row(turn_row),
+                        run=_run_from_row(run_row),
+                        instruction=str(json.loads(user_item.content_json)["text"]),
+                        messages=tuple(messages),
+                        newly_created=False,
+                        workspace_path=str(session_row["workspace_path"]),
+                        permission_profile=PermissionProfile(
+                            str(session_row["permission_profile"])
                         ),
                     )
-                    .order_by(turns_table.c.created_at.desc())
-                    .limit(1)
                 )
-            ).mappings().one_or_none()
-        return _turn_from_row(row) if row is not None else None
+        return executions
 
     async def get_turn_by_client_request(
         self,
@@ -403,13 +551,17 @@ class SqliteConversationStore(ConversationStore):
         async with self._session_factory() as database_session:
             await _required_session_row(database_session, session_id)
             row = (
-                await database_session.execute(
-                    select(turns_table).where(
-                        turns_table.c.session_id == str(session_id),
-                        turns_table.c.client_request_id == client_request_id,
+                (
+                    await database_session.execute(
+                        select(turns_table).where(
+                            turns_table.c.session_id == str(session_id),
+                            turns_table.c.client_request_id == client_request_id,
+                        )
                     )
                 )
-            ).mappings().one_or_none()
+                .mappings()
+                .one_or_none()
+            )
         return _turn_from_row(row) if row is not None else None
 
     async def list_items(self, session_id: UUID, after_sequence: int = 0) -> list[SessionItem]:
@@ -466,11 +618,16 @@ class SqliteConversationStore(ConversationStore):
         if original_instruction != instruction:
             raise IdempotencyConflict("clientRequestId 已绑定另一段输入")
         run_row = (
-            await database_session.execute(
-                select(agent_runs_table).where(agent_runs_table.c.turn_id == turn_row["id"])
+            (
+                await database_session.execute(
+                    select(agent_runs_table).where(agent_runs_table.c.turn_id == turn_row["id"])
+                )
             )
-        ).mappings().one()
+            .mappings()
+            .one()
+        )
         session_id = UUID(turn_row["session_id"])
+        session_row = await _required_session_row(database_session, session_id)
         messages = await _model_messages(database_session, session_id)
         return TurnExecution(
             turn=_turn_from_row(turn_row),
@@ -478,6 +635,8 @@ class SqliteConversationStore(ConversationStore):
             instruction=instruction,
             messages=tuple(messages),
             newly_created=False,
+            workspace_path=str(session_row["workspace_path"]),
+            permission_profile=PermissionProfile(str(session_row["permission_profile"])),
         )
 
     async def _commit_terminal(
@@ -500,7 +659,11 @@ class SqliteConversationStore(ConversationStore):
                     agent_runs_table.c.id == str(execution.run.id.value),
                     agent_runs_table.c.terminal_event_id.is_(None),
                     agent_runs_table.c.status.in_(
-                        [AgentRunStatus.CREATED.value, AgentRunStatus.RUNNING.value]
+                        [
+                            AgentRunStatus.CREATED.value,
+                            AgentRunStatus.RUNNING.value,
+                            AgentRunStatus.WAITING_FOR_USER.value,
+                        ]
                     ),
                 )
                 .values(
@@ -574,10 +737,14 @@ class SqliteConversationStore(ConversationStore):
 async def _session_row(database_session: AsyncSession, session_id: UUID) -> RowMapping | None:
     """读取 Session 数据库行。"""
     return (
-        await database_session.execute(
-            select(sessions_table).where(sessions_table.c.id == str(session_id))
+        (
+            await database_session.execute(
+                select(sessions_table).where(sessions_table.c.id == str(session_id))
+            )
         )
-    ).mappings().one_or_none()
+        .mappings()
+        .one_or_none()
+    )
 
 
 async def _required_session_row(database_session: AsyncSession, session_id: UUID) -> RowMapping:

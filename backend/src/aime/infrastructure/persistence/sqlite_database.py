@@ -109,6 +109,66 @@ session_items_table = Table(
     UniqueConstraint("session_id", "sequence", name="uq_session_item_sequence"),
 )
 
+tool_invocations_table = Table(
+    "tool_invocations",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("session_id", ForeignKey("agent_sessions.id", ondelete="CASCADE"), nullable=False),
+    Column("turn_id", ForeignKey("agent_turns.id", ondelete="CASCADE"), nullable=False),
+    Column("run_id", ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=False),
+    Column("call_id", String(200), nullable=False),
+    Column("step_index", Integer, nullable=False),
+    Column("call_index", Integer, nullable=False),
+    Column("tool_name", String(128), nullable=False),
+    Column("arguments_json", Text, nullable=False),
+    Column("assistant_text", Text, nullable=False, default=""),
+    Column("execution_semantics", String(32), nullable=False),
+    Column("risk_level", String(32), nullable=False),
+    Column("status", String(32), nullable=False),
+    Column("result_json", Text),
+    Column("is_error", Boolean),
+    Column("prepared_at", DateTime(timezone=True), nullable=False),
+    Column("started_at", DateTime(timezone=True)),
+    Column("finished_at", DateTime(timezone=True)),
+    UniqueConstraint("run_id", "call_id", name="uq_tool_invocation_run_call"),
+    UniqueConstraint("run_id", "step_index", "call_index", name="uq_tool_invocation_run_position"),
+)
+
+approval_requests_table = Table(
+    "approval_requests",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("session_id", ForeignKey("agent_sessions.id", ondelete="CASCADE"), nullable=False),
+    Column("turn_id", ForeignKey("agent_turns.id", ondelete="CASCADE"), nullable=False),
+    Column("run_id", ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=False),
+    Column(
+        "invocation_id",
+        ForeignKey("tool_invocations.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    ),
+    Column("reason", Text, nullable=False),
+    Column("status", String(32), nullable=False),
+    Column("decision", String(32)),
+    Column("requested_at", DateTime(timezone=True), nullable=False),
+    Column("resolved_at", DateTime(timezone=True)),
+)
+
+approval_grants_table = Table(
+    "approval_grants",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column("session_id", ForeignKey("agent_sessions.id", ondelete="CASCADE"), nullable=False),
+    Column("tool_name", String(128), nullable=False),
+    Column(
+        "approval_id",
+        ForeignKey("approval_requests.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    UniqueConstraint("session_id", "tool_name", name="uq_approval_grant_session_tool"),
+)
+
 
 class SqliteDatabase:
     """拥有异步 SQLite engine，并统一管理初始化与关闭。"""

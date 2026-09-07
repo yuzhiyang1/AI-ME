@@ -9,6 +9,8 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException, Query, Response, status
 from fastapi.responses import StreamingResponse
 
+from aime.application.approvals.exceptions import ApprovalAlreadyResolved, ApprovalNotFound
+from aime.application.approvals.services import DecideApproval, ListPendingApprovals
 from aime.application.models.services import (
     ListAvailableModels,
     StreamModelCompletion,
@@ -45,18 +47,22 @@ from aime.application.sessions.turn_services import (
     StartTurn,
     StartTurnCommand,
 )
+from aime.application.tools.services import ListToolInvocations
 from aime.application.work_items.commands import CreateWorkItemCommand
 from aime.application.work_items.services import CreateWorkItem, ListWorkItems
 from aime.presentation.api.schemas import (
+    ApprovalResponse,
     ChatCompletionRequest,
     CreateSessionRequest,
     CreateWorkItemRequest,
+    DecideApprovalRequest,
     HealthResponse,
     ModelResponse,
     RuntimeEventResponse,
     SessionItemResponse,
     SessionResponse,
     StartTurnRequest,
+    ToolInvocationResponse,
     TurnResponse,
     WorkItemResponse,
 )
@@ -76,6 +82,9 @@ def build_router(
     list_session_items: ListSessionItems,
     list_runtime_events: ListRuntimeEvents,
     interrupt_turn: InterruptTurn,
+    list_pending_approvals: ListPendingApprovals,
+    decide_approval: DecideApproval,
+    list_tool_invocations: ListToolInvocations,
 ) -> APIRouter:
     """使用已经装配好的用例创建路由。"""
     router = APIRouter(prefix="/api")
@@ -282,6 +291,56 @@ def build_router(
         except TurnNotActive as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
         return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @router.get(
+        "/sessions/{session_id}/approvals",
+        response_model=list[ApprovalResponse],
+    )
+    async def list_agent_approvals(session_id: UUID) -> list[ApprovalResponse]:
+        """返回当前等待用户处理的危险工具调用。"""
+        try:
+            await get_session.execute(session_id)
+            approvals = await list_pending_approvals.execute(session_id)
+        except SessionNotFound as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        return [ApprovalResponse.from_domain(approval) for approval in approvals]
+
+    @router.post(
+        "/sessions/{session_id}/approvals/{approval_id}/decision",
+        response_model=ApprovalResponse,
+    )
+    async def decide_agent_approval(
+        session_id: UUID,
+        approval_id: UUID,
+        payload: DecideApprovalRequest,
+    ) -> ApprovalResponse:
+        """原子提交一次审批决定并唤醒原 AgentRun。"""
+        try:
+            approval = await decide_approval.execute(
+                session_id,
+                approval_id,
+                payload.decision,
+            )
+        except ApprovalNotFound as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        except ApprovalAlreadyResolved as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        return ApprovalResponse.from_domain(approval)
+
+    @router.get(
+        "/sessions/{session_id}/tool-invocations",
+        response_model=list[ToolInvocationResponse],
+    )
+    async def list_agent_tool_invocations(
+        session_id: UUID,
+    ) -> list[ToolInvocationResponse]:
+        """返回工具 T1/T2 账本，供客户端审计和故障诊断。"""
+        try:
+            await get_session.execute(session_id)
+        except SessionNotFound as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        invocations = await list_tool_invocations.execute(session_id)
+        return [ToolInvocationResponse.from_domain(invocation) for invocation in invocations]
 
     return router
 

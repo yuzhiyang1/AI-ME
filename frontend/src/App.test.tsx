@@ -8,13 +8,16 @@ import type { AgentSession, AgentTurn, SessionItem } from "./api";
 
 const api = vi.hoisted(() => ({
   createSession: vi.fn(),
+  decideApproval: vi.fn(),
   getActiveTurn: vi.fn(),
   getSession: vi.fn(),
   getTurnByClientRequest: vi.fn(),
   interruptTurn: vi.fn(),
   listModels: vi.fn(),
+  listPendingApprovals: vi.fn(),
   listSessionItems: vi.fn(),
   listSessions: vi.fn(),
+  listToolInvocations: vi.fn(),
   startTurn: vi.fn(),
   streamRuntimeEvents: vi.fn(),
 }));
@@ -63,9 +66,84 @@ describe("会话页面异步隔离", () => {
       sessionId === sessionA.id ? sessionA : sessionB,
     );
     api.getActiveTurn.mockResolvedValue(null);
+    api.listPendingApprovals.mockResolvedValue([]);
+    api.listToolInvocations.mockResolvedValue([]);
     api.getTurnByClientRequest.mockResolvedValue(null);
     api.startTurn.mockResolvedValue(acceptedTurn);
     api.streamRuntimeEvents.mockResolvedValue(undefined);
+  });
+
+  it("恢复会话后展示待审批工具，并允许用户仅批准本次", async () => {
+    api.listSessionItems.mockResolvedValue([]);
+    const approval = {
+      id: "approval-a",
+      sessionId: sessionA.id,
+      turnId: acceptedTurn.id,
+      runId: "run-a",
+      invocationId: "invocation-a",
+      toolName: "run_powershell",
+      arguments: { command: "Get-ChildItem" },
+      reason: "PowerShell 可以访问本地资源",
+      status: "pending",
+      decision: null,
+      requestedAt: "2026-09-05T00:00:00Z",
+      resolvedAt: null,
+    };
+    api.listPendingApprovals.mockResolvedValue([approval]);
+    api.decideApproval.mockResolvedValue({
+      ...approval,
+      status: "approved",
+      decision: "approve_once",
+    });
+
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByText("工具执行需要你的确认");
+    expect(screen.getByText("run_powershell")).toBeTruthy();
+    expect(screen.getByText(/Get-ChildItem/)).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "仅本次允许" }));
+
+    await waitFor(() =>
+      expect(api.decideApproval).toHaveBeenCalledWith(
+        sessionA.id,
+        approval.id,
+        "approve_once",
+      ),
+    );
+    await waitFor(() => expect(screen.queryByText("工具执行需要你的确认")).toBeNull());
+  });
+
+  it("重新打开会话时在对应用户消息后恢复工具审计记录", async () => {
+    api.listSessionItems.mockResolvedValue([itemA]);
+    api.listToolInvocations.mockResolvedValue([
+      {
+        id: "invocation-read",
+        sessionId: sessionA.id,
+        turnId: itemA.turnId,
+        runId: "run-read",
+        callId: "call-read",
+        stepIndex: 1,
+        callIndex: 0,
+        toolName: "read_file",
+        arguments: { path: "README.md" },
+        assistantText: "",
+        executionSemantics: "parallel",
+        riskLevel: "read",
+        status: "completed",
+        result: { content: "ok" },
+        isError: false,
+        preparedAt: "2026-09-05T00:00:00Z",
+        startedAt: "2026-09-05T00:00:01Z",
+        finishedAt: "2026-09-05T00:00:02Z",
+      },
+    ]);
+
+    render(<App />);
+
+    await screen.findByText("read_file");
+    expect(screen.getByText("README.md")).toBeTruthy();
+    expect(screen.getByText("已完成")).toBeTruthy();
   });
 
   it("切到 B 后忽略 A 延迟返回的 Items，也不会启动 A 的事件流", async () => {

@@ -6,6 +6,7 @@ from typing import Any
 
 from aime.application.ports.model_gateway import (
     ConversationMessage,
+    LlmAssistantToolCallMessage,
     LlmCompletionRequest,
     LlmErrorCategory,
     LlmFinishReason,
@@ -14,7 +15,10 @@ from aime.application.ports.model_gateway import (
     LlmStreamFailed,
     LlmTextDelta,
     LlmThinkingDelta,
+    LlmToolCall,
     LlmToolCallDelta,
+    LlmToolDefinition,
+    LlmToolResultMessage,
     MessageRole,
     ModelDescriptor,
 )
@@ -123,6 +127,43 @@ async def test_openai_classifies_retryable_provider_error() -> None:
     assert events[-1].error.code == "provider_unavailable"
 
 
+async def test_openai_serializes_tool_definitions_calls_and_results() -> None:
+    """统一工具消息必须被准确翻译为 OpenAI Chat Completions 结构。"""
+    create = _FakeCreate([])
+    call = LlmToolCall("call-1", "read_file", '{"path":"a.txt"}')
+    tool = LlmToolDefinition("read_file", "读取文件", {"type": "object"})
+
+    await _collect(
+        _openai_api(create).stream(
+            "gpt-5",
+            [
+                USER,
+                LlmAssistantToolCallMessage((call,), "我先读取"),
+                LlmToolResultMessage("call-1", "read_file", '{"content":"ok"}'),
+            ],
+            None,
+            None,
+            None,
+            [tool],
+            True,
+        )
+    )
+
+    payload = create.calls[0]
+    assert payload["tools"][0]["function"] == {
+        "name": "read_file",
+        "description": "读取文件",
+        "parameters": {"type": "object"},
+    }
+    assert payload["parallel_tool_calls"] is True
+    assert payload["messages"][1]["tool_calls"][0]["function"]["arguments"] == call.arguments_json
+    assert payload["messages"][2] == {
+        "role": "tool",
+        "tool_call_id": "call-1",
+        "content": '{"content":"ok"}',
+    }
+
+
 async def test_anthropic_translates_tool_use_finish_reason_and_usage() -> None:
     create = _FakeCreate(
         [
@@ -163,6 +204,39 @@ async def test_anthropic_translates_tool_use_finish_reason_and_usage() -> None:
     assert create.calls[0]["messages"] == [{"role": "user", "content": "你好"}]
 
 
+async def test_anthropic_serializes_tool_calls_and_groups_results() -> None:
+    """Anthropic 要求同一步的多个 tool_result 合并到一条 user 消息。"""
+    create = _FakeCreate([])
+    client = NS(messages=NS(create=create))
+    api = AnthropicMessagesApi(client)  # type: ignore[arg-type]
+    calls = (
+        LlmToolCall("call-a", "read_file", '{"path":"a.txt"}'),
+        LlmToolCall("call-b", "read_file", '{"path":"b.txt"}'),
+    )
+
+    await _collect(
+        api.stream(
+            "claude-sonnet-4-5",
+            [
+                USER,
+                LlmAssistantToolCallMessage(calls),
+                LlmToolResultMessage("call-a", "read_file", "A"),
+                LlmToolResultMessage("call-b", "read_file", "B", is_error=True),
+            ],
+            None,
+            None,
+            None,
+            [LlmToolDefinition("read_file", "读取", {"type": "object"})],
+        )
+    )
+
+    payload = create.calls[0]
+    assert payload["tools"][0]["input_schema"] == {"type": "object"}
+    assert payload["messages"][1]["content"][0]["input"] == {"path": "a.txt"}
+    assert len(payload["messages"][2]["content"]) == 2
+    assert payload["messages"][2]["content"][1]["is_error"] is True
+
+
 class _RecordingApi:
     def __init__(self) -> None:
         self.calls: list[Any] = []
@@ -170,12 +244,14 @@ class _RecordingApi:
     async def stream(
         self,
         model_id: str,
-        messages: list[ConversationMessage],
+        messages: list[ConversationMessage | LlmAssistantToolCallMessage | LlmToolResultMessage],
         system: str | None,
         max_tokens: int | None,
         temperature: float | None,
+        tools: list[LlmToolDefinition] | None = None,
+        parallel_tool_calls: bool = True,
     ) -> AsyncIterator[LlmStreamEvent]:
-        self.calls.append((model_id, messages, system))
+        self.calls.append((model_id, messages, system, tools, parallel_tool_calls))
         yield LlmTextDelta("hi")
         yield LlmStreamCompleted(LlmFinishReason.STOP)
 
@@ -200,7 +276,7 @@ async def test_gateway_routes_by_provider() -> None:
     )
 
     assert isinstance(events[0], LlmTextDelta)
-    assert api.calls == [("m1", [USER], "s")]
+    assert api.calls == [("m1", [USER], "s", [], True)]
 
 
 async def test_gateway_unknown_model_yields_structured_error() -> None:

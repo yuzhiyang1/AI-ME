@@ -7,13 +7,16 @@ from alembic import command
 from alembic.config import Config
 
 _PREVIEW_BASE_REVISION = "0001_agent_sessions"
-_APP_TABLES = {
+_PREVIEW_TOOL_REVISION = "0003_tool_execution_ledger"
+_BASE_APP_TABLES = {
     "agent_sessions",
     "agent_turns",
     "agent_runs",
     "runtime_events",
     "session_items",
 }
+_TOOL_APP_TABLES = {"tool_invocations", "approval_requests", "approval_grants"}
+_APP_TABLES = _BASE_APP_TABLES | _TOOL_APP_TABLES
 _EXPECTED_COLUMNS: dict[str, dict[str, tuple[str, int | None]]] = {
     "agent_sessions": {
         "id": ("VARCHAR(36)", 1),
@@ -70,14 +73,59 @@ _EXPECTED_COLUMNS: dict[str, dict[str, tuple[str, int | None]]] = {
         "content_json": ("TEXT", 1),
         "created_at": ("DATETIME", 1),
     },
+    "tool_invocations": {
+        "id": ("VARCHAR(36)", 1),
+        "session_id": ("VARCHAR(36)", 1),
+        "turn_id": ("VARCHAR(36)", 1),
+        "run_id": ("VARCHAR(36)", 1),
+        "call_id": ("VARCHAR(200)", 1),
+        "step_index": ("INTEGER", 1),
+        "call_index": ("INTEGER", 1),
+        "tool_name": ("VARCHAR(128)", 1),
+        "arguments_json": ("TEXT", 1),
+        "assistant_text": ("TEXT", 1),
+        "execution_semantics": ("VARCHAR(32)", 1),
+        "risk_level": ("VARCHAR(32)", 1),
+        "status": ("VARCHAR(32)", 1),
+        "result_json": ("TEXT", 0),
+        "is_error": ("BOOLEAN", 0),
+        "prepared_at": ("DATETIME", 1),
+        "started_at": ("DATETIME", 0),
+        "finished_at": ("DATETIME", 0),
+    },
+    "approval_requests": {
+        "id": ("VARCHAR(36)", 1),
+        "session_id": ("VARCHAR(36)", 1),
+        "turn_id": ("VARCHAR(36)", 1),
+        "run_id": ("VARCHAR(36)", 1),
+        "invocation_id": ("VARCHAR(36)", 1),
+        "reason": ("TEXT", 1),
+        "status": ("VARCHAR(32)", 1),
+        "decision": ("VARCHAR(32)", 0),
+        "requested_at": ("DATETIME", 1),
+        "resolved_at": ("DATETIME", 0),
+    },
+    "approval_grants": {
+        "id": ("VARCHAR(36)", 1),
+        "session_id": ("VARCHAR(36)", 1),
+        "tool_name": ("VARCHAR(128)", 1),
+        "approval_id": ("VARCHAR(36)", 1),
+        "created_at": ("DATETIME", 1),
+    },
 }
-_REQUIRED_UNIQUE_COLUMNS = {
+_REQUIRED_UNIQUE_COLUMNS: dict[str, set[tuple[str, ...]]] = {
     "agent_turns": {("session_id", "client_request_id")},
     "agent_runs": {("turn_id", "attempt")},
     "runtime_events": {("session_id", "sequence")},
     "session_items": {("session_id", "sequence")},
+    "tool_invocations": {
+        ("run_id", "call_id"),
+        ("run_id", "step_index", "call_index"),
+    },
+    "approval_requests": {("invocation_id",)},
+    "approval_grants": {("session_id", "tool_name")},
 }
-_REQUIRED_FOREIGN_KEYS = {
+_REQUIRED_FOREIGN_KEYS: dict[str, set[tuple[str, str, str, str]]] = {
     "agent_turns": {("session_id", "agent_sessions", "id", "CASCADE")},
     "agent_runs": {
         ("session_id", "agent_sessions", "id", "CASCADE"),
@@ -92,6 +140,21 @@ _REQUIRED_FOREIGN_KEYS = {
         ("session_id", "agent_sessions", "id", "CASCADE"),
         ("turn_id", "agent_turns", "id", "CASCADE"),
         ("run_id", "agent_runs", "id", "CASCADE"),
+    },
+    "tool_invocations": {
+        ("session_id", "agent_sessions", "id", "CASCADE"),
+        ("turn_id", "agent_turns", "id", "CASCADE"),
+        ("run_id", "agent_runs", "id", "CASCADE"),
+    },
+    "approval_requests": {
+        ("session_id", "agent_sessions", "id", "CASCADE"),
+        ("turn_id", "agent_turns", "id", "CASCADE"),
+        ("run_id", "agent_runs", "id", "CASCADE"),
+        ("invocation_id", "tool_invocations", "id", "CASCADE"),
+    },
+    "approval_grants": {
+        ("session_id", "agent_sessions", "id", "CASCADE"),
+        ("approval_id", "approval_requests", "id", "CASCADE"),
     },
 }
 
@@ -137,30 +200,40 @@ def _adopt_preview_database(database_path: Path, config: Config) -> None:
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             ).fetchall()
         }
-        missing = _APP_TABLES - tables
+        missing = _BASE_APP_TABLES - tables
         if missing:
             missing_names = ", ".join(sorted(missing))
             raise RuntimeError(f"未版本化状态库结构不完整，缺少：{missing_names}")
-        _validate_columns(connection)
-        _validate_unique_constraints(connection)
-        _validate_foreign_keys(connection)
+        present_tool_tables = tables & _TOOL_APP_TABLES
+        if present_tool_tables and present_tool_tables != _TOOL_APP_TABLES:
+            missing_tools = _TOOL_APP_TABLES - present_tool_tables
+            raise RuntimeError(f"未版本化状态库工具账本不完整，缺少：{sorted(missing_tools)}")
+        validated_tables = _BASE_APP_TABLES | present_tool_tables
+        _validate_columns(connection, validated_tables)
+        _validate_unique_constraints(connection, validated_tables)
+        _validate_foreign_keys(connection, validated_tables)
         _validate_existing_rows(connection)
         _ensure_active_turn_index(connection)
-    command.stamp(config, _PREVIEW_BASE_REVISION)
+    preview_revision = (
+        _PREVIEW_TOOL_REVISION
+        if present_tool_tables == _TOOL_APP_TABLES
+        else _PREVIEW_BASE_REVISION
+    )
+    command.stamp(config, preview_revision)
     command.upgrade(config, "head")
 
 
-def _validate_columns(connection: sqlite3.Connection) -> None:
+def _validate_columns(connection: sqlite3.Connection, table_names: set[str]) -> None:
     """精确校验预览库的完整列集合、SQLite 类型与可空性。"""
-    for table_name, expected_columns in _EXPECTED_COLUMNS.items():
+    for table_name in table_names:
+        expected_columns = _EXPECTED_COLUMNS[table_name]
         rows = connection.execute(f"PRAGMA table_info('{table_name}')").fetchall()
         actual_columns = {str(row[1]): row for row in rows}
         if actual_columns.keys() != expected_columns.keys():
             missing = sorted(expected_columns.keys() - actual_columns.keys())
             unexpected = sorted(actual_columns.keys() - expected_columns.keys())
             raise RuntimeError(
-                f"未版本化状态库表 {table_name} 字段不匹配；"
-                f"缺少={missing}，多出={unexpected}"
+                f"未版本化状态库表 {table_name} 字段不匹配；缺少={missing}，多出={unexpected}"
             )
         for column_name, (expected_type, expected_not_null) in expected_columns.items():
             row = actual_columns[column_name]
@@ -176,9 +249,10 @@ def _validate_columns(connection: sqlite3.Connection) -> None:
                 )
 
 
-def _validate_unique_constraints(connection: sqlite3.Connection) -> None:
+def _validate_unique_constraints(connection: sqlite3.Connection, table_names: set[str]) -> None:
     """确认幂等键与事件序列等关键唯一约束没有在预览库中丢失。"""
-    for table_name, required_columns in _REQUIRED_UNIQUE_COLUMNS.items():
+    for table_name in table_names:
+        required_columns: set[tuple[str, ...]] = _REQUIRED_UNIQUE_COLUMNS.get(table_name, set())
         unique_columns: set[tuple[str, ...]] = set()
         for index_row in connection.execute(f"PRAGMA index_list('{table_name}')").fetchall():
             if not index_row[2]:
@@ -194,9 +268,12 @@ def _validate_unique_constraints(connection: sqlite3.Connection) -> None:
             raise RuntimeError(f"未版本化状态库表 {table_name} 缺少关键唯一约束：{missing}")
 
 
-def _validate_foreign_keys(connection: sqlite3.Connection) -> None:
+def _validate_foreign_keys(connection: sqlite3.Connection, table_names: set[str]) -> None:
     """确认聚合账本各表仍保持预期级联外键。"""
-    for table_name, required_foreign_keys in _REQUIRED_FOREIGN_KEYS.items():
+    for table_name in table_names:
+        required_foreign_keys: set[tuple[str, str, str, str]] = _REQUIRED_FOREIGN_KEYS.get(
+            table_name, set()
+        )
         actual = {
             (str(row[3]), str(row[2]), str(row[4]), str(row[6]).upper())
             for row in connection.execute(f"PRAGMA foreign_key_list('{table_name}')").fetchall()
@@ -216,8 +293,7 @@ def _validate_existing_rows(connection: sqlite3.Connection) -> None:
 def _ensure_active_turn_index(connection: sqlite3.Connection) -> None:
     """补建缺失索引，但拒绝同名、非唯一或谓词错误的可疑索引。"""
     index_row = connection.execute(
-        "SELECT sql FROM sqlite_master WHERE type = 'index' "
-        "AND name = 'uq_active_turn_per_session'"
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'uq_active_turn_per_session'"
     ).fetchone()
     if index_row is None:
         connection.execute(
@@ -237,9 +313,7 @@ def _ensure_active_turn_index(connection: sqlite3.Connection) -> None:
     )
     columns = tuple(
         str(row[2])
-        for row in connection.execute(
-            "PRAGMA index_info('uq_active_turn_per_session')"
-        ).fetchall()
+        for row in connection.execute("PRAGMA index_info('uq_active_turn_per_session')").fetchall()
     )
     sql = str(index_row[0] or "").upper()
     required_fragments = ("WHERE", "QUEUED", "IN_PROGRESS", "WAITING_FOR_USER")

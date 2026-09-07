@@ -12,11 +12,14 @@ from typing import Protocol
 
 from aime.application.ports.model_gateway import (
     ConversationMessage,
+    LlmAssistantToolCallMessage,
     LlmCompletionRequest,
     LlmError,
     LlmErrorCategory,
     LlmStreamEvent,
     LlmStreamFailed,
+    LlmToolDefinition,
+    LlmToolResultMessage,
     ModelDescriptor,
 )
 from aime.infrastructure.llm.catalog import BUILTIN_PROVIDERS, ApiKind, ProviderDefinition
@@ -32,10 +35,12 @@ class _ProtocolApi(Protocol):
     def stream(
         self,
         model_id: str,
-        messages: list[ConversationMessage],
+        messages: list[ConversationMessage | LlmAssistantToolCallMessage | LlmToolResultMessage],
         system: str | None,
         max_tokens: int | None,
         temperature: float | None,
+        tools: list[LlmToolDefinition] | None = None,
+        parallel_tool_calls: bool = True,
     ) -> AsyncIterator[LlmStreamEvent]: ...
 
 
@@ -92,6 +97,8 @@ class ProtocolModelGateway:
             request.system,
             request.max_tokens,
             request.temperature,
+            list(request.tools),
+            request.parallel_tool_calls,
         )
         async for event in stream:
             yield event

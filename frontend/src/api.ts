@@ -63,6 +63,51 @@ export interface AgentTurn {
   finishedAt: string | null;
 }
 
+export type ApprovalDecision = "approve_once" | "approve_session" | "reject";
+
+export interface ApprovalRequest {
+  id: string;
+  sessionId: string;
+  turnId: string;
+  runId: string;
+  invocationId: string;
+  toolName: string;
+  arguments: Record<string, unknown>;
+  reason: string;
+  status: "pending" | "approved" | "rejected";
+  decision: ApprovalDecision | null;
+  requestedAt: string;
+  resolvedAt: string | null;
+}
+
+export interface ToolInvocation {
+  id: string;
+  sessionId: string;
+  turnId: string;
+  runId: string;
+  callId: string;
+  stepIndex: number;
+  callIndex: number;
+  toolName: string;
+  arguments: Record<string, unknown>;
+  assistantText: string;
+  executionSemantics: "parallel" | "exclusive_step";
+  riskLevel: "read" | "workspace_write" | "shell";
+  status:
+    | "prepared"
+    | "waiting_for_approval"
+    | "running"
+    | "completed"
+    | "failed"
+    | "rejected"
+    | "uncertain";
+  result: Record<string, unknown> | null;
+  isError: boolean | null;
+  preparedAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+
 interface ApiModelDescriptor {
   ref: string;
   provider: string;
@@ -171,6 +216,28 @@ export async function interruptTurn(sessionId: string, turnId: string): Promise<
     const body = (await response.json().catch(() => null)) as { detail?: string } | null;
     throw new ApiError(body?.detail ?? `中断失败（${response.status}）`, response.status);
   }
+}
+
+export function listPendingApprovals(sessionId: string): Promise<ApprovalRequest[]> {
+  return request<ApprovalRequest[]>(`/api/sessions/${sessionId}/approvals`);
+}
+
+export function listToolInvocations(sessionId: string): Promise<ToolInvocation[]> {
+  return request<ToolInvocation[]>(`/api/sessions/${sessionId}/tool-invocations`);
+}
+
+export function decideApproval(
+  sessionId: string,
+  approvalId: string,
+  decision: ApprovalDecision,
+): Promise<ApprovalRequest> {
+  return request<ApprovalRequest>(
+    `/api/sessions/${sessionId}/approvals/${approvalId}/decision`,
+    {
+      method: "POST",
+      body: JSON.stringify({ decision }),
+    },
+  );
 }
 
 export async function streamRuntimeEvents(

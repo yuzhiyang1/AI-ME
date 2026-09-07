@@ -6,6 +6,7 @@ from uuid import UUID
 
 from aime.application.ports.model_gateway import ConversationMessage
 from aime.domain.sessions.entities import AgentRun, AgentTurn, RuntimeEvent, SessionItem
+from aime.domain.sessions.value_objects import PermissionProfile
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,6 +18,8 @@ class TurnExecution:
     instruction: str
     messages: tuple[ConversationMessage, ...]
     newly_created: bool
+    workspace_path: str = ""
+    permission_profile: PermissionProfile = PermissionProfile.READ_ONLY
 
 
 class ConversationStore(Protocol):
@@ -32,6 +35,10 @@ class ConversationStore(Protocol):
 
     async def mark_run_started(self, execution: TurnExecution) -> bool: ...
 
+    async def mark_run_waiting(self, execution: TurnExecution) -> bool: ...
+
+    async def mark_run_resumed(self, execution: TurnExecution) -> bool: ...
+
     async def complete_run(self, execution: TurnExecution, response_text: str) -> bool: ...
 
     async def append_run_event(
@@ -46,6 +53,8 @@ class ConversationStore(Protocol):
     async def interrupt_run(self, execution: TurnExecution) -> bool: ...
 
     async def recover_incomplete_runs(self) -> int: ...
+
+    async def list_resumable_executions(self) -> list[TurnExecution]: ...
 
     async def get_active_turn(self, session_id: UUID) -> AgentTurn | None: ...
 

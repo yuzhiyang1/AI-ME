@@ -16,6 +16,8 @@ from aime.domain.sessions.value_objects import (
     SessionLifecycle,
     TurnStatus,
 )
+from aime.domain.tool_execution.entities import ApprovalRequest, ToolInvocation
+from aime.domain.tool_execution.value_objects import ApprovalDecision, ApprovalStatus
 from aime.domain.work_items.entities import WorkItem
 from aime.domain.work_items.value_objects import WorkItemStatus
 
@@ -227,4 +229,92 @@ class RuntimeEventResponse(_CamelCaseModel):
             type=event.type,
             payload=event.payload,
             created_at=event.created_at,
+        )
+
+
+class DecideApprovalRequest(_CamelCaseModel):
+    """处理危险工具调用的用户决定。"""
+
+    decision: ApprovalDecision
+
+
+class ApprovalResponse(_CamelCaseModel):
+    """客户端展示和处理审批所需的稳定字段。"""
+
+    id: UUID
+    session_id: UUID
+    turn_id: UUID
+    run_id: UUID
+    invocation_id: UUID
+    tool_name: str
+    arguments: dict[str, object]
+    reason: str
+    status: ApprovalStatus
+    decision: ApprovalDecision | None
+    requested_at: datetime
+    resolved_at: datetime | None
+
+    @classmethod
+    def from_domain(cls, approval: ApprovalRequest) -> "ApprovalResponse":
+        """把审批领域对象转换为 HTTP DTO。"""
+        return cls(
+            id=approval.id,
+            session_id=approval.session_id,
+            turn_id=approval.turn_id,
+            run_id=approval.run_id,
+            invocation_id=approval.invocation_id,
+            tool_name=approval.tool_name,
+            arguments=approval.arguments,
+            reason=approval.reason,
+            status=approval.status,
+            decision=approval.decision,
+            requested_at=approval.requested_at,
+            resolved_at=approval.resolved_at,
+        )
+
+
+class ToolInvocationResponse(_CamelCaseModel):
+    """一条可审计工具调用的 T1/T2 读取模型。"""
+
+    id: UUID
+    session_id: UUID
+    turn_id: UUID
+    run_id: UUID
+    call_id: str
+    step_index: int
+    call_index: int
+    tool_name: str
+    arguments: dict[str, object]
+    assistant_text: str
+    execution_semantics: str
+    risk_level: str
+    status: str
+    result: dict[str, object] | None
+    is_error: bool | None
+    prepared_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+
+    @classmethod
+    def from_domain(cls, invocation: ToolInvocation) -> "ToolInvocationResponse":
+        """把工具调用领域事实转换为 HTTP DTO。"""
+        return cls(
+            id=invocation.id,
+            session_id=invocation.session_id,
+            turn_id=invocation.turn_id,
+            run_id=invocation.run_id,
+            call_id=invocation.call_id,
+            step_index=invocation.step_index,
+            call_index=invocation.call_index,
+            tool_name=invocation.tool_name,
+            arguments=invocation.arguments,
+            assistant_text=invocation.assistant_text,
+            execution_semantics=invocation.execution_semantics,
+            risk_level=invocation.risk_level,
+            status=invocation.status.value,
+            result=invocation.result,
+            is_error=invocation.is_error,
+            prepared_at=invocation.prepared_at,
+            started_at=invocation.started_at,
+            finished_at=invocation.finished_at,
         )

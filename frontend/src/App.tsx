@@ -13,23 +13,29 @@ import {
   Sparkles,
   Square,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 
 import {
   ApiError,
+  type ApprovalDecision,
+  type ApprovalRequest,
   type AgentSession,
   type AgentTurn,
   type ModelDescriptor,
   type PermissionProfile,
   type RuntimeEvent,
   type SessionItem,
+  type ToolInvocation,
   createSession,
+  decideApproval,
   getActiveTurn,
   getSession,
   interruptTurn,
   listModels,
+  listPendingApprovals,
   listSessionItems,
   listSessions,
+  listToolInvocations,
   streamRuntimeEvents,
 } from "./api";
 import {
@@ -77,6 +83,9 @@ function App() {
   const [settlingRequest, setSettlingRequest] = useState(false);
   const [sessionLoading, setSessionLoading] = useState(false);
   const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
+  const [approvals, setApprovals] = useState<ApprovalRequest[]>([]);
+  const [toolInvocations, setToolInvocations] = useState<ToolInvocation[]>([]);
+  const [decidingApprovalId, setDecidingApprovalId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const streamController = useRef<AbortController | null>(null);
@@ -132,6 +141,8 @@ function App() {
     setDraft("");
     setLiveAnswer("");
     setActiveTurnId(null);
+    setApprovals([]);
+    setToolInvocations([]);
     const requestInFlight = requestControllers.current.get(session.id);
     const isConfirming = requestInFlight !== undefined && !requestInFlight.signal.aborted;
     const isSettling = settlingRequestKeys.current.has(session.id);
@@ -142,10 +153,19 @@ function App() {
     setError(null);
     try {
       const pendingRequest = pendingTurnRequests.current.get(session.id);
-      const [freshSession, loadedItems, activeTurn, reconciledTurn] = await Promise.all([
+      const [
+        freshSession,
+        loadedItems,
+        activeTurn,
+        pendingApprovals,
+        loadedInvocations,
+        reconciledTurn,
+      ] = await Promise.all([
         getSession(session.id),
         listSessionItems(session.id),
         getActiveTurn(session.id),
+        listPendingApprovals(session.id),
+        listToolInvocations(session.id),
         pendingRequest && !isSettling
           ? lookupTurnWithTimeout(session.id, pendingRequest.clientRequestId)
           : Promise.resolve(null),
@@ -169,6 +189,8 @@ function App() {
       setActiveSession(freshSession);
       setItems(loadedItems);
       setActiveTurnId(activeTurn?.id ?? null);
+      setApprovals(pendingApprovals);
+      setToolInvocations(loadedInvocations);
       setConfirmingRequest(hasInFlightRequest && activeTurn === null);
       setSettlingRequest(hasSettlingRequest);
       setSessionLoading(false);
@@ -239,10 +261,19 @@ function App() {
         }
 
         try {
-          const [updatedSession, updatedItems, activeTurn, updatedSessions] = await Promise.all([
+          const [
+            updatedSession,
+            updatedItems,
+            activeTurn,
+            pendingApprovals,
+            updatedInvocations,
+            updatedSessions,
+          ] = await Promise.all([
             getSession(sessionId),
             listSessionItems(sessionId),
             getActiveTurn(sessionId),
+            listPendingApprovals(sessionId),
+            listToolInvocations(sessionId),
             listSessions(),
           ]);
           if (!isCurrentSessionView(sessionId, viewGeneration)) return;
@@ -250,6 +281,8 @@ function App() {
           setItems(updatedItems);
           setSessions(updatedSessions);
           setActiveTurnId(activeTurn?.id ?? null);
+          setApprovals(pendingApprovals);
+          setToolInvocations(updatedInvocations);
           setSending(activeTurn !== null);
           if (activeTurn === null) {
             setLiveAnswer("");
@@ -279,12 +312,57 @@ function App() {
     viewGeneration: number,
     event: RuntimeEvent,
   ) {
-    if (!isCurrentSessionView(sessionId, viewGeneration) || event.type !== "text_delta") {
+    if (!isCurrentSessionView(sessionId, viewGeneration)) {
       return;
     }
+    if (event.type === "approval_required") {
+      void refreshRuntimeFacts(sessionId, viewGeneration);
+      return;
+    }
+    if (event.type.startsWith("tool_")) {
+      void refreshRuntimeFacts(sessionId, viewGeneration);
+      return;
+    }
+    if (event.type !== "text_delta") return;
     setActiveTurnId(event.turnId);
     const text = event.payload.text;
     if (typeof text === "string") setLiveAnswer((current) => current + text);
+  }
+
+  async function refreshRuntimeFacts(sessionId: string, viewGeneration: number) {
+    try {
+      const [pendingApprovals, invocations, session] = await Promise.all([
+        listPendingApprovals(sessionId),
+        listToolInvocations(sessionId),
+        getSession(sessionId),
+      ]);
+      if (!isCurrentSessionView(sessionId, viewGeneration)) return;
+      setApprovals(pendingApprovals);
+      setToolInvocations(invocations);
+      setActiveSession(session);
+    } catch (reason) {
+      if (isCurrentSessionView(sessionId, viewGeneration)) setError(messageFrom(reason));
+    }
+  }
+
+  async function resolveApproval(approval: ApprovalRequest, decision: ApprovalDecision) {
+    if (!activeSession || decidingApprovalId) return;
+    const sessionId = activeSession.id;
+    const viewGeneration = sessionViewGeneration.current;
+    setDecidingApprovalId(approval.id);
+    setError(null);
+    try {
+      await decideApproval(sessionId, approval.id, decision);
+      if (!isCurrentSessionView(sessionId, viewGeneration)) return;
+      setApprovals((current) => current.filter((item) => item.id !== approval.id));
+      setActiveSession((current) =>
+        current && current.id === sessionId ? { ...current, activity: "running" } : current,
+      );
+    } catch (reason) {
+      if (isCurrentSessionView(sessionId, viewGeneration)) setError(messageFrom(reason));
+    } finally {
+      if (isCurrentSessionView(sessionId, viewGeneration)) setDecidingApprovalId(null);
+    }
   }
 
   async function submitTurn() {
@@ -626,10 +704,30 @@ function App() {
                 </div>
               ) : null}
               <div className="message-stack">
-                {items.map((item) => <MessageItem key={item.id} item={item} />)}
-                {liveAnswer || (sending && !confirmingRequest && !settlingRequest) ? (
+                {items.map((item) => (
+                  <Fragment key={item.id}>
+                    <MessageItem item={item} />
+                    {item.type === "user_message"
+                      ? toolInvocations
+                          .filter((invocation) => invocation.turnId === item.turnId)
+                          .map((invocation) => (
+                            <ToolActivityCard key={invocation.id} invocation={invocation} />
+                          ))
+                      : null}
+                  </Fragment>
+                ))}
+                {approvals.length === 0 &&
+                (liveAnswer || (sending && !confirmingRequest && !settlingRequest)) ? (
                   <LiveMessage text={liveAnswer} />
                 ) : null}
+                {approvals.map((approval) => (
+                  <ApprovalCard
+                    key={approval.id}
+                    approval={approval}
+                    deciding={decidingApprovalId === approval.id}
+                    onDecision={(decision) => void resolveApproval(approval, decision)}
+                  />
+                ))}
                 <div ref={timelineEnd} />
               </div>
             </section>
@@ -727,6 +825,75 @@ function LiveMessage({ text }: { text: string }) {
         {text ? <p>{text}</p> : <div className="typing"><span /><span /><span /></div>}
       </div>
     </article>
+  );
+}
+
+const toolStatusLabels: Record<ToolInvocation["status"], string> = {
+  prepared: "已准备",
+  waiting_for_approval: "等待确认",
+  running: "执行中",
+  completed: "已完成",
+  failed: "失败",
+  rejected: "已拒绝",
+  uncertain: "结果不确定",
+};
+
+function ToolActivityCard({ invocation }: { invocation: ToolInvocation }) {
+  const argumentHint =
+    typeof invocation.arguments.path === "string"
+      ? invocation.arguments.path
+      : typeof invocation.arguments.command === "string"
+        ? invocation.arguments.command
+        : JSON.stringify(invocation.arguments);
+  return (
+    <div className={`tool-activity ${invocation.isError ? "failed" : ""}`}>
+      <span className="tool-activity-dot" />
+      <div>
+        <strong>{invocation.toolName}</strong>
+        <small>{argumentHint}</small>
+      </div>
+      <span>{toolStatusLabels[invocation.status]}</span>
+    </div>
+  );
+}
+
+function ApprovalCard({
+  approval,
+  deciding,
+  onDecision,
+}: {
+  approval: ApprovalRequest;
+  deciding: boolean;
+  onDecision: (decision: ApprovalDecision) => void;
+}) {
+  return (
+    <section className="approval-card" aria-label="工具执行需要确认">
+      <div className="approval-heading">
+        <span className="approval-icon"><ShieldCheck size={17} /></span>
+        <div>
+          <strong>工具执行需要你的确认</strong>
+          <small>{approval.toolName}</small>
+        </div>
+      </div>
+      <p>{approval.reason}</p>
+      <pre>{JSON.stringify(approval.arguments, null, 2)}</pre>
+      <div className="approval-actions">
+        <button type="button" disabled={deciding} onClick={() => onDecision("reject")}>
+          拒绝
+        </button>
+        <button type="button" disabled={deciding} onClick={() => onDecision("approve_once")}>
+          仅本次允许
+        </button>
+        <button
+          className="primary"
+          type="button"
+          disabled={deciding}
+          onClick={() => onDecision("approve_session")}
+        >
+          {deciding ? "正在处理…" : "本会话允许"}
+        </button>
+      </div>
+    </section>
   );
 }
 
