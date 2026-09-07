@@ -493,9 +493,18 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .markdown-image-blocked { color: var(--text-muted); }
 
 .typing { display: flex; gap: 4px; padding: 7px 0; }
-.typing span { width: 5px; height: 5px; border-radius: 50%; background: #a797e8; animation: typing 1s ease-in-out infinite; }
-.typing span:nth-child(2) { animation-delay: 120ms; }
-.typing span:nth-child(3) { animation-delay: 240ms; }
+.typing span {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  opacity: 0.32;
+  background: #a797e8;
+  transform: scale(0.84);
+  transform-origin: center;
+  animation: typing-sequence 1.05s ease-in-out infinite;
+}
+.typing span:nth-child(2) { animation-delay: 280ms; }
+.typing span:nth-child(3) { animation-delay: 560ms; }
 
 .tool-activity {
   display: grid;
@@ -671,7 +680,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .new-session-card > .inline-error { margin-top: 14px; }
 .create-session-button { display: flex; width: 100%; height: 40px; align-items: center; justify-content: center; gap: 8px; margin-top: 18px; border: 1px solid #6243dc; border-radius: 8px; color: #fff; background: linear-gradient(180deg, #7759ea, #6748dd); box-shadow: 0 6px 15px rgba(103, 72, 221, 0.2); cursor: pointer; font-size: 11.5px; font-weight: 630; }
 
-@keyframes typing { 0%, 100% { transform: translateY(0); opacity: 0.45; } 50% { transform: translateY(-2px); opacity: 1; } }
+@keyframes typing-sequence {
+  0%, 22%, 100% { transform: scale(0.84); opacity: 0.32; }
+  11% { transform: scale(1.22); opacity: 1; }
+}
 
 @media (max-width: 1050px) {
   :root { --sidebar-width: 220px; }
@@ -686,4 +698,5 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+  .typing span { animation: none; opacity: 0.55; transform: none; }
 }
