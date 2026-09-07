@@ -152,7 +152,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   cursor: pointer;
 }
 .sidebar-section-heading button:hover,
-.project-actions button:hover { color: var(--text-secondary); background: #eeeeF2; }
+.project-actions button:hover { color: var(--text-secondary); background: #eeeef2; }
 .project-group { margin-bottom: 3px; }
 .project-row { display: flex; min-width: 0; align-items: center; border-radius: 7px; }
 .project-row:hover { background: #f1f1f4; }
