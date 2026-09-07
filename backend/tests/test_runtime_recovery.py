@@ -20,6 +20,8 @@ from aime.application.ports.model_gateway import (
     ModelDescriptor,
 )
 from aime.application.ports.tool_execution import ToolExecutionContext, ToolExecutionResult
+from aime.application.projects.commands import CreateProjectCommand
+from aime.application.projects.services import CreateProject
 from aime.application.sessions.commands import CreateSessionCommand
 from aime.application.sessions.exceptions import ActiveTurnConflict
 from aime.application.sessions.services import CreateSession
@@ -27,6 +29,7 @@ from aime.composition import build_container
 from aime.domain.sessions.value_objects import PermissionProfile
 from aime.infrastructure.persistence.sqlite_conversation_store import SqliteConversationStore
 from aime.infrastructure.persistence.sqlite_database import SqliteDatabase
+from aime.infrastructure.persistence.sqlite_project_repository import SqliteProjectRepository
 from aime.infrastructure.persistence.sqlite_session_repository import SqliteSessionRepository
 from aime.infrastructure.persistence.sqlite_tool_execution_store import SqliteToolExecutionStore
 from aime.infrastructure.tools.builtin import BuiltInToolRegistry
@@ -67,6 +70,58 @@ class _RecoveredCompletedToolGateway:
         assert json.loads(result.content)["exit_code"] == 0
         yield LlmTextDelta("复用了崩溃前已经保存的工具结果")
         yield LlmStreamCompleted(LlmFinishReason.STOP)
+
+
+async def test_session_workspace_roots_survive_process_restart(tmp_path: Path) -> None:
+    """重启后重建的 TurnExecution 必须继续使用 Session 创建时的 roots 快照。"""
+    primary = tmp_path / "primary"
+    secondary = tmp_path / "secondary"
+    primary.mkdir()
+    secondary.mkdir()
+    state_dir = tmp_path / "state"
+    database = SqliteDatabase(state_dir)
+    await database.initialize()
+    project_repository = SqliteProjectRepository(database.session_factory)
+    project = await CreateProject(project_repository).execute(
+        CreateProjectCommand(
+            name="AI-ME",
+            roots=(str(primary), str(secondary)),
+            idempotency_key="runtime-roots",
+        )
+    )
+    session = await CreateSession(
+        SqliteSessionRepository(database.session_factory),
+        project_repository,
+    ).execute(
+        CreateSessionCommand(
+            project_id=project.id,
+            workspace_path=None,
+            default_model="openai/gpt-5",
+            permission_profile=PermissionProfile.WORKSPACE_WRITE,
+        )
+    )
+    store = SqliteConversationStore(database.session_factory)
+    created = await store.start_turn(
+        session_id=session.id.value,
+        instruction="验证多目录恢复",
+        client_request_id="roots-recovery",
+    )
+    await database.close()
+
+    reopened_database = SqliteDatabase(state_dir)
+    await reopened_database.initialize()
+    reopened_store = SqliteConversationStore(reopened_database.session_factory)
+    replayed = await reopened_store.start_turn(
+        session_id=session.id.value,
+        instruction="验证多目录恢复",
+        client_request_id="roots-recovery",
+    )
+    await reopened_database.close()
+
+    expected = (str(primary.resolve()), str(secondary.resolve()))
+    assert created.workspace_roots == expected
+    assert replayed.workspace_roots == expected
+    assert replayed.newly_created is False
 
 
 async def test_incomplete_run_is_marked_interrupted_after_restart(tmp_path: Path) -> None:

@@ -82,7 +82,7 @@ class ListFilesTool:
         if not path.is_dir():
             raise ToolInputError("path 必须指向目录")
         entries = await asyncio.to_thread(
-            _list_entries, path, recursive, Path(context.workspace_path)
+            _list_entries, path, recursive, context
         )
         truncated = len(entries) > MAX_LIST_ENTRIES
         return ToolExecutionResult(
@@ -129,7 +129,7 @@ class SearchTextTool:
         except re.error as exc:
             raise ToolInputError(f"query 不是有效正则表达式：{exc}") from exc
         matches, truncated = await asyncio.to_thread(
-            _search_files, path, pattern, glob or None, Path(context.workspace_path)
+            _search_files, path, pattern, glob or None, context
         )
         return ToolExecutionResult({"matches": matches, "truncated": truncated})
 
@@ -336,21 +336,38 @@ def _permission_allows(permission: PermissionProfile, risk: ToolRiskLevel) -> bo
 
 
 def _workspace_path(context: ToolExecutionContext, raw_path: str, *, must_exist: bool) -> Path:
-    """解析并验证路径，阻断绝对路径、父目录和符号链接逃逸。"""
-    workspace = Path(context.workspace_path).resolve(strict=True)
+    """解析路径，并在跟随现有链接后验证全部 Session 授权 roots。"""
+    roots = tuple(
+        Path(root).resolve(strict=True)
+        for root in (context.workspace_roots or (context.workspace_path,))
+    )
     candidate = Path(raw_path)
-    if candidate.is_absolute():
-        raise ToolInputError("path 必须是相对工作区的路径")
-    resolved = (workspace / candidate).resolve(strict=must_exist)
+    unresolved = candidate if candidate.is_absolute() else roots[0] / candidate
     try:
-        resolved.relative_to(workspace)
-    except ValueError as exc:
-        raise ToolInputError("path 不能离开会话工作区") from exc
+        resolved = unresolved.resolve(strict=must_exist)
+    except (FileNotFoundError, OSError) as exc:
+        raise ToolInputError(f"path 不存在或无法访问：{raw_path}") from exc
+    if not any(_is_within(resolved, root) for root in roots):
+        raise ToolInputError("path 不能离开会话授权工作区")
     return resolved
 
 
 def _relative(path: Path, context: ToolExecutionContext) -> str:
-    return path.relative_to(Path(context.workspace_path).resolve()).as_posix() or "."
+    """主目录内返回相对路径；附加目录返回无歧义的规范化绝对路径。"""
+    primary = Path(context.workspace_path).resolve(strict=True)
+    try:
+        return path.relative_to(primary).as_posix() or "."
+    except ValueError:
+        return str(path)
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    """使用平台路径规则判断目标是否位于一个授权 root 内。"""
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
 
 
 def _required_string(arguments: dict[str, object], name: str, *, allow_empty: bool = False) -> str:
@@ -385,17 +402,24 @@ def _optional_positive_int(
     return value
 
 
-def _list_entries(path: Path, recursive: bool, workspace: Path) -> list[dict[str, object]]:
+def _list_entries(
+    path: Path,
+    recursive: bool,
+    context: ToolExecutionContext,
+) -> list[dict[str, object]]:
     iterator = path.rglob("*") if recursive else path.iterdir()
     entries: list[dict[str, object]] = []
     for entry in iterator:
+        # 列表工具不跟随链接，避免仅通过 stat 就泄漏授权目录之外的元数据。
+        if entry.is_symlink():
+            continue
         try:
             stat = entry.stat()
         except OSError:
             continue
         entries.append(
             {
-                "path": entry.relative_to(workspace).as_posix(),
+                "path": _relative(entry.resolve(), context),
                 "type": "directory" if entry.is_dir() else "file",
                 "size": stat.st_size if entry.is_file() else None,
             }
@@ -409,7 +433,7 @@ def _search_files(
     path: Path,
     pattern: re.Pattern[str],
     glob: str | None,
-    workspace: Path,
+    context: ToolExecutionContext,
 ) -> tuple[list[dict[str, object]], bool]:
     files = [path] if path.is_file() else path.rglob(glob or "*")
     matches: list[dict[str, object]] = []
@@ -422,7 +446,7 @@ def _search_files(
                     if pattern.search(line):
                         matches.append(
                             {
-                                "path": file_path.relative_to(workspace).as_posix(),
+                                "path": _relative(file_path.resolve(), context),
                                 "line": line_number,
                                 "text": line.rstrip("\r\n")[:2_000],
                             }

@@ -44,6 +44,19 @@ SYSTEM_PROMPT = """你是 AI-ME，一个在固定本地工作区中协助用户�
 所有路径优先使用相对工作区路径。完成任务后用简洁中文说明结果和验证情况。"""
 
 
+def _system_prompt(request: AgentRunRequest) -> str:
+    """把 Session 目录快照以确定性格式写入本轮系统指令。"""
+    roots = request.workspace_roots or (request.workspace_path,)
+    additional = roots[1:]
+    additional_text = "\n".join(f"- {root}" for root in additional) if additional else "- 无"
+    return (
+        f"{SYSTEM_PROMPT}\n\n"
+        f"当前会话主目录：{roots[0]}\n"
+        f"附加授权目录：\n{additional_text}\n"
+        "相对工具路径默认相对于主目录；访问附加目录时使用绝对路径。"
+    )
+
+
 @dataclass(slots=True)
 class _PendingToolCall:
     """把厂商的分片工具调用拼成完整调用。"""
@@ -90,6 +103,7 @@ class ModelAgentRuntime(AgentRuntime):
             run_id=request.run_id,
             workspace_path=request.workspace_path,
             permission_profile=request.permission_profile,
+            workspace_roots=request.workspace_roots or (request.workspace_path,),
         )
         last_failure_signature: str | None = None
         repeated_failures = 0
@@ -166,7 +180,7 @@ class ModelAgentRuntime(AgentRuntime):
                 LlmCompletionRequest(
                     model_ref=request.model_ref,
                     messages=messages,
-                    system=SYSTEM_PROMPT,
+                    system=_system_prompt(request),
                     tools=tuple(descriptor.definition for descriptor in descriptors),
                     parallel_tool_calls=True,
                 )

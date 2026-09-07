@@ -10,13 +10,18 @@ from aime.domain.sessions.value_objects import PermissionProfile
 from aime.infrastructure.tools.builtin import BuiltInToolRegistry, ToolInputError
 
 
-def _context(workspace: Path, permission: PermissionProfile) -> ToolExecutionContext:
+def _context(
+    workspace: Path,
+    permission: PermissionProfile,
+    *additional_roots: Path,
+) -> ToolExecutionContext:
     return ToolExecutionContext(
         session_id=str(uuid4()),
         turn_id=str(uuid4()),
         run_id=str(uuid4()),
         workspace_path=str(workspace),
         permission_profile=permission,
+        workspace_roots=tuple(str(root) for root in (workspace, *additional_roots)),
     )
 
 
@@ -49,8 +54,56 @@ async def test_file_tools_reject_parent_and_absolute_path_escape(tmp_path: Path)
 
     with pytest.raises(ToolInputError, match="不能离开"):
         await tool.execute({"path": "../secret.txt"}, context)
-    with pytest.raises(ToolInputError, match="相对工作区"):
+    with pytest.raises(ToolInputError, match="授权工作区"):
         await tool.execute({"path": str(outside)}, context)
+
+
+async def test_file_tools_allow_secondary_root_and_reject_outside(tmp_path: Path) -> None:
+    """绝对路径可以访问附加 root，但不能借此跨出 Session 授权集合。"""
+    primary = tmp_path / "primary"
+    secondary = tmp_path / "secondary"
+    outside = tmp_path / "outside"
+    for directory in (primary, secondary, outside):
+        directory.mkdir()
+    (outside / "secret.txt").write_text("secret", encoding="utf-8")
+    registry = BuiltInToolRegistry()
+    write_tool = registry.get("write_file")
+    read_tool = registry.get("read_file")
+    assert write_tool is not None and read_tool is not None
+    context = _context(primary, PermissionProfile.WORKSPACE_WRITE, secondary)
+
+    written = await write_tool.execute(
+        {"path": str(secondary / "ok.txt"), "content": "ok"},
+        context,
+    )
+    read = await read_tool.execute({"path": str(secondary / "ok.txt")}, context)
+
+    assert written.output["path"] == str((secondary / "ok.txt").resolve())
+    assert read.output["content"] == "ok"
+    with pytest.raises(ToolInputError, match="授权工作区"):
+        await read_tool.execute({"path": str(outside / "secret.txt")}, context)
+
+
+async def test_file_tools_reject_symbolic_link_escape(tmp_path: Path) -> None:
+    """授权目录内的符号链接不能绕过真实路径校验读取外部文件。"""
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+    (outside / "secret.txt").write_text("secret", encoding="utf-8")
+    link = workspace / "linked-outside"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"当前 Windows 权限不允许创建目录符号链接：{exc}")
+    tool = BuiltInToolRegistry().get("read_file")
+    assert tool is not None
+
+    with pytest.raises(ToolInputError, match="授权工作区"):
+        await tool.execute(
+            {"path": "linked-outside/secret.txt"},
+            _context(workspace, PermissionProfile.READ_ONLY),
+        )
 
 
 async def test_write_and_edit_tools_require_explicit_unambiguous_intent(tmp_path: Path) -> None:

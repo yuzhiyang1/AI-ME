@@ -36,6 +36,7 @@ from aime.infrastructure.persistence.sqlite_database import (
     agent_runs_table,
     runtime_events_table,
     session_items_table,
+    session_workspace_roots_table,
     sessions_table,
     turns_table,
 )
@@ -227,6 +228,11 @@ class SqliteConversationStore(ConversationStore):
                 True,
                 workspace_path=str(session_row["workspace_path"]),
                 permission_profile=PermissionProfile(str(session_row["permission_profile"])),
+                workspace_roots=await _session_workspace_roots(
+                    database_session,
+                    session_id,
+                    fallback=str(session_row["workspace_path"]),
+                ),
             )
 
     async def mark_run_started(self, execution: TurnExecution) -> bool:
@@ -542,6 +548,11 @@ class SqliteConversationStore(ConversationStore):
                         permission_profile=PermissionProfile(
                             str(session_row["permission_profile"])
                         ),
+                        workspace_roots=await _session_workspace_roots(
+                            database_session,
+                            session_id,
+                            fallback=str(session_row["workspace_path"]),
+                        ),
                     )
                 )
         return executions
@@ -725,6 +736,11 @@ class SqliteConversationStore(ConversationStore):
             newly_created=False,
             workspace_path=str(session_row["workspace_path"]),
             permission_profile=PermissionProfile(str(session_row["permission_profile"])),
+            workspace_roots=await _session_workspace_roots(
+                database_session,
+                session_id,
+                fallback=str(session_row["workspace_path"]),
+            ),
         )
 
     async def _commit_terminal(
@@ -841,6 +857,23 @@ async def _required_session_row(database_session: AsyncSession, session_id: UUID
     if row is None:
         raise SessionNotFound(f"Session 不存在：{session_id}")
     return row
+
+
+async def _session_workspace_roots(
+    database_session: AsyncSession,
+    session_id: UUID,
+    *,
+    fallback: str,
+) -> tuple[str, ...]:
+    """读取 Session 的有序授权目录；兼容迁移过程中的单目录旧数据。"""
+    rows = (
+        await database_session.execute(
+            select(session_workspace_roots_table.c.path)
+            .where(session_workspace_roots_table.c.session_id == str(session_id))
+            .order_by(session_workspace_roots_table.c.position)
+        )
+    ).all()
+    return tuple(str(row.path) for row in rows) or (fallback,)
 
 
 async def _model_messages(

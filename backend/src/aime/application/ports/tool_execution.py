@@ -41,6 +41,7 @@ class ToolExecutionContext:
     run_id: str
     workspace_path: str
     permission_profile: PermissionProfile
+    workspace_roots: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

@@ -122,6 +122,7 @@ class RuntimeCoordinator:
                 messages=execution.messages,
                 workspace_path=execution.workspace_path,
                 permission_profile=execution.permission_profile,
+                workspace_roots=execution.workspace_roots,
             )
             async for event in self._runtime.run(request):
                 if event.type == "text_delta":

@@ -20,6 +20,7 @@ class TurnExecution:
     newly_created: bool
     workspace_path: str = ""
     permission_profile: PermissionProfile = PermissionProfile.READ_ONLY
+    workspace_roots: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

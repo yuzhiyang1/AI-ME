@@ -69,6 +69,22 @@ class _ReadFileToolCallingGateway:
         yield LlmStreamCompleted(LlmFinishReason.STOP)
 
 
+class _WorkspacePromptGateway:
+    """记录系统提示，用于验证主目录和附加目录都传入模型。"""
+
+    def __init__(self) -> None:
+        self.requests: list[LlmCompletionRequest] = []
+
+    def list_models(self) -> list[ModelDescriptor]:
+        return [ModelDescriptor("qa", "tool-model", "Tool Model", 32_000)]
+
+    async def stream(self, request: LlmCompletionRequest) -> AsyncIterator[LlmStreamEvent]:
+        self.requests.append(request)
+        yield LlmStreamStarted()
+        yield LlmTextDelta("目录已确认")
+        yield LlmStreamCompleted(LlmFinishReason.STOP)
+
+
 class _ParallelProbeTool:
     """只有两个调用同时进入时才会释放，用于证明真实并行。"""
 
@@ -317,6 +333,49 @@ def test_agent_loop_executes_a_read_tool_then_returns_the_final_answer(tmp_path:
         "agent_message",
         "run_completed",
     ]
+
+
+def test_project_session_declares_primary_and_additional_roots_to_model(tmp_path: Path) -> None:
+    """项目会话每轮都应把 Session roots 快照告诉模型，而不是运行时查询 Project。"""
+    primary = tmp_path / "primary"
+    secondary = tmp_path / "secondary"
+    primary.mkdir()
+    secondary.mkdir()
+    gateway = _WorkspacePromptGateway()
+
+    with TestClient(
+        create_app(build_container(state_dir=tmp_path / "state", model_gateway=gateway))
+    ) as client:
+        project = client.post(
+            "/api/projects",
+            json={
+                "name": "AI-ME",
+                "roots": [{"path": str(primary)}, {"path": str(secondary)}],
+                "idempotencyKey": "prompt-roots",
+            },
+        ).json()
+        session_id = client.post(
+            "/api/sessions",
+            json={
+                "projectId": project["id"],
+                "defaultModel": "qa/tool-model",
+                "permissionProfile": "read_only",
+            },
+        ).json()["id"]
+        client.post(
+            f"/api/sessions/{session_id}/turns",
+            json={"input": "确认目录", "clientRequestId": "prompt-roots-turn"},
+        )
+        for _ in range(200):
+            if gateway.requests:
+                break
+            time.sleep(0.01)
+
+    assert gateway.requests
+    system = gateway.requests[0].system or ""
+    assert f"当前会话主目录：{primary.resolve()}" in system
+    assert f"- {secondary.resolve()}" in system
+    assert "访问附加目录时使用绝对路径" in system
 
 
 def test_parallel_tools_overlap_but_results_keep_model_call_order(tmp_path: Path) -> None:
