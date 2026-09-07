@@ -10,6 +10,7 @@ from aime.application.model_configurations.services import (
     CreateModelConfigurationCommand,
     ModelConfigurationView,
 )
+from aime.application.ports.conversation_store import SessionTokenUsage
 from aime.application.ports.model_gateway import ConversationMessage, MessageRole, ModelDescriptor
 from aime.domain.model_configurations.entities import ModelProtocol
 from aime.domain.sessions.entities import AgentSession, AgentTurn, RuntimeEvent, SessionItem
@@ -204,6 +205,33 @@ class SessionResponse(_CamelCaseModel):
             pinned=session.pinned,
             created_at=session.created_at,
             updated_at=session.updated_at,
+        )
+
+
+class SessionTokenUsageResponse(_CamelCaseModel):
+    """会话累计 Token 与当前上下文压力读取模型。"""
+
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+    current_context_tokens: int | None
+    context_window: int | None
+    measured_steps: int
+    unreported_steps: int
+    untracked_history: bool
+
+    @classmethod
+    def from_application(cls, usage: SessionTokenUsage) -> "SessionTokenUsageResponse":
+        """把应用层投影转换为稳定的 HTTP DTO。"""
+        return cls(
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            total_tokens=usage.total_tokens,
+            current_context_tokens=usage.current_context_tokens,
+            context_window=usage.context_window,
+            measured_steps=usage.measured_steps,
+            unreported_steps=usage.unreported_steps,
+            untracked_history=usage.untracked_history,
         )
 
 

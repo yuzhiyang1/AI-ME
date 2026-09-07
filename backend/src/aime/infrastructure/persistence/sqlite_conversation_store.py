@@ -10,7 +10,11 @@ from sqlalchemy.engine import RowMapping
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from aime.application.ports.conversation_store import ConversationStore, TurnExecution
+from aime.application.ports.conversation_store import (
+    ConversationStore,
+    SessionTokenUsage,
+    TurnExecution,
+)
 from aime.application.ports.model_gateway import ConversationMessage, MessageRole
 from aime.application.sessions.exceptions import ActiveTurnConflict, IdempotencyConflict
 from aime.application.sessions.services import SessionNotFound
@@ -599,6 +603,90 @@ class SqliteConversationStore(ConversationStore):
             ).mappings()
             return [_event_from_row(row) for row in rows]
 
+    async def get_token_usage(self, session_id: UUID) -> SessionTokenUsage:
+        """只折叠模型步骤用量事件，避免扫描长会话中的文本增量。"""
+        async with self._session_factory() as database_session:
+            await _required_session_row(database_session, session_id)
+            rows = (
+                await database_session.execute(
+                    select(
+                        runtime_events_table.c.run_id,
+                        runtime_events_table.c.sequence,
+                        runtime_events_table.c.payload_json,
+                    )
+                    .where(
+                        runtime_events_table.c.session_id == str(session_id),
+                        runtime_events_table.c.type == "model_usage",
+                    )
+                    .order_by(runtime_events_table.c.sequence)
+                )
+            ).mappings()
+
+        # 同一 Run/Step 的后写记录替换旧样本，恢复或重试不会造成重复计量。
+        samples: dict[tuple[str, int], tuple[int, dict[str, object]]] = {}
+        for row in rows:
+            decoded: object = json.loads(row["payload_json"])
+            if not isinstance(decoded, dict):
+                continue
+            payload = cast(dict[str, object], decoded)
+            step = _non_negative_int(payload.get("step"))
+            if step is None:
+                continue
+            samples[(str(row["run_id"]), step)] = (int(row["sequence"]), payload)
+
+        input_tokens = 0
+        output_tokens = 0
+        measured_steps = 0
+        unreported_steps = 0
+        for _, payload in samples.values():
+            step_input = _non_negative_int(payload.get("inputTokens"))
+            step_output = _non_negative_int(payload.get("outputTokens"))
+            input_tokens += step_input or 0
+            output_tokens += step_output or 0
+            if step_input is not None and step_output is not None:
+                measured_steps += 1
+            else:
+                unreported_steps += 1
+
+        ordered_samples = list(samples.values())
+        latest_payload: dict[str, object] = (
+            max(ordered_samples, key=lambda sample: sample[0])[1]
+            if ordered_samples
+            else {}
+        )
+        latest_input = _non_negative_int(latest_payload.get("inputTokens"))
+        latest_output = _non_negative_int(latest_payload.get("outputTokens"))
+        current_context_tokens = (
+            latest_input + (latest_output or 0) if latest_input is not None else None
+        )
+        first_usage_sequence = (
+            min(sample[0] for sample in ordered_samples) if ordered_samples else None
+        )
+        async with self._session_factory() as database_session:
+            untracked_query = select(session_items_table.c.id).where(
+                session_items_table.c.session_id == str(session_id),
+                session_items_table.c.type.in_(
+                    [SessionItemType.AGENT_MESSAGE.value, SessionItemType.ERROR.value]
+                ),
+            )
+            if first_usage_sequence is not None:
+                untracked_query = untracked_query.where(
+                    session_items_table.c.sequence < first_usage_sequence
+                )
+            untracked_history = (
+                await database_session.execute(untracked_query.limit(1))
+            ).scalar_one_or_none() is not None
+        return SessionTokenUsage(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            # Provider 用量锚点加上本步输出，近似表示下一次请求前的当前上下文。
+            current_context_tokens=current_context_tokens,
+            context_window=_non_negative_int(latest_payload.get("contextWindow")),
+            measured_steps=measured_steps,
+            unreported_steps=unreported_steps,
+            untracked_history=untracked_history,
+        )
+
     async def _existing_execution(
         self,
         database_session: AsyncSession,
@@ -909,6 +997,13 @@ def _event_from_row(row: RowMapping) -> RuntimeEvent:
         payload=json.loads(row["payload_json"]),
         created_at=row["created_at"],
     )
+
+
+def _non_negative_int(value: object) -> int | None:
+    """只接受 Runtime 自身写入的非负整数，损坏载荷不会污染统计。"""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
 
 
 def _default_title(instruction: str) -> str:

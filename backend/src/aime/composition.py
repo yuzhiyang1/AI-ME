@@ -16,6 +16,7 @@ from aime.application.sessions.runtime_coordinator import RuntimeCoordinator
 from aime.application.sessions.services import CreateSession, GetSession, ListSessions
 from aime.application.sessions.turn_services import (
     GetActiveTurn,
+    GetSessionTokenUsage,
     GetTurnByClientRequest,
     InterruptTurn,
     ListRuntimeEvents,
@@ -57,6 +58,7 @@ class Container:
     get_turn_by_client_request: GetTurnByClientRequest
     list_session_items: ListSessionItems
     list_runtime_events: ListRuntimeEvents
+    get_session_token_usage: GetSessionTokenUsage
     interrupt_turn: InterruptTurn
     list_pending_approvals: ListPendingApprovals
     decide_approval: DecideApproval
@@ -134,6 +136,7 @@ def build_container(
         get_turn_by_client_request=GetTurnByClientRequest(conversation_store),
         list_session_items=ListSessionItems(conversation_store),
         list_runtime_events=ListRuntimeEvents(conversation_store),
+        get_session_token_usage=GetSessionTokenUsage(conversation_store),
         interrupt_turn=InterruptTurn(runtime_coordinator),
         list_pending_approvals=ListPendingApprovals(tool_execution_store),
         decide_approval=DecideApproval(tool_execution_store, approval_broker),

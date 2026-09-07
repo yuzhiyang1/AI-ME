@@ -48,7 +48,13 @@ class OpenAICompletionsApi:
         if system is not None:
             payload_messages.append({"role": "system", "content": system})
         payload_messages.extend(_openai_message(message) for message in messages)
-        kwargs: dict[str, Any] = {"model": model_id, "messages": payload_messages, "stream": True}
+        kwargs: dict[str, Any] = {
+            "model": model_id,
+            "messages": payload_messages,
+            "stream": True,
+            # OpenAI 兼容流默认不会返回 usage，显式请求终止分片中的计费数据。
+            "stream_options": {"include_usage": True},
+        }
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
         if temperature is not None:

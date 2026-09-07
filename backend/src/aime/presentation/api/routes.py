@@ -44,6 +44,7 @@ from aime.application.sessions.services import (
 )
 from aime.application.sessions.turn_services import (
     GetActiveTurn,
+    GetSessionTokenUsage,
     GetTurnByClientRequest,
     InterruptTurn,
     ListRuntimeEvents,
@@ -67,6 +68,7 @@ from aime.presentation.api.schemas import (
     RuntimeEventResponse,
     SessionItemResponse,
     SessionResponse,
+    SessionTokenUsageResponse,
     StartTurnRequest,
     ToolInvocationResponse,
     TurnResponse,
@@ -87,6 +89,7 @@ def build_router(
     get_turn_by_client_request: GetTurnByClientRequest,
     list_session_items: ListSessionItems,
     list_runtime_events: ListRuntimeEvents,
+    get_session_token_usage: GetSessionTokenUsage,
     interrupt_turn: InterruptTurn,
     list_pending_approvals: ListPendingApprovals,
     decide_approval: DecideApproval,
@@ -221,6 +224,18 @@ def build_router(
         """按最近活动时间返回会话列表。"""
         sessions = await list_sessions.execute()
         return [SessionResponse.from_domain(session) for session in sessions]
+
+    @router.get(
+        "/sessions/{session_id}/usage",
+        response_model=SessionTokenUsageResponse,
+    )
+    async def get_agent_session_usage(session_id: UUID) -> SessionTokenUsageResponse:
+        """返回可重放的会话 Token 统计；不存在时保持统一 404 语义。"""
+        try:
+            usage = await get_session_token_usage.execute(session_id)
+        except SessionNotFound as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        return SessionTokenUsageResponse.from_application(usage)
 
     @router.post(
         "/sessions/{session_id}/turns",

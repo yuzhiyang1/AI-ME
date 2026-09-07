@@ -110,6 +110,7 @@ async def test_openai_translates_tool_calls_finish_reason_and_usage() -> None:
     assert events[-1].usage.input_tokens == 12
     assert events[-1].usage.output_tokens == 7
     assert create.calls[0]["messages"][0] == {"role": "system", "content": "系统"}
+    assert create.calls[0]["stream_options"] == {"include_usage": True}
 
 
 async def test_openai_classifies_retryable_provider_error() -> None:

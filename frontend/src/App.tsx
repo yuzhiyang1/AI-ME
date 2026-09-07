@@ -28,12 +28,14 @@ import {
   type PermissionProfile,
   type RuntimeEvent,
   type SessionItem,
+  type SessionTokenUsage,
   type ToolInvocation,
   createSession,
   createModelConfiguration,
   decideApproval,
   getActiveTurn,
   getSession,
+  getSessionUsage,
   interruptTurn,
   listModels,
   listModelConfigurations,
@@ -51,6 +53,7 @@ import {
 } from "./reliableTurnRequest";
 import { MarkdownContent } from "./MarkdownContent";
 import { StreamingMarkdown } from "./StreamingMarkdown";
+import { SessionUsageBar } from "./SessionUsageBar";
 import { ToolStepTimeline } from "./ToolStepTimeline";
 
 const permissionLabels: Record<PermissionProfile, string> = {
@@ -94,6 +97,7 @@ function App() {
   const [activeTurnId, setActiveTurnId] = useState<string | null>(null);
   const [approvals, setApprovals] = useState<ApprovalRequest[]>([]);
   const [toolInvocations, setToolInvocations] = useState<ToolInvocation[]>([]);
+  const [sessionUsage, setSessionUsage] = useState<SessionTokenUsage | null>(null);
   const [decidingApprovalId, setDecidingApprovalId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -198,6 +202,7 @@ function App() {
     setActiveTurnId(null);
     setApprovals([]);
     setToolInvocations([]);
+    setSessionUsage(null);
     const requestInFlight = requestControllers.current.get(session.id);
     const isConfirming = requestInFlight !== undefined && !requestInFlight.signal.aborted;
     const isSettling = settlingRequestKeys.current.has(session.id);
@@ -214,6 +219,7 @@ function App() {
         activeTurn,
         pendingApprovals,
         loadedInvocations,
+        loadedUsage,
         reconciledTurn,
       ] = await Promise.all([
         getSession(session.id),
@@ -221,6 +227,7 @@ function App() {
         getActiveTurn(session.id),
         listPendingApprovals(session.id),
         listToolInvocations(session.id),
+        getSessionUsage(session.id),
         pendingRequest && !isSettling
           ? lookupTurnWithTimeout(session.id, pendingRequest.clientRequestId)
           : Promise.resolve(null),
@@ -246,6 +253,7 @@ function App() {
       setActiveTurnId(activeTurn?.id ?? null);
       setApprovals(pendingApprovals);
       setToolInvocations(loadedInvocations);
+      setSessionUsage(loadedUsage);
       setConfirmingRequest(hasInFlightRequest && activeTurn === null);
       setSettlingRequest(hasSettlingRequest);
       setSessionLoading(false);
@@ -322,6 +330,7 @@ function App() {
             activeTurn,
             pendingApprovals,
             updatedInvocations,
+            updatedUsage,
             updatedSessions,
           ] = await Promise.all([
             getSession(sessionId),
@@ -329,6 +338,7 @@ function App() {
             getActiveTurn(sessionId),
             listPendingApprovals(sessionId),
             listToolInvocations(sessionId),
+            getSessionUsage(sessionId),
             listSessions(),
           ]);
           if (!isCurrentSessionView(sessionId, viewGeneration)) return;
@@ -336,6 +346,7 @@ function App() {
           setSessions(updatedSessions);
           setApprovals(pendingApprovals);
           setToolInvocations(updatedInvocations);
+          setSessionUsage(updatedUsage);
           if (activeTurn === null) {
             setActiveTurnId(null);
             if (liveAnswerRef.current) {
@@ -384,6 +395,10 @@ function App() {
     }
     if (event.type.startsWith("tool_")) {
       void refreshRuntimeFacts(sessionId, viewGeneration);
+      return;
+    }
+    if (event.type === "model_usage") {
+      void refreshSessionUsage(sessionId, viewGeneration);
       return;
     }
     if (event.type !== "text_delta") return;
@@ -456,6 +471,15 @@ function App() {
       setApprovals(pendingApprovals);
       setToolInvocations(invocations);
       setActiveSession(session);
+    } catch (reason) {
+      if (isCurrentSessionView(sessionId, viewGeneration)) setError(messageFrom(reason));
+    }
+  }
+
+  async function refreshSessionUsage(sessionId: string, viewGeneration: number) {
+    try {
+      const usage = await getSessionUsage(sessionId);
+      if (isCurrentSessionView(sessionId, viewGeneration)) setSessionUsage(usage);
     } catch (reason) {
       if (isCurrentSessionView(sessionId, viewGeneration)) setError(messageFrom(reason));
     }
@@ -747,6 +771,7 @@ function App() {
     setDraft("");
     resetLiveAnswerPresentation();
     setActiveTurnId(null);
+    setSessionUsage(null);
     setConfirmingRequest(false);
     setSettlingRequest(false);
     setSessionLoading(false);
@@ -856,6 +881,13 @@ function App() {
 
             <footer className="composer-zone">
               {error ? <div className="inline-error"><CircleAlert size={14} />{error}</div> : null}
+              <SessionUsageBar
+                usage={sessionUsage}
+                fallbackContextWindow={
+                  models.find((model) => model.ref === activeSession.defaultModel)?.contextWindow
+                  ?? null
+                }
+              />
               <div className="composer">
                 <textarea
                   aria-label="给 AI-ME 发消息"

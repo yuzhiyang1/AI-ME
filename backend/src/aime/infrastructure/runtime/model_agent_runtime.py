@@ -94,6 +94,14 @@ class ModelAgentRuntime(AgentRuntime):
         last_failure_signature: str | None = None
         repeated_failures = 0
         first_new_step = 1
+        context_window = next(
+            (
+                model.context_window
+                for model in self._gateway.list_models()
+                if model.ref == request.model_ref
+            ),
+            None,
+        )
 
         # 重启后从 T1/T2 账本重建尚未完成的模型步骤，不重新请求模型生成危险调用。
         existing = await self._tool_store.list_run_invocations(UUID(request.run_id))
@@ -193,6 +201,27 @@ class ModelAgentRuntime(AgentRuntime):
                     return
                 elif isinstance(event, LlmStreamCompleted):
                     completed = event
+
+            if completed is not None:
+                # 每个模型步骤独立落账；累计费用与最新上下文不能混成同一个数字。
+                yield AgentEvent(
+                    type="model_usage",
+                    payload={
+                        "step": step,
+                        "modelRef": request.model_ref,
+                        "inputTokens": (
+                            completed.usage.input_tokens
+                            if completed.usage is not None
+                            else None
+                        ),
+                        "outputTokens": (
+                            completed.usage.output_tokens
+                            if completed.usage is not None
+                            else None
+                        ),
+                        "contextWindow": context_window,
+                    },
+                )
 
             calls = tuple(
                 LlmToolCall(

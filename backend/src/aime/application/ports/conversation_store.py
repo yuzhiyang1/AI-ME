@@ -22,6 +22,24 @@ class TurnExecution:
     permission_profile: PermissionProfile = PermissionProfile.READ_ONLY
 
 
+@dataclass(frozen=True, slots=True)
+class SessionTokenUsage:
+    """从持久 RuntimeEvent 投影出的会话 Token 统计。"""
+
+    input_tokens: int
+    output_tokens: int
+    current_context_tokens: int | None
+    context_window: int | None
+    measured_steps: int
+    unreported_steps: int
+    untracked_history: bool
+
+    @property
+    def total_tokens(self) -> int:
+        """返回会话内所有已上报输入与输出 Token 之和。"""
+        return self.input_tokens + self.output_tokens
+
+
 class ConversationStore(Protocol):
     """以原子操作维护 Turn、Run、Event 与 Item。"""
 
@@ -71,3 +89,5 @@ class ConversationStore(Protocol):
         session_id: UUID,
         after_sequence: int = 0,
     ) -> list[RuntimeEvent]: ...
+
+    async def get_token_usage(self, session_id: UUID) -> SessionTokenUsage: ...

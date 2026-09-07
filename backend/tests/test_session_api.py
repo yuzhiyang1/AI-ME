@@ -16,6 +16,7 @@ from aime.application.ports.model_gateway import (
     LlmStreamEvent,
     LlmStreamStarted,
     LlmTextDelta,
+    LlmUsage,
     ModelDescriptor,
 )
 from aime.composition import build_container
@@ -74,6 +75,21 @@ class _HistoryModelGateway(_GreetingModelGateway):
         yield LlmStreamStarted()
         yield LlmTextDelta("第一答" if self.call_count == 1 else "第二答")
         yield LlmStreamCompleted(LlmFinishReason.STOP)
+
+
+class _UsageModelGateway(_GreetingModelGateway):
+    """为连续两轮返回不同用量，验证累计消耗与当前上下文口径。"""
+
+    async def stream(self, request: LlmCompletionRequest) -> AsyncIterator[LlmStreamEvent]:
+        self.call_count += 1
+        usage = (
+            LlmUsage(input_tokens=12_000, output_tokens=800)
+            if self.call_count == 1
+            else LlmUsage(input_tokens=18_000, output_tokens=1_200)
+        )
+        yield LlmStreamStarted()
+        yield LlmTextDelta(f"第 {self.call_count} 次回答")
+        yield LlmStreamCompleted(LlmFinishReason.STOP, usage=usage)
 
 
 def test_user_can_reopen_a_persisted_session(tmp_path: Path) -> None:
@@ -203,6 +219,100 @@ def test_second_turn_receives_persisted_conversation_history(tmp_path: Path) -> 
     ]
 
 
+def test_session_usage_separates_cumulative_tokens_from_current_context(tmp_path: Path) -> None:
+    """累计输入输出按调用求和，上下文进度只读取最新模型步骤。"""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    with TestClient(
+        create_app(
+            build_container(
+                state_dir=tmp_path / "state",
+                model_gateway=_UsageModelGateway(),
+            )
+        )
+    ) as client:
+        session_id = client.post(
+            "/api/sessions",
+            json={
+                "workspacePath": str(workspace),
+                "defaultModel": "openai/gpt-5",
+                "permissionProfile": "workspace_write",
+            },
+        ).json()["id"]
+        for turn_number in (1, 2):
+            client.post(
+                f"/api/sessions/{session_id}/turns",
+                json={
+                    "input": f"第 {turn_number} 问",
+                    "clientRequestId": f"usage-{turn_number}",
+                },
+            )
+            for _ in range(100):
+                if len(client.get(f"/api/sessions/{session_id}/items").json()) == turn_number * 2:
+                    break
+                time.sleep(0.01)
+
+        usage = client.get(f"/api/sessions/{session_id}/usage")
+
+    assert usage.status_code == 200
+    assert usage.json() == {
+        "inputTokens": 30_000,
+        "outputTokens": 2_000,
+        "totalTokens": 32_000,
+        "currentContextTokens": 19_200,
+        "contextWindow": 128_000,
+        "measuredSteps": 2,
+        "unreportedSteps": 0,
+        "untrackedHistory": False,
+    }
+
+
+def test_session_usage_marks_steps_without_provider_usage_as_partial(tmp_path: Path) -> None:
+    """提供方没有返回用量时保留步骤事实，避免把未知用量误报为零消耗。"""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    with TestClient(
+        create_app(
+            build_container(
+                state_dir=tmp_path / "state",
+                model_gateway=_GreetingModelGateway(),
+            )
+        )
+    ) as client:
+        session_id = client.post(
+            "/api/sessions",
+            json={
+                "workspacePath": str(workspace),
+                "defaultModel": "openai/gpt-5",
+                "permissionProfile": "workspace_write",
+            },
+        ).json()["id"]
+        client.post(
+            f"/api/sessions/{session_id}/turns",
+            json={"input": "你好", "clientRequestId": "usage-missing"},
+        )
+        for _ in range(100):
+            if len(client.get(f"/api/sessions/{session_id}/items").json()) == 2:
+                break
+            time.sleep(0.01)
+
+        usage = client.get(f"/api/sessions/{session_id}/usage")
+
+    assert usage.status_code == 200
+    assert usage.json() == {
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "totalTokens": 0,
+        "currentContextTokens": None,
+        "contextWindow": 128_000,
+        "measuredSteps": 0,
+        "unreportedSteps": 1,
+        "untrackedHistory": False,
+    }
+
+
 def test_session_rejects_a_second_active_turn(tmp_path: Path) -> None:
     """同一 Session 同时只能有一个活跃 Turn，冲突必须返回稳定的 409。"""
     workspace = tmp_path / "workspace"
@@ -311,10 +421,11 @@ def test_runtime_events_can_be_replayed_from_a_sequence_cursor(tmp_path: Path) -
     assert [payload["type"] for payload in payloads] == [
         "text_delta",
         "text_delta",
+        "model_usage",
         "agent_message",
         "run_completed",
     ]
-    assert [payload["sequence"] for payload in payloads] == [2, 3, 4, 5]
+    assert [payload["sequence"] for payload in payloads] == [2, 3, 4, 5, 6]
 
 
 def test_sessions_are_listed_by_recent_activity_with_a_first_turn_title(tmp_path: Path) -> None:

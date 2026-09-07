@@ -73,6 +73,17 @@ export interface RuntimeEvent {
   createdAt: string;
 }
 
+export interface SessionTokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  currentContextTokens: number | null;
+  contextWindow: number | null;
+  measuredSteps: number;
+  unreportedSteps: number;
+  untrackedHistory: boolean;
+}
+
 export interface CreateSessionInput {
   workspacePath: string;
   defaultModel: string;
@@ -203,6 +214,10 @@ export function listSessions(): Promise<AgentSession[]> {
 
 export function getSession(sessionId: string): Promise<AgentSession> {
   return request<AgentSession>(`/api/sessions/${sessionId}`);
+}
+
+export function getSessionUsage(sessionId: string): Promise<SessionTokenUsage> {
+  return request<SessionTokenUsage>(`/api/sessions/${sessionId}/usage`);
 }
 
 export function getActiveTurn(sessionId: string): Promise<AgentTurn | null> {

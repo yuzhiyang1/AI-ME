@@ -4,7 +4,14 @@ import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { AgentSession, AgentTurn, RuntimeEvent, SessionItem, ToolInvocation } from "./api";
+import type {
+  AgentSession,
+  AgentTurn,
+  RuntimeEvent,
+  SessionItem,
+  SessionTokenUsage,
+  ToolInvocation,
+} from "./api";
 
 const api = vi.hoisted(() => ({
   createModelConfiguration: vi.fn(),
@@ -12,6 +19,7 @@ const api = vi.hoisted(() => ({
   decideApproval: vi.fn(),
   getActiveTurn: vi.fn(),
   getSession: vi.fn(),
+  getSessionUsage: vi.fn(),
   getTurnByClientRequest: vi.fn(),
   interruptTurn: vi.fn(),
   listModels: vi.fn(),
@@ -72,6 +80,7 @@ describe("会话页面异步隔离", () => {
       sessionId === sessionA.id ? sessionA : sessionB,
     );
     api.getActiveTurn.mockResolvedValue(null);
+    api.getSessionUsage.mockResolvedValue(emptyUsage());
     api.listPendingApprovals.mockResolvedValue([]);
     api.listToolInvocations.mockResolvedValue([]);
     api.getTurnByClientRequest.mockResolvedValue(null);
@@ -290,6 +299,45 @@ describe("会话页面异步隔离", () => {
     await user.click(completedStep);
     expect(screen.getByText("README.md")).toBeTruthy();
     expect(screen.getByText(/AgentRuntime/)).toBeTruthy();
+  });
+
+  it("分别展示会话累计输入输出与最新请求的上下文进度", async () => {
+    api.listSessionItems.mockResolvedValue([itemA]);
+    api.getSessionUsage.mockResolvedValue({
+      inputTokens: 30_000,
+      outputTokens: 2_000,
+      totalTokens: 32_000,
+      currentContextTokens: 18_000,
+      contextWindow: 32_000,
+      measuredSteps: 2,
+      unreportedSteps: 0,
+      untrackedHistory: false,
+    } satisfies SessionTokenUsage);
+
+    render(<App />);
+
+    expect(await screen.findByRole("region", { name: "本次会话 Token 用量" })).toBeTruthy();
+    expect(screen.getByText("输入 30,000")).toBeTruthy();
+    expect(screen.getByText("输出 2,000")).toBeTruthy();
+    expect(screen.getByText("合计 32,000")).toBeTruthy();
+    expect(screen.getByText("已使用 56%")).toBeTruthy();
+    const progress = screen.getByRole("progressbar", { name: "上下文占用" });
+    expect(progress.getAttribute("aria-valuenow")).toBe("56");
+    expect(progress.getAttribute("aria-valuetext")).toBe("18,000 / 32,000 Token");
+  });
+
+  it("模型没有返回用量时明确提示统计不完整", async () => {
+    api.listSessionItems.mockResolvedValue([itemA]);
+    api.getSessionUsage.mockResolvedValue({
+      ...emptyUsage(),
+      contextWindow: 32_000,
+      unreportedSteps: 1,
+    });
+
+    render(<App />);
+
+    expect(await screen.findByText("部分调用未返回用量")).toBeTruthy();
+    expect(screen.getByText("等待首次模型用量")).toBeTruthy();
   });
 
   it("切到 B 后忽略 A 延迟返回的 Items，也不会启动 A 的事件流", async () => {
@@ -537,5 +585,18 @@ function toolInvocation(overrides: Partial<ToolInvocation>): ToolInvocation {
     startedAt: "2026-09-05T00:00:01Z",
     finishedAt: "2026-09-05T00:00:02Z",
     ...overrides,
+  };
+}
+
+function emptyUsage(): SessionTokenUsage {
+  return {
+    inputTokens: 0,
+    outputTokens: 0,
+    totalTokens: 0,
+    currentContextTokens: null,
+    contextWindow: null,
+    measuredSteps: 0,
+    unreportedSteps: 0,
+    untrackedHistory: false,
   };
 }

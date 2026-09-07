@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from uuid import UUID
 
-from aime.application.ports.conversation_store import ConversationStore
+from aime.application.ports.conversation_store import ConversationStore, SessionTokenUsage
 from aime.application.sessions.exceptions import TurnNotActive
 from aime.application.sessions.runtime_coordinator import RuntimeCoordinator
 from aime.domain.sessions.entities import AgentTurn, RuntimeEvent, SessionItem
@@ -62,6 +62,17 @@ class ListRuntimeEvents:
     async def execute(self, session_id: UUID, after_sequence: int = 0) -> list[RuntimeEvent]:
         """返回指定游标之后的不可变运行事实。"""
         return await self._store.list_events(session_id, after_sequence)
+
+
+class GetSessionTokenUsage:
+    """读取会话累计用量和最近一次请求的上下文压力。"""
+
+    def __init__(self, store: ConversationStore) -> None:
+        self._store = store
+
+    async def execute(self, session_id: UUID) -> SessionTokenUsage:
+        """返回从持久模型步骤事件得到的可重放统计。"""
+        return await self._store.get_token_usage(session_id)
 
 
 class GetActiveTurn:

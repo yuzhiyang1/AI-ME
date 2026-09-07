@@ -252,7 +252,8 @@ def test_runtime_forwards_text_before_provider_stream_completes() -> None:
         assert first_event.content == "第一段"
         remaining = [event async for event in stream]
         assert [(event.type, event.content) for event in remaining] == [
-            ("text_delta", "第二段")
+            ("text_delta", "第二段"),
+            ("model_usage", ""),
         ]
 
     asyncio.run(scenario())
@@ -307,10 +308,12 @@ def test_agent_loop_executes_a_read_tool_then_returns_the_final_answer(tmp_path:
     ]
     assert event_types == [
         "user_message",
+        "model_usage",
         "tool_prepared",
         "tool_started",
         "tool_completed",
         "text_delta",
+        "model_usage",
         "agent_message",
         "run_completed",
     ]

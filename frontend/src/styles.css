@@ -612,6 +612,32 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 
 .composer-zone { padding: 8px 28px 22px; background: linear-gradient(transparent, #fafafd 25%); }
 .composer-zone > * { width: min(780px, 100%); margin-inline: auto; }
+.session-usage-bar {
+  display: grid;
+  grid-template-columns: minmax(155px, 1fr) auto;
+  align-items: center;
+  gap: 18px;
+  margin-bottom: 7px;
+  padding: 0 4px;
+  color: var(--text-muted);
+  font-size: 9.5px;
+}
+.session-usage-bar.is-loading { opacity: 0.65; }
+.context-usage { display: flex; min-width: 0; align-items: center; gap: 7px; }
+.context-ring { width: 17px; height: 17px; flex: 0 0 17px; transform: rotate(-90deg); }
+.context-ring svg { display: block; width: 100%; height: 100%; overflow: visible; }
+.context-ring circle { fill: none; stroke-width: 3; }
+.context-ring-track { stroke: #e3e2e8; }
+.context-ring-value { stroke: #765ee0; stroke-linecap: round; stroke-dasharray: 100; transition: stroke-dashoffset 220ms ease, stroke 220ms ease; }
+.context-ring.warning .context-ring-value { stroke: #c18a32; }
+.context-ring.danger .context-ring-value { stroke: #c85e62; }
+.context-ring.unknown .context-ring-value { stroke: transparent; }
+.context-usage-copy { display: flex; min-width: 0; align-items: baseline; gap: 6px; white-space: nowrap; }
+.context-usage-copy span { color: var(--text-secondary); font-weight: 650; }
+.context-usage-copy strong { overflow: hidden; color: #777883; font-size: 9px; font-weight: 500; text-overflow: ellipsis; }
+.token-totals { display: flex; align-items: center; gap: 11px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.token-totals span + span { padding-left: 11px; border-left: 1px solid #dedce6; }
+.token-totals em { color: #a26f25; font-size: 9px; font-style: normal; }
 .composer {
   overflow: hidden;
   border: 1px solid var(--line-strong);
@@ -722,6 +748,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 @media (max-width: 780px) {
   .settings-content { grid-template-columns: 1fr; }
   .configured-models { border-right: 0; border-bottom: 1px solid var(--line); }
+  .session-usage-bar { grid-template-columns: 1fr; gap: 6px; }
+  .token-totals { justify-content: space-between; }
 }
 
 @media (prefers-reduced-motion: reduce) {
