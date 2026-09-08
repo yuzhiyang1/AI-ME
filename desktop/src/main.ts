@@ -1,13 +1,14 @@
-import { app, BrowserWindow, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const currentDirectory = path.dirname(fileURLToPath(import.meta.url));
 const developmentRendererUrl = process.env.AI_ME_RENDERER_URL;
+const apiBaseUrl = process.env.AI_ME_API_URL ?? "http://127.0.0.1:8000";
 
 function isAllowedInAppNavigation(targetUrl: string): boolean {
   if (!developmentRendererUrl) {
-    return targetUrl.startsWith("file://");
+    return new URL(targetUrl).origin === new URL(apiBaseUrl).origin;
   }
 
   return new URL(targetUrl).origin === new URL(developmentRendererUrl).origin;
@@ -58,12 +59,18 @@ async function createMainWindow(): Promise<void> {
     return;
   }
 
-  // 未设置开发地址时读取已构建的共享渲染层，便于本地生产模式验证。
-  const rendererEntry = path.resolve(currentDirectory, "../../frontend/dist/index.html");
-  await mainWindow.loadFile(rendererEntry);
+  // 生产模式从本地后端同源加载页面，让渲染层无需获得额外跨域权限。
+  await mainWindow.loadURL(`${apiBaseUrl}/app/`);
 }
 
 app.whenReady().then(async () => {
+  ipcMain.handle("workspace:select", async () => {
+    const result = await dialog.showOpenDialog({
+      title: "选择 AI-ME 会话工作区",
+      properties: ["openDirectory", "createDirectory"],
+    });
+    return result.canceled ? null : (result.filePaths[0] ?? null);
+  });
   await createMainWindow();
 
   app.on("activate", async () => {

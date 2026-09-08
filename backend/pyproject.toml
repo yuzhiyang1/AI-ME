@@ -8,10 +8,14 @@ version = "0.1.0"
 description = "Personal work-noise delegation agent for technical leads"
 requires-python = ">=3.11,<3.14"
 dependencies = [
+    "aiosqlite>=0.21,<1",
+    "alembic>=1.16,<2",
     "anthropic>=0.68,<1",
     "fastapi>=0.116,<1",
+    "keyring>=25,<26",
     "openai>=1.108,<2",
     "pydantic-settings>=2.10,<3",
+    "sqlalchemy[asyncio]>=2.0,<3",
     "uvicorn[standard]>=0.35,<1",
 ]
 

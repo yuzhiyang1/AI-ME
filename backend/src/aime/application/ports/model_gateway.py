@@ -26,6 +26,47 @@ class ConversationMessage:
 
 
 @dataclass(frozen=True, slots=True)
+class LlmToolDefinition:
+    """暴露给模型的工具定义，输入结构使用 JSON Schema 表达。"""
+
+    name: str
+    description: str
+    input_schema: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class LlmToolCall:
+    """模型完成一次流式输出后组装出的完整工具调用。"""
+
+    call_id: str
+    name: str
+    arguments_json: str
+
+
+@dataclass(frozen=True, slots=True)
+class LlmAssistantToolCallMessage:
+    """需要在下一次模型调用中原样回放的助手工具请求。"""
+
+    tool_calls: tuple[LlmToolCall, ...]
+    content: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class LlmToolResultMessage:
+    """一次工具调用的结构化结果；content 是可提交给模型的 JSON 文本。"""
+
+    call_id: str
+    name: str
+    content: str
+    is_error: bool = False
+
+
+LlmInputMessage: TypeAlias = (
+    ConversationMessage | LlmAssistantToolCallMessage | LlmToolResultMessage
+)
+
+
+@dataclass(frozen=True, slots=True)
 class ModelDescriptor:
     """应用层可见的模型元数据，不暴露底层传输协议。"""
 
@@ -45,10 +86,12 @@ class LlmCompletionRequest:
     """一次流式补全请求；system 是系统提示词的唯一来源。"""
 
     model_ref: str
-    messages: Sequence[ConversationMessage]
+    messages: Sequence[LlmInputMessage]
     system: str | None = None
     max_tokens: int | None = None
     temperature: float | None = None
+    tools: Sequence[LlmToolDefinition] = ()
+    parallel_tool_calls: bool = True
 
 
 class LlmFinishReason(StrEnum):

@@ -7,6 +7,7 @@ declare global {
       mode: "desktop";
       platform: string;
       apiBaseUrl: string;
+      selectWorkspace: () => Promise<string | null>;
       versions: {
         chrome?: string;
         electron?: string;

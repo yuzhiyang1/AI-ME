@@ -1,0 +1,405 @@
+"""以程序化方式执行本地 SQLite 的 Alembic 迁移。"""
+
+import sqlite3
+from pathlib import Path
+
+from alembic import command
+from alembic.config import Config
+
+_PREVIEW_BASE_REVISION = "0001_agent_sessions"
+_PREVIEW_TOOL_REVISION = "0003_tool_execution_ledger"
+_PREVIEW_MODEL_REVISION = "0004_model_configurations"
+_PREVIEW_PROJECT_REVISION = "0005_projects_and_session_roots"
+_BASE_APP_TABLES = {
+    "agent_sessions",
+    "agent_turns",
+    "agent_runs",
+    "runtime_events",
+    "session_items",
+}
+_TOOL_APP_TABLES = {"tool_invocations", "approval_requests", "approval_grants"}
+_MODEL_APP_TABLES = {"model_configurations"}
+_PROJECT_APP_TABLES = {
+    "projects",
+    "project_roots",
+    "project_idempotency_keys",
+    "session_workspace_roots",
+}
+_APP_TABLES = _BASE_APP_TABLES | _TOOL_APP_TABLES | _MODEL_APP_TABLES | _PROJECT_APP_TABLES
+_EXPECTED_COLUMNS: dict[str, dict[str, tuple[str, int | None]]] = {
+    "agent_sessions": {
+        "id": ("VARCHAR(36)", 1),
+        "title": ("VARCHAR(120)", 1),
+        "workspace_path": ("VARCHAR", 1),
+        "default_model": ("VARCHAR(200)", 1),
+        "permission_profile": ("VARCHAR(32)", 1),
+        "lifecycle": ("VARCHAR(32)", 1),
+        "activity": ("VARCHAR(32)", 1),
+        "pinned": ("BOOLEAN", 1),
+        "created_at": ("DATETIME", 1),
+        "updated_at": ("DATETIME", 1),
+        "last_event_sequence": ("INTEGER", 1),
+    },
+    "agent_turns": {
+        "id": ("VARCHAR(36)", 1),
+        "session_id": ("VARCHAR(36)", 1),
+        "status": ("VARCHAR(32)", 1),
+        "client_request_id": ("VARCHAR(120)", 1),
+        "created_at": ("DATETIME", 1),
+        "started_at": ("DATETIME", 0),
+        "finished_at": ("DATETIME", 0),
+    },
+    "agent_runs": {
+        "id": ("VARCHAR(36)", 1),
+        "session_id": ("VARCHAR(36)", 1),
+        "turn_id": ("VARCHAR(36)", 1),
+        "attempt": ("INTEGER", 1),
+        "status": ("VARCHAR(32)", 1),
+        "model_ref": ("VARCHAR(200)", 1),
+        # 早期 create_all 预览库是非空，0002 会统一升级为可空。
+        "started_at": ("DATETIME", None),
+        "finished_at": ("DATETIME", 0),
+        "terminal_event_id": ("VARCHAR(36)", 0),
+    },
+    "runtime_events": {
+        "id": ("VARCHAR(36)", 1),
+        "session_id": ("VARCHAR(36)", 1),
+        "turn_id": ("VARCHAR(36)", 1),
+        "run_id": ("VARCHAR(36)", 0),
+        "sequence": ("INTEGER", 1),
+        "type": ("VARCHAR(64)", 1),
+        "payload_json": ("TEXT", 1),
+        "created_at": ("DATETIME", 1),
+    },
+    "session_items": {
+        "id": ("VARCHAR(36)", 1),
+        "session_id": ("VARCHAR(36)", 1),
+        "turn_id": ("VARCHAR(36)", 1),
+        "run_id": ("VARCHAR(36)", 0),
+        "sequence": ("INTEGER", 1),
+        "type": ("VARCHAR(64)", 1),
+        "status": ("VARCHAR(32)", 1),
+        "content_json": ("TEXT", 1),
+        "created_at": ("DATETIME", 1),
+    },
+    "tool_invocations": {
+        "id": ("VARCHAR(36)", 1),
+        "session_id": ("VARCHAR(36)", 1),
+        "turn_id": ("VARCHAR(36)", 1),
+        "run_id": ("VARCHAR(36)", 1),
+        "call_id": ("VARCHAR(200)", 1),
+        "step_index": ("INTEGER", 1),
+        "call_index": ("INTEGER", 1),
+        "tool_name": ("VARCHAR(128)", 1),
+        "arguments_json": ("TEXT", 1),
+        "assistant_text": ("TEXT", 1),
+        "execution_semantics": ("VARCHAR(32)", 1),
+        "risk_level": ("VARCHAR(32)", 1),
+        "status": ("VARCHAR(32)", 1),
+        "result_json": ("TEXT", 0),
+        "is_error": ("BOOLEAN", 0),
+        "prepared_at": ("DATETIME", 1),
+        "started_at": ("DATETIME", 0),
+        "finished_at": ("DATETIME", 0),
+    },
+    "approval_requests": {
+        "id": ("VARCHAR(36)", 1),
+        "session_id": ("VARCHAR(36)", 1),
+        "turn_id": ("VARCHAR(36)", 1),
+        "run_id": ("VARCHAR(36)", 1),
+        "invocation_id": ("VARCHAR(36)", 1),
+        "reason": ("TEXT", 1),
+        "status": ("VARCHAR(32)", 1),
+        "decision": ("VARCHAR(32)", 0),
+        "requested_at": ("DATETIME", 1),
+        "resolved_at": ("DATETIME", 0),
+    },
+    "approval_grants": {
+        "id": ("VARCHAR(36)", 1),
+        "session_id": ("VARCHAR(36)", 1),
+        "tool_name": ("VARCHAR(128)", 1),
+        "approval_id": ("VARCHAR(36)", 1),
+        "created_at": ("DATETIME", 1),
+    },
+    "model_configurations": {
+        "id": ("VARCHAR(36)", 1),
+        "provider": ("VARCHAR(64)", 1),
+        "model_id": ("VARCHAR(200)", 1),
+        "display_name": ("VARCHAR(200)", 1),
+        "protocol": ("VARCHAR(32)", 1),
+        "base_url": ("VARCHAR(1000)", 0),
+        "context_window": ("INTEGER", 1),
+        "created_at": ("DATETIME", 1),
+        "updated_at": ("DATETIME", 1),
+    },
+    "projects": {
+        "id": ("VARCHAR(36)", 1),
+        "name": ("VARCHAR(120)", 1),
+        "position": ("INTEGER", 1),
+        "created_at": ("DATETIME", 1),
+        "updated_at": ("DATETIME", 1),
+    },
+    "project_roots": {
+        "project_id": ("VARCHAR(36)", 1),
+        "position": ("INTEGER", 1),
+        "path": ("VARCHAR", 1),
+        "path_key": ("VARCHAR", 1),
+    },
+    "project_idempotency_keys": {
+        "idempotency_key": ("VARCHAR(120)", 1),
+        "project_id": ("VARCHAR(36)", 1),
+        "request_hash": ("VARCHAR(64)", 1),
+        "created_at": ("DATETIME", 1),
+    },
+    "session_workspace_roots": {
+        "session_id": ("VARCHAR(36)", 1),
+        "position": ("INTEGER", 1),
+        "path": ("VARCHAR", 1),
+        "path_key": ("VARCHAR", 1),
+    },
+}
+_REQUIRED_UNIQUE_COLUMNS: dict[str, set[tuple[str, ...]]] = {
+    "agent_turns": {("session_id", "client_request_id")},
+    "agent_runs": {("turn_id", "attempt")},
+    "runtime_events": {("session_id", "sequence")},
+    "session_items": {("session_id", "sequence")},
+    "tool_invocations": {
+        ("run_id", "call_id"),
+        ("run_id", "step_index", "call_index"),
+    },
+    "approval_requests": {("invocation_id",)},
+    "approval_grants": {("session_id", "tool_name")},
+    "model_configurations": {("provider", "model_id")},
+    "project_roots": {
+        ("project_id", "position"),
+        ("project_id", "path_key"),
+    },
+    "session_workspace_roots": {
+        ("session_id", "position"),
+        ("session_id", "path_key"),
+    },
+}
+_REQUIRED_FOREIGN_KEYS: dict[str, set[tuple[str, str, str, str]]] = {
+    "agent_turns": {("session_id", "agent_sessions", "id", "CASCADE")},
+    "agent_runs": {
+        ("session_id", "agent_sessions", "id", "CASCADE"),
+        ("turn_id", "agent_turns", "id", "CASCADE"),
+    },
+    "runtime_events": {
+        ("session_id", "agent_sessions", "id", "CASCADE"),
+        ("turn_id", "agent_turns", "id", "CASCADE"),
+        ("run_id", "agent_runs", "id", "CASCADE"),
+    },
+    "session_items": {
+        ("session_id", "agent_sessions", "id", "CASCADE"),
+        ("turn_id", "agent_turns", "id", "CASCADE"),
+        ("run_id", "agent_runs", "id", "CASCADE"),
+    },
+    "tool_invocations": {
+        ("session_id", "agent_sessions", "id", "CASCADE"),
+        ("turn_id", "agent_turns", "id", "CASCADE"),
+        ("run_id", "agent_runs", "id", "CASCADE"),
+    },
+    "approval_requests": {
+        ("session_id", "agent_sessions", "id", "CASCADE"),
+        ("turn_id", "agent_turns", "id", "CASCADE"),
+        ("run_id", "agent_runs", "id", "CASCADE"),
+        ("invocation_id", "tool_invocations", "id", "CASCADE"),
+    },
+    "approval_grants": {
+        ("session_id", "agent_sessions", "id", "CASCADE"),
+        ("approval_id", "approval_requests", "id", "CASCADE"),
+    },
+    "project_roots": {("project_id", "projects", "id", "CASCADE")},
+    "project_idempotency_keys": {("project_id", "projects", "id", "CASCADE")},
+    "session_workspace_roots": {
+        ("session_id", "agent_sessions", "id", "CASCADE")
+    },
+}
+
+
+def upgrade_database(database_path: Path) -> None:
+    """把状态库升级到 head，并兼容尚未版本化的早期本地预览库。"""
+    config = _alembic_config(database_path)
+    if _is_unversioned_preview_database(database_path):
+        _adopt_preview_database(database_path, config)
+        return
+    command.upgrade(config, "head")
+
+
+def _alembic_config(database_path: Path) -> Config:
+    """构造不依赖当前工作目录的 Alembic 配置。"""
+    config = Config()
+    migrations = Path(__file__).with_name("migrations")
+    config.set_main_option("script_location", str(migrations))
+    config.set_main_option("sqlalchemy.url", f"sqlite:///{database_path.as_posix()}")
+    return config
+
+
+def _is_unversioned_preview_database(database_path: Path) -> bool:
+    """识别此前 create_all 生成、但没有 Alembic 版本号的预览数据库。"""
+    if not database_path.exists():
+        return False
+    with sqlite3.connect(database_path) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+    return "alembic_version" not in tables and bool(tables & _APP_TABLES)
+
+
+def _adopt_preview_database(database_path: Path, config: Config) -> None:
+    """校验早期结构后纳入版本管理；不接受半残或未知结构。"""
+    with sqlite3.connect(database_path) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        missing = _BASE_APP_TABLES - tables
+        if missing:
+            missing_names = ", ".join(sorted(missing))
+            raise RuntimeError(f"未版本化状态库结构不完整，缺少：{missing_names}")
+        present_tool_tables = tables & _TOOL_APP_TABLES
+        if present_tool_tables and present_tool_tables != _TOOL_APP_TABLES:
+            missing_tools = _TOOL_APP_TABLES - present_tool_tables
+            raise RuntimeError(f"未版本化状态库工具账本不完整，缺少：{sorted(missing_tools)}")
+        present_model_tables = tables & _MODEL_APP_TABLES
+        if present_model_tables and present_tool_tables != _TOOL_APP_TABLES:
+            raise RuntimeError("未版本化状态库含模型配置，但缺少其之前版本的工具账本")
+        present_project_tables = tables & _PROJECT_APP_TABLES
+        if present_project_tables and present_project_tables != _PROJECT_APP_TABLES:
+            missing_projects = _PROJECT_APP_TABLES - present_project_tables
+            raise RuntimeError(f"未版本化状态库项目结构不完整，缺少：{sorted(missing_projects)}")
+        if present_project_tables and present_model_tables != _MODEL_APP_TABLES:
+            raise RuntimeError("未版本化状态库含项目结构，但缺少其之前版本的模型配置")
+        validated_tables = (
+            _BASE_APP_TABLES
+            | present_tool_tables
+            | present_model_tables
+            | present_project_tables
+        )
+        _validate_columns(connection, validated_tables)
+        _validate_unique_constraints(connection, validated_tables)
+        _validate_foreign_keys(connection, validated_tables)
+        _validate_existing_rows(connection)
+        _ensure_active_turn_index(connection)
+    if present_project_tables == _PROJECT_APP_TABLES:
+        preview_revision = _PREVIEW_PROJECT_REVISION
+    elif present_model_tables == _MODEL_APP_TABLES:
+        preview_revision = _PREVIEW_MODEL_REVISION
+    elif present_tool_tables == _TOOL_APP_TABLES:
+        preview_revision = _PREVIEW_TOOL_REVISION
+    else:
+        preview_revision = _PREVIEW_BASE_REVISION
+    command.stamp(config, preview_revision)
+    command.upgrade(config, "head")
+
+
+def _validate_columns(connection: sqlite3.Connection, table_names: set[str]) -> None:
+    """精确校验预览库的完整列集合、SQLite 类型与可空性。"""
+    for table_name in table_names:
+        expected_columns = dict(_EXPECTED_COLUMNS[table_name])
+        if table_name == "agent_sessions" and _PROJECT_APP_TABLES.issubset(table_names):
+            expected_columns["project_id"] = ("VARCHAR(36)", 0)
+        rows = connection.execute(f"PRAGMA table_info('{table_name}')").fetchall()
+        actual_columns = {str(row[1]): row for row in rows}
+        if actual_columns.keys() != expected_columns.keys():
+            missing = sorted(expected_columns.keys() - actual_columns.keys())
+            unexpected = sorted(actual_columns.keys() - expected_columns.keys())
+            raise RuntimeError(
+                f"未版本化状态库表 {table_name} 字段不匹配；缺少={missing}，多出={unexpected}"
+            )
+        for column_name, (expected_type, expected_not_null) in expected_columns.items():
+            row = actual_columns[column_name]
+            actual_type = str(row[2]).upper()
+            actual_not_null = int(row[3])
+            if actual_type != expected_type or (
+                expected_not_null is not None and actual_not_null != expected_not_null
+            ):
+                raise RuntimeError(
+                    f"未版本化状态库表 {table_name}.{column_name} 定义不匹配；"
+                    f"实际=({actual_type}, notnull={actual_not_null})，"
+                    f"预期=({expected_type}, notnull={expected_not_null})"
+                )
+
+
+def _validate_unique_constraints(connection: sqlite3.Connection, table_names: set[str]) -> None:
+    """确认幂等键与事件序列等关键唯一约束没有在预览库中丢失。"""
+    for table_name in table_names:
+        required_columns: set[tuple[str, ...]] = _REQUIRED_UNIQUE_COLUMNS.get(table_name, set())
+        unique_columns: set[tuple[str, ...]] = set()
+        for index_row in connection.execute(f"PRAGMA index_list('{table_name}')").fetchall():
+            if not index_row[2]:
+                continue
+            index_name = str(index_row[1]).replace("'", "''")
+            columns = tuple(
+                str(row[2])
+                for row in connection.execute(f"PRAGMA index_info('{index_name}')").fetchall()
+            )
+            unique_columns.add(columns)
+        missing = required_columns - unique_columns
+        if missing:
+            raise RuntimeError(f"未版本化状态库表 {table_name} 缺少关键唯一约束：{missing}")
+
+
+def _validate_foreign_keys(connection: sqlite3.Connection, table_names: set[str]) -> None:
+    """确认聚合账本各表仍保持预期级联外键。"""
+    for table_name in table_names:
+        required_foreign_keys = set(_REQUIRED_FOREIGN_KEYS.get(table_name, set()))
+        if table_name == "agent_sessions" and _PROJECT_APP_TABLES.issubset(table_names):
+            required_foreign_keys.add(("project_id", "projects", "id", "SET NULL"))
+        actual = {
+            (str(row[3]), str(row[2]), str(row[4]), str(row[6]).upper())
+            for row in connection.execute(f"PRAGMA foreign_key_list('{table_name}')").fetchall()
+        }
+        missing = required_foreign_keys - actual
+        if missing:
+            raise RuntimeError(f"未版本化状态库表 {table_name} 缺少关键外键：{missing}")
+
+
+def _validate_existing_rows(connection: sqlite3.Connection) -> None:
+    """即使旧连接曾关闭外键，也拒绝收编已经含孤儿记录的数据库。"""
+    violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+    if violations:
+        raise RuntimeError(f"未版本化状态库存在外键违规数据：{violations[:5]}")
+
+
+def _ensure_active_turn_index(connection: sqlite3.Connection) -> None:
+    """补建缺失索引，但拒绝同名、非唯一或谓词错误的可疑索引。"""
+    index_row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'uq_active_turn_per_session'"
+    ).fetchone()
+    if index_row is None:
+        connection.execute(
+            "CREATE UNIQUE INDEX uq_active_turn_per_session "
+            "ON agent_turns (session_id) "
+            "WHERE status IN ('queued', 'in_progress', 'waiting_for_user')"
+        )
+        return
+
+    index_info = next(
+        (
+            row
+            for row in connection.execute("PRAGMA index_list('agent_turns')").fetchall()
+            if row[1] == "uq_active_turn_per_session"
+        ),
+        None,
+    )
+    columns = tuple(
+        str(row[2])
+        for row in connection.execute("PRAGMA index_info('uq_active_turn_per_session')").fetchall()
+    )
+    sql = str(index_row[0] or "").upper()
+    required_fragments = ("WHERE", "QUEUED", "IN_PROGRESS", "WAITING_FOR_USER")
+    if (
+        index_info is None
+        or int(index_info[2]) != 1
+        or int(index_info[4]) != 1
+        or columns != ("session_id",)
+        or any(fragment not in sql for fragment in required_fragments)
+    ):
+        raise RuntimeError("未版本化状态库的活跃 Turn 唯一索引定义不匹配")

@@ -6,6 +6,7 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
+backend/.tmp/
 .env
 .DS_Store
 

@@ -24,7 +24,9 @@ desktop/
 └── src/                # Electron 主进程与受控预加载桥
 
 docs/
-└── architecture.md
+├── architecture.md
+├── Agent会话与Runtime设计.md
+└── superpowers/        # 已评审的功能规格与实施计划
 ```
 
 ## 默认启动：桌面客户端
@@ -73,12 +75,30 @@ uv run ruff check src tests
 uv run mypy src
 
 cd ..\frontend
+npm test
 npm run build
 
 cd ..\desktop
 npm run typecheck
 npm run build
 ```
+
+## 当前可用能力
+
+- 创建项目并为项目关联多个本地目录，其中一个目录作为默认工作目录；
+- 在项目下创建会话，或创建不绑定项目、但仍明确选择工作目录的独立任务；
+- 会话创建时快照项目目录：主目录作为 Runtime 工作目录，关联目录共同构成文件工具的访问边界；
+- 删除项目时保留会话、消息、运行记录与目录快照，并把会话移入左侧“任务”；
+- 在输入区和左侧会话列表同步展示圆形上下文占用进度，并分别统计输入、输出 Token；
+- 在同一会话中持续多轮对话，并实时呈现模型文本；
+- 本地持久化 Session、Turn、AgentRun、RuntimeEvent 与 Item；
+- 使用 sequence 自动断线续传，支持切换会话后恢复控制、主动中断与异常退出恢复；
+- 通过同键自动对账、数据库唯一约束和原子终态提交保护幂等请求、单会话单 Turn 与完成/中断竞态；
+- 桌面端安全选择工作区，生产模式与本地 API 同源运行。
+- 在“设置 → 模型配置”中新增 OpenAI、DeepSeek、Anthropic 或 OpenAI 兼容模型，保存后立即生效；
+- API Key 与 SQLite 元数据分离，保存在操作系统凭据保险库中，接口不会回传明文。
+
+推荐直接在应用设置中配置模型。原有 `AIME_*_API_KEY` 环境变量仍作为开发和部署兼容入口保留。
 
 ## 架构原则
 
@@ -87,6 +107,8 @@ npm run build
 - DDD 用于表达工作请求、Agent Run、SOP、证据与审批规则，不等于微服务。
 - Agent Runtime、LLM、数据库和外部工具都是可替换适配器。
 - 先完成真实纵向用例，再扩展基础设施。
+
+项目只是工作区模板，不是会话历史的所有者。会话一旦创建，就使用自己的目录快照运行；之后编辑项目不会静默改变旧会话的工具权限。
 
 详细说明见 [docs/architecture.md](docs/architecture.md)。
 
