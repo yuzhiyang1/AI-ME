@@ -52,6 +52,64 @@ class SkillGateway:
             yield LlmStreamCompleted(LlmFinishReason.STOP)
 
 
+class PagingGateway(SkillGateway):
+    """严格跟随 next_cursor，确保正文确实送达模型而非被替换成产物引用。"""
+
+    def __init__(self, ref, capacity):
+        super().__init__(ref, False)
+        self.capacity = capacity
+        self.cursor = ""
+        self.content = ""
+        self.seen = set()
+        self.complete = False
+
+    def list_models(self):
+        return [ModelDescriptor("qa", "context", "测试模型", self.capacity)]
+
+    async def stream(self, request):
+        self.requests.append(request)
+        for message in request.messages:
+            if isinstance(message, LlmToolResultMessage) and message.name == "skill_read":
+                if message.call_id in self.seen:
+                    continue
+                page = json.loads(message.content)
+                if "content" not in page:
+                    continue
+                self.seen.add(message.call_id)
+                self.content += page["content"]
+                self.cursor = page["next_cursor"] or ""
+                self.complete = page["complete"]
+        if self.complete:
+            yield LlmTextDelta("全文读取完成，开始执行检查。")
+            yield LlmStreamCompleted(LlmFinishReason.STOP)
+            return
+        tool = "skill_read" if any(t.name == "skill_read" for t in request.tools) else "new_context"
+        args = {"ref": self.ref, "cursor": self.cursor} if tool == "skill_read" else {}
+        yield LlmToolCallDelta(0, f"page-{len(self.requests)}", tool, json.dumps(args))
+        yield LlmStreamCompleted(LlmFinishReason.TOOL_CALLS)
+
+
+@pytest.mark.parametrize("size,capacity", [(60000, 32000), (250000, 128000)])
+async def test_long_skill_completes_within_request_budget(
+    context_env, tmp_path, size, capacity,  # noqa: F811
+):
+    database, store, artifacts, request = context_env
+    path = make_skill(tmp_path, body="x" * size)
+    service = SkillService(LocalSkillResources(()), SqliteSkillStore(database.session_factory))
+    skills, _ = await service.inventory((str(tmp_path),))
+    gateway = PagingGateway(skills[0].ref, capacity)
+    runtime = ModelAgentRuntime(
+        gateway, SqliteToolExecutionStore(database.session_factory), InMemoryApprovalBroker(),
+        context_store=store, artifact_store=artifacts,
+        token_counter=ConservativeTokenCounter(), skill_service=service,
+    )
+    events = [event async for event in runtime.run(request)]
+    assert not [event for event in events if event.type == "failed"]
+    assert gateway.complete and gateway.content == path.read_text(encoding="utf-8")
+    assert len(gateway.requests) <= 32
+    assert all(ConservativeTokenCounter().count(r) < capacity for r in gateway.requests)
+
+
 @pytest.mark.parametrize("explicit", [True, False])
 @pytest.mark.parametrize("catalog_size", [1, 1000])
 async def test_runtime_load_and_rollover_preserve_skill_version(

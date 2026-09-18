@@ -153,6 +153,8 @@ class ModelAgentRuntime(AgentRuntime):
                 request.session_id, request.run_id, request.instruction,
             )
             registry = SkillToolRegistry(registry, skill_run)
+            # 大窗口一次读取更多正文；小窗口仍为系统、工具与回答保留余量。
+            skill_run.page_bytes = max(1400, min(12_000, (context_window or 0) // 8))
             descriptors = registry.descriptors(request.permission_profile)
             system += skill_run.catalog(context_window or 0)
             explicit = await skill_run.explicit_content()
@@ -714,8 +716,9 @@ class ModelAgentRuntime(AgentRuntime):
                 result = _error_result("tool_dispatch_failed", "工具没有产生可用结果")
             finished_invocation_id = invocation_ids.get(call.call_id)
             if finished_invocation_id is not None:
-                # 大结果先发布可读取的产物再写 T2，避免账本留下悬空引用。
-                if managed is not None:
+                # Skill 正文已经按窗口预算分页，保留页内容才能直接继续读取。
+                # 其他大结果先发布产物再写 T2，避免账本留下悬空引用。
+                if managed is not None and call.name != "skill_read":
                     result = ToolExecutionResult(
                         await managed.project_result(result.output),
                         result.is_error,

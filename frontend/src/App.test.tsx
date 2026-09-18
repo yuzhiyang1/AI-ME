@@ -35,6 +35,8 @@ const api = vi.hoisted(() => ({
   startTurn: vi.fn(),
   streamRuntimeEvents: vi.fn(),
   updateProject: vi.fn(),
+  listSkills: vi.fn(),
+  saveSkillPreference: vi.fn(),
 }));
 
 vi.mock("./api", () => {
@@ -104,6 +106,7 @@ describe("会话页面异步隔离", () => {
     api.getTurnByClientRequest.mockResolvedValue(null);
     api.startTurn.mockResolvedValue(acceptedTurn);
     api.streamRuntimeEvents.mockResolvedValue(undefined);
+    api.listSkills.mockResolvedValue({skills: [{ref: "root:my review", name: "review", description: "检查", enabled: true, pinned: false, version: "v1", shadowed: false, explicit_only: false}], diagnostics: []});
   });
 
   it("把助手回复渲染为可读的 Markdown，而不是显示原始标记", async () => {
@@ -183,6 +186,26 @@ describe("会话页面异步隔离", () => {
     }
     expect(await screen.findByText(answer)).toBeTruthy();
     expect(screen.queryByText("正在完成")).toBeNull();
+  });
+
+  it("技能页隐藏回答动画时仍能完成收尾并选择含空格的 Skill", async () => {
+    api.listSessionItems.mockResolvedValue([]);
+    let finish!: () => void;
+    api.streamRuntimeEvents.mockImplementation(async (_sid, _cursor, onEvent) => {
+      onEvent({id: "text", sessionId: sessionA.id, turnId: acceptedTurn.id, runId: "r", sequence: 2, type: "text_delta", payload: {text: "检查完成"}, createdAt: "2026-09-05T00:00:01Z"});
+      await new Promise<void>(resolve => {finish = resolve;});
+    });
+    const user = userEvent.setup();
+    render(<App/>);
+    await user.type(await screen.findByRole("textbox", {name: "给 AI-ME 发消息"}), "检查代码");
+    await user.click(screen.getByRole("button", {name: "发送"}));
+    await waitFor(() => expect(finish).toBeTypeOf("function"));
+    await user.click(screen.getByRole("button", {name: "技能"}));
+    await user.click((await screen.findAllByRole("button", {name: /review/}))[0]);
+    await act(async () => finish());
+    await waitFor(() => expect((screen.getByRole("button", {name: "在当前会话使用"}) as HTMLButtonElement).disabled).toBe(false));
+    await user.click(screen.getByRole("button", {name: "在当前会话使用"}));
+    expect((screen.getByRole("textbox", {name: "给 AI-ME 发消息"}) as HTMLTextAreaElement).value).toContain("/skill:root%3Amy%20review");
   });
 
   it("恢复会话后展示待审批工具，并允许用户仅批准本次", async () => {

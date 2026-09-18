@@ -106,6 +106,12 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [skillsPageOpen, setSkillsPageOpen] = useState(false);
+  const skillsPageOpenRef = useRef(false);
+  useEffect(() => {
+    skillsPageOpenRef.current = skillsPageOpen;
+    // 进入技能页会卸载回答动画，不能再等待该组件回调才能完成运行收尾。
+    if (skillsPageOpen) liveAnswerDrainRef.current?.();
+  }, [skillsPageOpen]);
   const [modelConfigurations, setModelConfigurations] = useState<ModelConfiguration[]>([]);
   const [settingsLoading, setSettingsLoading] = useState(false);
   const [settingsError, setSettingsError] = useState<string | null>(null);
@@ -498,6 +504,7 @@ function App() {
   function waitForLiveAnswerPresentation() {
     flushLiveAnswerPublication();
     setLiveAnswerCompleted(true);
+    if (skillsPageOpenRef.current) return Promise.resolve();
     return new Promise<void>((resolve) => {
       liveAnswerDrainRef.current = () => {
         liveAnswerDrainRef.current = null;
@@ -950,7 +957,7 @@ function App() {
         {skillsPageOpen ? <SkillLibrary key={activeSession?.id ?? "personal"}
           sessionId={activeSession?.id} disabled={sending || sessionLoading}
           onClose={() => setSkillsPageOpen(false)}
-          onSelect={(ref) => { setDraft(current => `/skill:${ref}\n${current}`); setSkillsPageOpen(false); }}
+          onSelect={(ref) => { setDraft(current => `/skill:${encodeURIComponent(ref)}\n${current}`); setSkillsPageOpen(false); }}
         /> : activeSession ? (
           <>
             <header className="conversation-header">
@@ -1030,7 +1037,7 @@ function App() {
                 <div className="composer-foot">
                   <SkillPicker key={activeSession.id} sessionId={activeSession.id}
                     disabled={sending || sessionLoading}
-                    onSelect={(ref) => setDraft(current => `/skill:${ref}\n${current}`)} />
+                    onSelect={(ref) => setDraft(current => `/skill:${encodeURIComponent(ref)}\n${current}`)} />
                   <span>
                     {settlingRequest
                       ? "正在完成发送结果的最终对账"

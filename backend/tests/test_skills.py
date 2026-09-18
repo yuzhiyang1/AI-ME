@@ -3,6 +3,7 @@
 import json
 from dataclasses import replace
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 
@@ -136,7 +137,7 @@ async def test_disabled_and_explicit_only_never_autoload(skills_env):
 
 async def test_cursor_cannot_cross_skill_or_session(skills_env):
     service, root = skills_env
-    make_skill(root, body="x" * 5000)
+    make_skill(root, body="x" * 25000)
     run = await service.start((str(root),), "a", "r", "检查")
     page = await run.read(run.skills[0].ref)
     other = await service.start((str(root),), "b", "r", "检查")
@@ -164,3 +165,23 @@ async def test_preferences_are_persisted(skills_env):
     saved, _ = await service.inventory((str(root),))
     assert not saved[0].enabled and saved[0].pinned
     assert json.loads(await service.store.get("pref:" + saved[0].ref))["pinned"]
+
+
+async def test_ui_encoded_reference_preserves_spaces_and_percent(skills_env):
+    service, root = skills_env
+    make_skill(root, name="my review%20")
+    skills, _ = await service.inventory((str(root),))
+    ref = skills[0].ref
+    run = await service.start((str(root),), "s", "encoded", f"/skill:{quote(ref, safe='')} 检查")
+    assert run.explicit == [ref]
+    assert "检查除数为零" in await run.explicit_content()
+
+
+async def test_resource_too_large_for_page_budget_fails_before_partial_read(skills_env):
+    service, root = skills_env
+    make_skill(root, body="x" * 60000)
+    run = await service.start((str(root),), "s", "small-model", "检查")
+    run.page_bytes = 1400
+    with pytest.raises(SkillError, match="skill_read_budget_exceeded"):
+        await run.read(run.skills[0].ref)
+    assert not await run.handoff()

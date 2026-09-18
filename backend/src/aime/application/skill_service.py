@@ -6,6 +6,7 @@ import json
 import re
 from dataclasses import asdict, replace
 from typing import Any
+from urllib.parse import unquote
 
 from aime.application.ports.skills import SkillResources, SkillStateStore
 from aime.domain.skills import Skill, SkillError, bounded_text, text_cost
@@ -80,7 +81,11 @@ class SkillService:
         skills = [Skill(**item) for item in data["skills"]]
         explicit: list[str] = []
         for token in dict.fromkeys(re.findall(r"/skill:([^\s]+)", instruction)):
+            # 界面只编码命令参数，保留已有 ref、快照和偏好的稳定身份。
             matches = [s for s in skills if s.ref == token]
+            if not matches:
+                token = unquote(token)
+                matches = [s for s in skills if s.ref == token]
             if not matches:
                 matches = [s for s in skills if s.name == token and not s.shadowed]
             if len(matches) != 1 or not matches[0].enabled:
@@ -110,6 +115,7 @@ class SkillRun:
         self.explicit = explicit
         self.diagnostics = diagnostics
         self._read_lock = asyncio.Lock()
+        self.page_bytes = 12_000
         self.catalog_version = hashlib.sha256(
             json.dumps([asdict(s) for s in skills], sort_keys=True).encode()
         ).hexdigest()
@@ -263,9 +269,15 @@ class SkillRun:
         if body is None:
             body = await self.service.resources.read(skill, resource)
             body = await self.service.store.save(key, body, immutable=True)
+        # 默认 32 次请求中至少留 8 次给搜索、换窗和实际任务，不能读到中途才耗尽。
+        if text_cost(body) > self.page_bytes * 24:
+            raise SkillError(
+                "skill_read_budget_exceeded: 当前模型需要过多分页才能读完此资源；"
+                "请选择更大上下文的模型，或将手册拆成精简主文和按需附件"
+            )
         version = hashlib.sha256((key + body).encode()).hexdigest()
         offset = self._offset(cursor, version, len(body))
-        page = bounded_text(body[offset:], 1400)
+        page = bounded_text(body[offset:], self.page_bytes)
         end = offset + len(page)
         await self.service.store.save(
             loaded_key,
