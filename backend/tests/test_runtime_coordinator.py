@@ -82,6 +82,22 @@ class _FailingTerminalStore(_RecordingStore):
         raise RuntimeError("state-store-down")
 
 
+async def test_discarded_model_attempt_is_not_in_final_answer() -> None:
+    """溢出失败的已展示草稿只留在事件日志，不能混入成功回答。"""
+    class RecoveringRuntime:
+        async def run(self, request):
+            yield AgentEvent(type="response_restored", content="已完成部分。")
+            yield AgentEvent(type="text_delta", content="失败😀草稿")
+            yield AgentEvent(type="model_attempt_discarded", payload={"discardedChars": 5})
+            yield AgentEvent(type="text_delta", content="恢复后的回答")
+
+    store = _RecordingStore()
+    coordinator = RuntimeCoordinator(RecoveringRuntime(), store)  # type: ignore[arg-type]
+    coordinator.submit(_execution())
+    await coordinator.close()
+    assert store.completed == ["已完成部分。恢复后的回答"]
+
+
 async def test_runtime_runs_at_most_two_sessions_concurrently() -> None:
     """本地第一期最多同时运行两个 Session，第三个必须排队。"""
     runtime = _GateRuntime()

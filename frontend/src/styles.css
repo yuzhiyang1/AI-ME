@@ -939,3 +939,63 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
   .typing span { animation: none; opacity: 0.55; transform: none; }
 }
+/* Skill 选择器复用项目弹窗与输入区的边框、字色和操作布局。 */
+.skill-picker-trigger { display: inline-flex; align-items: center; gap: 6px; background: transparent; border: 0; color: inherit; padding: 5px; white-space: nowrap; }
+.skill-dialog { max-height: 80vh; overflow-y: auto; padding-bottom: 20px; }
+.skill-dialog > .project-name-field, .skill-dialog > p, .skill-dialog > details { display: block; margin: 16px 24px; }
+.skill-dialog { font-size: 13px; }
+.skill-dialog .project-name-field input { flex: 1; }
+.skill-help { color: var(--text-secondary); line-height: 1.6; }
+.skill-list { padding: 0 24px; }
+.skill-list-toolbar { display: flex; justify-content: space-between; align-items: center; margin: 12px 24px; color: var(--text-secondary); }
+.skill-list-toolbar button { padding: 5px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); cursor: pointer; }
+.skill-list-toolbar button:disabled { opacity: 0.45; cursor: not-allowed; }
+.skill-state { margin-left: 10px; padding: 2px 6px; background: var(--surface-soft); border-radius: 4px; }
+.skill-row { padding: 14px 0; border-bottom: 1px solid var(--border, #e7e5eb); }
+.skill-row p { margin: 6px 0; }
+.skill-row small { color: var(--text-muted, #777); overflow-wrap: anywhere; }
+.skill-actions { display: flex; gap: 16px; align-items: center; margin-top: 10px; }
+.skill-actions label { display: flex; align-items: center; gap: 4px; }
+.skill-actions input { accent-color: var(--brand); }
+.skill-actions button { margin-left: auto; padding: 6px 14px; border: 1px solid var(--brand-line); border-radius: 8px; background: var(--brand); color: white; cursor: pointer; }
+.skill-actions button:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* 技能页沿用工作台字体和侧栏，内容区采用留白充足的双列目录。 */
+.settings-row.is-selected { color: var(--brand-strong); background: var(--brand-soft); }
+.skills-page { grid-row: 1 / -1; min-height: 0; height: 100%; overflow-y: auto; background: var(--surface); }
+.skills-page-inner { width: min(780px, 100%); margin: 0 auto; padding: 26px 28px 70px; }
+.skills-page-navigation { display: flex; justify-content: space-between; margin-bottom: 28px; }
+.skills-page button { cursor: pointer; }
+.skills-page-navigation button, .skills-detail header button { display: inline-flex; align-items: center; gap: 6px; border: 0; background: transparent; color: var(--text-muted); font-size: 12px; }
+.skills-page h1 { margin: 0; font-size: 28px; font-weight: 620; letter-spacing: -1px; }
+.skills-page header > p { margin: 10px 0 24px; color: var(--text-secondary); font-size: 14px; }
+.skills-search { display: flex; align-items: center; gap: 9px; border: 1px solid var(--line-strong); border-radius: 24px; padding: 8px 13px; color: var(--text-muted); }
+.skills-search input { width: 100%; border: 0; outline: none; background: transparent; font-size: 13px; }
+.skills-search:focus-within { border-color: var(--brand); }
+.skills-page h2 { margin: 30px 0 14px; padding-bottom: 12px; border-bottom: 1px solid var(--line); font-size: 15px; font-weight: 600; }
+.skills-page h2 small { margin-left: 8px; color: var(--text-muted); font-weight: 400; font-size: 12px; }
+.skills-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 22px; row-gap: 8px; }
+.skills-tile { display: flex; align-items: center; text-align: left; gap: 12px; min-width: 0; padding: 12px 8px; border: 0; border-radius: 10px; background: transparent; }
+.skills-tile:hover, .skills-tile.is-selected { background: var(--surface-soft); }
+.skills-icon { display: grid; place-items: center; flex: 0 0 40px; height: 40px; border-radius: 10px; color: var(--brand); background: #f5f4f8; }
+.skills-tile-text { min-width: 0; flex: 1; }
+.skills-tile-text strong, .skills-tile-text > span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.skills-tile-text strong { font-size: 13px; font-weight: 560; }
+.skills-tile-text > span { color: var(--text-secondary); font-size: 12px; margin-top: 7px; }
+.skills-check, .skills-tile > small { flex-shrink: 0; color: #b3b6bd; }
+.skills-more { margin: 18px 8px 0; padding: 0; border: 0; background: transparent; color: var(--text-muted); font-size: 12px; }
+.skills-sources { margin-top: 38px; }
+.skills-tabs { display: flex; gap: 9px; flex-wrap: wrap; margin-bottom: 22px; }
+.skills-tabs button { border: 0; border-radius: 9px; padding: 6px 10px; color: var(--text-muted); background: transparent; font-size: 12px; }
+.skills-tabs button[aria-selected="true"] { background: #f1f1f3; color: var(--text); }
+.skills-empty, .skills-diagnostics { color: var(--text-muted); font-size: 13px; line-height: 1.8; margin-top: 24px; }
+.skills-detail { margin-top: 28px; padding: 18px; border: 1px solid var(--line); border-radius: 12px; font-size: 13px; }
+.skills-detail header { display: flex; align-items: center; justify-content: space-between; }
+.skills-detail h2 { border: 0; padding: 0; margin: 0; }
+.skills-detail > small { color: var(--text-muted); }
+.skills-detail-actions { display: flex; align-items: center; gap: 16px; margin-top: 20px; }
+.skills-detail-actions input { accent-color: var(--brand); }
+.skills-detail-actions button { margin-left: auto; background: var(--brand); color: white; border: 0; border-radius: 8px; padding: 8px 12px; }
+.skills-page button:disabled { opacity: .45; cursor: not-allowed; }
+.skills-error { color: var(--danger); font-size: 13px; }
+@media (max-width: 780px) { .skills-grid { grid-template-columns: 1fr; } }

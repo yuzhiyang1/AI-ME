@@ -402,6 +402,8 @@ def test_session_usage_separates_cumulative_tokens_from_current_context(tmp_path
         "measuredSteps": 2,
         "unreportedSteps": 0,
         "untrackedHistory": False,
+        "windowNumber": 1,
+        "contextEstimated": False,
     }
 
 
@@ -447,6 +449,8 @@ def test_session_usage_marks_steps_without_provider_usage_as_partial(tmp_path: P
         "measuredSteps": 0,
         "unreportedSteps": 1,
         "untrackedHistory": False,
+        "windowNumber": 1,
+        "contextEstimated": False,
     }
 
 
@@ -611,13 +615,15 @@ def test_runtime_events_can_be_replayed_from_a_sequence_cursor(tmp_path: Path) -
         if line.startswith("data: ")
     ]
     assert [payload["type"] for payload in payloads] == [
+        "skills_catalog",
+        "context_status",
         "text_delta",
         "text_delta",
         "model_usage",
         "agent_message",
         "run_completed",
     ]
-    assert [payload["sequence"] for payload in payloads] == [2, 3, 4, 5, 6]
+    assert [payload["sequence"] for payload in payloads] == [2, 3, 4, 5, 6, 7, 8]
 
 
 def test_sessions_are_listed_by_recent_activity_with_a_first_turn_title(tmp_path: Path) -> None:

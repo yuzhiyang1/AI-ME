@@ -3,7 +3,9 @@
 import asyncio
 import os
 import re
+import subprocess
 import tempfile
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 from aime.application.ports.model_gateway import LlmToolDefinition
@@ -17,6 +19,7 @@ from aime.application.ports.tool_execution import (
     ToolRiskLevel,
 )
 from aime.domain.sessions.value_objects import PermissionProfile
+from aime.infrastructure.persistence.local_artifact_store import LocalArtifactStore
 
 MAX_FILE_CHARS = 200_000
 MAX_LIST_ENTRIES = 2_000
@@ -31,14 +34,14 @@ class ToolInputError(ValueError):
 class BuiltInToolRegistry(ToolRegistry):
     """注册 AI-ME 第一期的文件与 PowerShell 工具。"""
 
-    def __init__(self) -> None:
+    def __init__(self, artifacts: LocalArtifactStore | None = None) -> None:
         tools: tuple[AgentTool, ...] = (
             ListFilesTool(),
             SearchTextTool(),
-            ReadFileTool(),
+            ReadFileTool(artifacts),
             WriteFileTool(),
             EditFileTool(),
-            PowerShellTool(),
+            PowerShellTool(artifacts),
         )
         self._tools = {tool.descriptor.definition.name: tool for tool in tools}
 
@@ -81,9 +84,7 @@ class ListFilesTool:
         recursive = _optional_bool(arguments, "recursive", False)
         if not path.is_dir():
             raise ToolInputError("path 必须指向目录")
-        entries = await asyncio.to_thread(
-            _list_entries, path, recursive, context
-        )
+        entries = await asyncio.to_thread(_list_entries, path, recursive, context)
         truncated = len(entries) > MAX_LIST_ENTRIES
         return ToolExecutionResult(
             {
@@ -137,6 +138,9 @@ class SearchTextTool:
 class ReadFileTool:
     """读取工作区内的 UTF-8 文本文件。"""
 
+    def __init__(self, artifacts: LocalArtifactStore | None = None) -> None:
+        self._artifacts = artifacts
+
     descriptor = ToolDescriptor(
         definition=LlmToolDefinition(
             name="read_file",
@@ -167,8 +171,19 @@ class ReadFileTool:
         assert start_line is not None
         if end_line is not None and end_line < start_line:
             raise ToolInputError("end_line 不能小于 start_line")
-        content = await asyncio.to_thread(path.read_text, encoding="utf-8", errors="strict")
-        selected = "\n".join(content.splitlines()[start_line - 1 : end_line])
+        if self._artifacts is not None:
+            captured = await self._artifacts.capture(
+                context.session_id,
+                _file_chunks(path, start_line, end_line),
+            )
+            return ToolExecutionResult(
+                {
+                    "path": _relative(path, context),
+                    "content": captured.pop("preview"),
+                    **captured,
+                }
+            )
+        selected = await _bounded_file_text(path, start_line, end_line)
         truncated = len(selected) > MAX_FILE_CHARS
         return ToolExecutionResult(
             {
@@ -263,6 +278,9 @@ class EditFileTool:
 class PowerShellTool:
     """在工作区中以非交互方式执行 PowerShell。"""
 
+    def __init__(self, artifacts: LocalArtifactStore | None = None) -> None:
+        self._artifacts = artifacts
+
     descriptor = ToolDescriptor(
         definition=LlmToolDefinition(
             name="run_powershell",
@@ -298,27 +316,95 @@ class PowerShellTool:
             cwd=context.workspace_path,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         )
+        assert process.stdout is not None and process.stderr is not None
+
+        async def collect(stream: asyncio.StreamReader) -> dict[str, object]:
+            if self._artifacts is not None:
+                return await self._artifacts.capture(context.session_id, _pipe_chunks(stream))
+            buffer = bytearray()
+            total = 0
+            async for chunk in _pipe_chunks(stream):
+                total += len(chunk)
+                buffer.extend(chunk[: max(0, MAX_COMMAND_CHARS * 4 - len(buffer))])
+            decoded = buffer.decode("utf-8", errors="replace")
+            return {
+                "preview": decoded[:MAX_COMMAND_CHARS],
+                "truncated": total > len(buffer) or len(decoded) > MAX_COMMAND_CHARS,
+            }
+
+        collectors = asyncio.gather(collect(process.stdout), collect(process.stderr))
         try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(process.communicate(), timeout)
+            stdout_result, stderr_result = await asyncio.wait_for(collectors, timeout)
+            await asyncio.wait_for(process.wait(), timeout)
         except TimeoutError:
-            process.kill()
+            if process.returncode is None:
+                process.kill()
             await process.wait()
             return ToolExecutionResult(
-                {"error": f"命令超过 {timeout} 秒后已终止", "timed_out": True},
+                {
+                    "error": f"命令超过 {timeout} 秒后已终止",
+                    "timed_out": True,
+                    "capture_complete": False,
+                },
                 is_error=True,
             )
-        stdout = stdout_bytes.decode("utf-8", errors="replace")
-        stderr = stderr_bytes.decode("utf-8", errors="replace")
+        except BaseException:
+            # 取消、磁盘失败等路径也必须关闭进程和采集任务，不能遗留后台写入。
+            collectors.cancel()
+            if process.returncode is None:
+                process.kill()
+            await process.wait()
+            await asyncio.gather(collectors, return_exceptions=True)
+            raise
         return ToolExecutionResult(
             {
                 "exit_code": process.returncode,
-                "stdout": stdout[:MAX_COMMAND_CHARS],
-                "stderr": stderr[:MAX_COMMAND_CHARS],
-                "truncated": len(stdout) > MAX_COMMAND_CHARS or len(stderr) > MAX_COMMAND_CHARS,
+                "stdout": stdout_result.pop("preview"),
+                "stderr": stderr_result.pop("preview"),
+                "stdout_artifact": stdout_result,
+                "stderr_artifact": stderr_result,
+                "truncated": stdout_result["truncated"] or stderr_result["truncated"],
             },
             is_error=process.returncode != 0,
         )
+
+
+async def _pipe_chunks(stream: asyncio.StreamReader) -> AsyncIterator[bytes]:
+    while chunk := await stream.read(65_536):
+        yield chunk
+
+
+async def _file_chunks(path: Path, start: int, end: int | None) -> AsyncIterator[bytes]:
+    """按逻辑行筛选，readline 同时设长度上限，超长单行不造成内存尖峰。"""
+    with path.open("r", encoding="utf-8", errors="strict", newline=None) as handle:
+        line = 1
+        emitted = False
+        new_line = True
+        while chunk := await asyncio.to_thread(handle.readline, 16_384):
+            if end is not None and line > end:
+                break
+            ends_line = chunk.endswith("\n")
+            if line >= start:
+                prefix = "\n" if emitted and new_line else ""
+                yield (prefix + (chunk[:-1] if ends_line else chunk)).encode("utf-8")
+                emitted = True
+            new_line = ends_line
+            if ends_line:
+                line += 1
+
+
+async def _bounded_file_text(path: Path, start: int, end: int | None) -> str:
+    parts: list[str] = []
+    size = 0
+    async for chunk in _file_chunks(path, start, end):
+        decoded = chunk.decode("utf-8")
+        parts.append(decoded[: max(0, MAX_FILE_CHARS + 1 - size)])
+        size += len(decoded)
+        if size > MAX_FILE_CHARS:
+            break
+    return "".join(parts)
 
 
 def _permission_allows(permission: PermissionProfile, risk: ToolRiskLevel) -> bool:

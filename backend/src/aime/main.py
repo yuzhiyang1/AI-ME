@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 
 from aime.composition import Container, build_container
 from aime.presentation.api.routes import build_router
+from aime.presentation.api.skill_routes import skill_router
 
 
 def create_app(
@@ -30,6 +31,9 @@ def create_app(
             await resolved_container.close()
 
     app = FastAPI(title="AI-ME API", version="0.1.0", lifespan=lifespan)
+    app.include_router(
+        skill_router(resolved_container.skill_service, resolved_container.get_session)
+    )
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],

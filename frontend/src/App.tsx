@@ -1,5 +1,8 @@
+import { SkillPicker } from "./SkillPicker";
+import { SkillLibrary } from "./SkillLibrary";
 import {
   Bot,
+  BookOpen,
   ChevronDown,
   CircleAlert,
   Folder,
@@ -102,6 +105,7 @@ function App() {
   const [decidingApprovalId, setDecidingApprovalId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [skillsPageOpen, setSkillsPageOpen] = useState(false);
   const [modelConfigurations, setModelConfigurations] = useState<ModelConfiguration[]>([]);
   const [settingsLoading, setSettingsLoading] = useState(false);
   const [settingsError, setSettingsError] = useState<string | null>(null);
@@ -458,8 +462,28 @@ function App() {
       void refreshRuntimeFacts(sessionId, viewGeneration);
       return;
     }
-    if (event.type === "model_usage") {
+    if (event.type === "model_usage" || event.type === "context_window_started"
+        || event.type === "context_status") {
       void refreshSessionUsage(sessionId, viewGeneration);
+      return;
+    }
+    if (event.type === "response_restored") {
+      const text = event.payload.text;
+      if (typeof text === "string") {
+        liveAnswerRef.current = text;
+        flushLiveAnswerPublication();
+        setLiveAnswer(text);
+      }
+      return;
+    }
+    if (event.type === "model_attempt_discarded") {
+      const count = event.payload.discardedChars;
+      if (typeof count === "number" && count > 0) {
+        // 后端按 Unicode 字符计数，不能用 UTF-16 下标截断 emoji。
+        liveAnswerRef.current = Array.from(liveAnswerRef.current).slice(0, -count).join("");
+        flushLiveAnswerPublication();
+        setLiveAnswer(liveAnswerRef.current);
+      }
       return;
     }
     if (event.type !== "text_delta") return;
@@ -891,7 +915,7 @@ function App() {
       <aside className="session-sidebar">
         <div className="sidebar-head">
           {!isDesktop ? <div className="web-brand"><BrandMark /><strong>AI-ME</strong></div> : null}
-          <button className="new-session-button" type="button" onClick={() => showNewSession()}>
+          <button className="new-session-button" type="button" onClick={() => {setSkillsPageOpen(false); showNewSession();}}>
             <Plus size={16} /> 新对话
           </button>
         </div>
@@ -901,14 +925,16 @@ function App() {
           sessions={sessions}
           activeSessionId={activeSession?.id ?? null}
           loading={loading}
-          onOpenSession={(session) => void openSession(session)}
+          onOpenSession={(session) => {setSkillsPageOpen(false); void openSession(session);}}
           onCreateProject={() => showProjectDialog(null)}
           onEditProject={(project) => showProjectDialog(project)}
           onDeleteProject={(project) => void removeProject(project)}
-          onCreateSession={(project) => showNewSession(project)}
+          onCreateSession={(project) => {setSkillsPageOpen(false); showNewSession(project);}}
         />
 
         <div className="sidebar-foot">
+          <button className={`settings-row${skillsPageOpen ? " is-selected" : ""}`} type="button"
+            onClick={() => setSkillsPageOpen(true)}><BookOpen size={15} /> 技能</button>
           <div className="runtime-state">
             <span className="runtime-orb"><Bot size={15} /></span>
             <span><strong>本地 Runtime</strong><small>数据保存在这台电脑</small></span>
@@ -921,7 +947,11 @@ function App() {
       </aside>
 
       <main className="conversation-workspace">
-        {activeSession ? (
+        {skillsPageOpen ? <SkillLibrary key={activeSession?.id ?? "personal"}
+          sessionId={activeSession?.id} disabled={sending || sessionLoading}
+          onClose={() => setSkillsPageOpen(false)}
+          onSelect={(ref) => { setDraft(current => `/skill:${ref}\n${current}`); setSkillsPageOpen(false); }}
+        /> : activeSession ? (
           <>
             <header className="conversation-header">
               <div><h1>{activeSession.title}</h1><p><Folder size={13} /> {activeSession.workspacePath}</p></div>
@@ -998,6 +1028,9 @@ function App() {
                   rows={3}
                 />
                 <div className="composer-foot">
+                  <SkillPicker key={activeSession.id} sessionId={activeSession.id}
+                    disabled={sending || sessionLoading}
+                    onSelect={(ref) => setDraft(current => `/skill:${ref}\n${current}`)} />
                   <span>
                     {settlingRequest
                       ? "正在完成发送结果的最终对账"

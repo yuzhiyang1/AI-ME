@@ -1,5 +1,28 @@
 /** AI-ME 本地 HTTP API 的稳定客户端契约。 */
 
+export interface SkillEntry {
+  ref: string;
+  name: string;
+  description: string;
+  version: string;
+  enabled: boolean;
+  pinned: boolean;
+  explicit_only: boolean;
+  shadowed: boolean;
+  source?: string;
+}
+
+export function listSkills(sessionId?: string): Promise<{skills: SkillEntry[]; diagnostics: string[]}> {
+  return request(sessionId ? `/api/sessions/${sessionId}/skills` : "/api/skills");
+}
+
+export function saveSkillPreference(sessionId: string | undefined, skill: SkillEntry): Promise<{saved: boolean}> {
+  return request(sessionId ? `/api/sessions/${sessionId}/skills/preference` : "/api/skills/preference", {
+    method: "PUT",
+    body: JSON.stringify({ref: skill.ref, enabled: skill.enabled, pinned: skill.pinned}),
+  });
+}
+
 export type PermissionProfile = "read_only" | "workspace_write" | "full_access";
 export type SessionActivity = "idle" | "queued" | "running" | "waiting_for_user";
 export type SessionItemType = "user_message" | "agent_message" | "error";
@@ -104,6 +127,8 @@ export interface RuntimeEvent {
 }
 
 export interface SessionTokenUsage {
+  windowNumber?: number | null;
+  contextEstimated?: boolean;
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;

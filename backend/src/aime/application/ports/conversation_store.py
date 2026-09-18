@@ -34,6 +34,8 @@ class SessionTokenUsage:
     measured_steps: int
     unreported_steps: int
     untracked_history: bool
+    window_number: int | None = None  # 当前活动窗口序号，旧会话尚未初始化时为空。
+    context_estimated: bool = False  # 尚无当前请求的 Provider 用量时，使用发送前估算。
 
     @property
     def total_tokens(self) -> int:

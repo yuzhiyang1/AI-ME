@@ -3,11 +3,19 @@
 import asyncio
 import json
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from uuid import UUID
 
+from aime.application.context.service import CONTEXT_GUIDANCE, MAINTENANCE_TOOLS, RunContext
 from aime.application.ports.agent_runtime import AgentEvent, AgentRunRequest, AgentRuntime
+from aime.application.ports.context_store import (
+    ArtifactStore,
+    ContextStore,
+    PendingContextStep,
+    TokenCounter,
+)
 from aime.application.ports.model_gateway import (
+    ConversationMessage,
     LlmAssistantToolCallMessage,
     LlmCompletionRequest,
     LlmFinishReason,
@@ -18,6 +26,7 @@ from aime.application.ports.model_gateway import (
     LlmToolCall,
     LlmToolCallDelta,
     LlmToolResultMessage,
+    MessageRole,
     ModelGateway,
 )
 from aime.application.ports.tool_execution import (
@@ -28,11 +37,16 @@ from aime.application.ports.tool_execution import (
     ToolRegistry,
 )
 from aime.application.ports.tool_execution_store import ApprovalBroker, ToolExecutionStore
+from aime.application.skill_service import SkillRun, SkillService
+from aime.domain.context.budget import ContextError
+from aime.domain.skills import text_cost
 from aime.domain.tool_execution.value_objects import (
     ApprovalStatus,
     ToolInvocationStatus,
 )
 from aime.infrastructure.tools.builtin import BuiltInToolRegistry, ToolInputError
+from aime.infrastructure.tools.context_tools import ContextToolRegistry
+from aime.infrastructure.tools.skill_tools import SkillToolRegistry
 
 DEFAULT_MAX_STEPS = 32
 REPEATED_FAILURE_LIMIT = 3
@@ -86,17 +100,30 @@ class ModelAgentRuntime(AgentRuntime):
         tool_registry: ToolRegistry | None = None,
         *,
         max_steps: int = DEFAULT_MAX_STEPS,
+        context_store: ContextStore | None = None,
+        artifact_store: ArtifactStore | None = None,
+        token_counter: TokenCounter | None = None,
+        skill_service: SkillService | None = None,
     ) -> None:
         self._gateway = gateway
         self._tool_store = tool_store
         self._approval_broker = approval_broker
         self._tool_registry = tool_registry or BuiltInToolRegistry()
         self._max_steps = max_steps
+        self._context_store = context_store
+        self._artifact_store = artifact_store
+        self._token_counter = token_counter
+        self._skill_service = skill_service
 
     async def run(self, request: AgentRunRequest) -> AsyncIterator[AgentEvent]:
-        """执行有界 Agent Loop，并在每次副作用前先发出可持久化 T1 事件。"""
+        """先恢复持久进度和未完成批次，再循环请求模型、审批执行工具并提交步骤。
+
+        T1 记录执行意图，T2 记录工具结果；上下文历史只接收完整步骤。
+        换窗保留 Run 请求预算，只有完整模型响应才进入工具执行阶段。
+        """
         messages: list[LlmInputMessage] = list(request.messages)
-        descriptors = self._tool_registry.descriptors(request.permission_profile)
+        registry = self._tool_registry
+        descriptors = registry.descriptors(request.permission_profile)
         context = ToolExecutionContext(
             session_id=request.session_id,
             turn_id=request.turn_id,
@@ -116,10 +143,61 @@ class ModelAgentRuntime(AgentRuntime):
             ),
             None,
         )
+        managed: RunContext | None = None
+        skill_run: SkillRun | None = None
+        system = _system_prompt(request)
+        skill_messages: list[LlmInputMessage] = []
+        if self._skill_service is not None:
+            skill_run = await self._skill_service.start(
+                request.workspace_roots or (request.workspace_path,),
+                request.session_id, request.run_id, request.instruction,
+            )
+            registry = SkillToolRegistry(registry, skill_run)
+            descriptors = registry.descriptors(request.permission_profile)
+            system += skill_run.catalog(context_window or 0)
+            explicit = await skill_run.explicit_content()
+            if text_cost(explicit) > min(2000, (context_window or 0) // 20):
+                explicit = (
+                    "用户显式选择以下 Skill，请先调用 skill_read 完整读取再执行：\n"
+                    + json.dumps(skill_run.explicit, ensure_ascii=False)
+                ) if skill_run.explicit else ""
+            if explicit:
+                # 正文保持用户级语义，不能通过 Skill 抬高指令权限。
+                skill_messages.append(ConversationMessage(MessageRole.USER, explicit))
+            yield AgentEvent(type="skills_catalog", payload={
+                "total": len(skill_run.skills), "diagnostics": skill_run.diagnostics,
+                "explicit": skill_run.explicit,
+            })
+        completed_step = 0
+        # 窗口消息决定模型看见什么，持久进度决定从哪一步继续，两者不能混为一谈。
+        if self._context_store is not None:
+            assert self._artifact_store is not None and self._token_counter is not None
+            managed = RunContext(
+                request,
+                self._context_store,
+                self._artifact_store,
+                self._token_counter,
+                context_window or 0,
+            )
+            managed.skill_messages = skill_messages
+            messages = await managed.initialize()
+            progress = await self._context_store.progress(request.run_id)
+            completed_step = progress.completed_step
+            first_new_step = completed_step + 1
+            last_failure_signature = progress.failure_signature
+            repeated_failures = progress.failure_count
+            if repeated_failures >= REPEATED_FAILURE_LIMIT:
+                yield AgentEvent(type="failed", content="同一工具和参数已连续失败 3 次")
+                return
+            registry = ContextToolRegistry(registry, managed)
+            descriptors = registry.descriptors(request.permission_profile)
+
+        if managed is None:
+            messages.extend(skill_messages)
 
         # 重启后从 T1/T2 账本重建尚未完成的模型步骤，不重新请求模型生成危险调用。
         existing = await self._tool_store.list_run_invocations(UUID(request.run_id))
-        if existing and not any(
+        if (existing or (managed is not None and progress.request_count > 0)) and not any(
             invocation.status is ToolInvocationStatus.WAITING_FOR_APPROVAL
             for invocation in existing
         ):
@@ -127,8 +205,20 @@ class ModelAgentRuntime(AgentRuntime):
                 type="runtime_resumed",
                 payload={"runId": request.run_id, "reason": "tool_ledger_recovery"},
             )
-        existing_steps = sorted({invocation.step_index for invocation in existing})
+        pending_step = await managed.store.pending_step(request.run_id) if managed else None
+        existing_steps = sorted(
+            {invocation.step_index for invocation in existing}
+            | ({pending_step.step} if pending_step else set())
+        )
+        if managed is not None and progress.response_text:
+            yield AgentEvent(type="response_restored", content=progress.response_text)
+        if managed is not None and progress.finished:
+            return
         for existing_step in existing_steps:
+            if existing_step <= completed_step:
+                continue
+            failure_limit_hit = False
+            batch_start = len(messages)
             step_invocations = [
                 invocation for invocation in existing if invocation.step_index == existing_step
             ]
@@ -145,14 +235,24 @@ class ModelAgentRuntime(AgentRuntime):
                 )
                 for invocation in step_invocations
             )
-            assistant_text = step_invocations[0].assistant_text
+            assistant_text = step_invocations[0].assistant_text if step_invocations else ""
+            recovery_descriptors = descriptors
+            if pending_step is not None and pending_step.step == existing_step:
+                # T1 可能只落了部分调用；用预存批次补齐，并保留原步骤的工具白名单。
+                calls = pending_step.message.tool_calls
+                assistant_text = pending_step.message.content
+                recovery_descriptors = tuple(
+                    d for d in descriptors if d.definition.name in pending_step.allowed_tools
+                )
             messages.append(LlmAssistantToolCallMessage(calls, assistant_text))
             async for runtime_event, executed in self._execute_step(
                 calls,
-                descriptors,
+                recovery_descriptors,
                 context,
                 existing_step,
                 assistant_text,
+                registry=registry,
+                managed=managed,
             ):
                 if runtime_event is not None:
                     yield runtime_event
@@ -169,22 +269,86 @@ class ModelAgentRuntime(AgentRuntime):
                             is_error=executed.result.is_error,
                         )
                     )
+                    # 恢复时复用的 T2 和补执行结果，都按原调用顺序推进同一失败计数。
+                    last_failure_signature, repeated_failures = _failure_streak_after(
+                        executed, last_failure_signature, repeated_failures
+                    )
+                    if repeated_failures >= REPEATED_FAILURE_LIMIT:
+                        failure_limit_hit = True
+            if managed is not None:
+                await managed.store.record_step(
+                    request.session_id,
+                    request.run_id,
+                    existing_step,
+                    messages[batch_start:],
+                    last_failure_signature,
+                    repeated_failures,
+                )
+                if any(call.name == "new_context" for call in calls):
+                    managed.force_rollover = True
+            # 先落完整批次与计数再停止，避免重启后再次处理该批次或绕过保护。
+            if failure_limit_hit:
+                yield AgentEvent(
+                    type="failed", content="同一工具和参数已连续失败 3 次，Runtime 已停止循环"
+                )
+                return
             first_new_step = max(first_new_step, existing_step + 1)
 
-        for step in range(first_new_step, self._max_steps + 1):
+        step = first_new_step
+        while step <= self._max_steps:
+            batch_start = len(messages)
+            if skill_run is not None and managed is not None:
+                handoff = await skill_run.handoff()
+                managed.skill_messages = skill_messages + (
+                    [ConversationMessage(MessageRole.USER, handoff)] if handoff else []
+                )
+                # 可选目录先让出空间，不能逼迫本来可继续的任务提前换窗。
+                base = _system_prompt(request)
+                estimate = managed.counter.count(LlmCompletionRequest(
+                    request.model_ref, messages, base + CONTEXT_GUIDANCE,
+                    tools=tuple(d.definition for d in descriptors),
+                ))
+                available = managed.budget.remaining(estimate) - managed.budget.maintenance_tokens
+                system = base + skill_run.catalog(context_window or 0, available)
+            completion_request = LlmCompletionRequest(
+                model_ref=request.model_ref,
+                messages=list(messages),
+                system=system,
+                tools=tuple(descriptor.definition for descriptor in descriptors),
+                parallel_tool_calls=True,
+            )
+            if managed is not None:
+                completion_request = await managed.prepare(
+                    messages,
+                    system,
+                    tuple(descriptor.definition for descriptor in descriptors),
+                    step,
+                )
+                messages = list(completion_request.messages)
+                batch_start = len(messages)
+                # 先记请求消耗再发送；维护、溢出重试和重启都不能绕过 Run 总上限。
+                attempt = await managed.store.begin_request(request.run_id, self._max_steps)
+                window = await managed.store.window(request.session_id)
+                yield AgentEvent(
+                    type="context_status",
+                    payload={
+                        "windowId": window.id,
+                        "windowNumber": window.number,
+                        "contextWindow": context_window,
+                        "inputTokens": managed.last_estimate,
+                        "estimated": True,
+                        "remainingTokens": managed.remaining,
+                        "maintenance": managed.maintenance,
+                        "step": step,
+                        "attempt": attempt,
+                    },
+                )
             text_parts: list[str] = []
             text_chars = 0
             pending_calls: dict[int, _PendingToolCall] = {}
             completed: LlmStreamCompleted | None = None
-            provider_stream = self._gateway.stream(
-                LlmCompletionRequest(
-                    model_ref=request.model_ref,
-                    messages=messages,
-                    system=_system_prompt(request),
-                    tools=tuple(descriptor.definition for descriptor in descriptors),
-                    parallel_tool_calls=True,
-                )
-            )
+            overflow_recovered = False
+            provider_stream = self._gateway.stream(completion_request)
             async for event in provider_stream:
                 if isinstance(event, LlmTextDelta):
                     text_chars += len(event.delta)
@@ -211,10 +375,38 @@ class ModelAgentRuntime(AgentRuntime):
                         yield AgentEvent(type="failed", content="工具参数超过 Runtime 上限")
                         return
                 elif isinstance(event, LlmStreamFailed):
+                    # 溢出重试仍属于同一逻辑步骤；撤回本次草稿，不重放先前工具副作用。
+                    if (
+                        managed is not None
+                        and event.error.code == "context_window_exceeded"
+                        and await managed.store.claim_overflow(request.run_id, step)
+                    ):
+                        yield AgentEvent(
+                            type="model_attempt_discarded",
+                            payload={
+                                "step": step,
+                                "discardedChars": text_chars,
+                                "reason": "context_window_exceeded",
+                            },
+                        )
+                        await managed.rollover(step, "provider_overflow")
+                        messages = await managed.store.messages(request.session_id)
+                        managed.force_rollover = False
+                        overflow_recovered = True
+                        break
                     yield AgentEvent(type="failed", content=event.error.message)
                     return
                 elif isinstance(event, LlmStreamCompleted):
                     completed = event
+
+            if overflow_recovered:
+                close_stream = getattr(provider_stream, "aclose", None)
+                if close_stream is not None:
+                    await close_stream()
+                continue
+            if completed is None:
+                yield AgentEvent(type="failed", content="模型流未完整结束，未执行工具调用")
+                return
 
             if completed is not None:
                 # 每个模型步骤独立落账；累计费用与最新上下文不能混成同一个数字。
@@ -224,14 +416,10 @@ class ModelAgentRuntime(AgentRuntime):
                         "step": step,
                         "modelRef": request.model_ref,
                         "inputTokens": (
-                            completed.usage.input_tokens
-                            if completed.usage is not None
-                            else None
+                            completed.usage.input_tokens if completed.usage is not None else None
                         ),
                         "outputTokens": (
-                            completed.usage.output_tokens
-                            if completed.usage is not None
-                            else None
+                            completed.usage.output_tokens if completed.usage is not None else None
                         ),
                         "contextWindow": context_window,
                     },
@@ -246,12 +434,44 @@ class ModelAgentRuntime(AgentRuntime):
                 for call in sorted(pending_calls.values(), key=lambda item: item.index)
             )
             assistant_text = "".join(text_parts)
+            if calls and completed.finish_reason in {
+                LlmFinishReason.LENGTH,
+                LlmFinishReason.CONTENT_FILTER,
+            }:
+                yield AgentEvent(type="failed", content="模型输出被截断或过滤，未执行工具调用")
+                return
+            if len({call.call_id for call in calls}) != len(calls):
+                yield AgentEvent(type="failed", content="模型返回重复的工具调用 ID")
+                return
             if calls:
-                messages.append(
-                    LlmAssistantToolCallMessage(tool_calls=calls, content=assistant_text)
+                failure_limit_hit = False
+                allowed_descriptors = tuple(
+                    d
+                    for d in descriptors
+                    if not managed
+                    or not managed.maintenance
+                    or d.definition.name in MAINTENANCE_TOOLS
                 )
+                assistant_message = LlmAssistantToolCallMessage(calls, assistant_text)
+                if managed is not None:
+                    # 在任何工具进入 T1 前保存整批，覆盖“第一项已落盘、后续尚未开始”的崩溃点。
+                    await managed.store.save_pending_step(
+                        request.run_id,
+                        PendingContextStep(
+                            step,
+                            assistant_message,
+                            tuple(d.definition.name for d in allowed_descriptors),
+                        ),
+                    )
+                messages.append(assistant_message)
                 async for runtime_event, executed in self._execute_step(
-                    calls, descriptors, context, step, assistant_text
+                    calls,
+                    allowed_descriptors,
+                    context,
+                    step,
+                    assistant_text,
+                    registry=registry,
+                    managed=managed,
                 ):
                     if runtime_event is not None:
                         yield runtime_event
@@ -269,28 +489,35 @@ class ModelAgentRuntime(AgentRuntime):
                                 is_error=executed.result.is_error,
                             )
                         )
-                        if executed.result.is_error:
-                            signature = (
-                                f"{executed.call.name}:"
-                                f"{_canonical_arguments(executed.call.arguments_json)}"
-                            )
-                            if signature == last_failure_signature:
-                                repeated_failures += 1
-                            else:
-                                last_failure_signature = signature
-                                repeated_failures = 1
-                            if repeated_failures >= REPEATED_FAILURE_LIMIT:
-                                yield AgentEvent(
-                                    type="failed",
-                                    content=(
-                                        "同一工具和参数已连续失败 3 次，Runtime 已停止循环："
-                                        f"{executed.call.name}"
-                                    ),
-                                )
-                                return
-                        else:
-                            last_failure_signature = None
-                            repeated_failures = 0
+                        last_failure_signature, repeated_failures = _failure_streak_after(
+                            executed, last_failure_signature, repeated_failures
+                        )
+                        if repeated_failures >= REPEATED_FAILURE_LIMIT:
+                            failure_limit_hit = True
+                        if (
+                            managed
+                            and executed.call.name == "new_context"
+                            and not executed.result.is_error
+                        ):
+                            managed.force_rollover = True
+                if managed is not None:
+                    # 完整结果先进入历史，再缩减模型投影，保留后续追溯所需的原始结果。
+                    await managed.store.record_step(
+                        request.session_id,
+                        request.run_id,
+                        step,
+                        messages[batch_start:],
+                        last_failure_signature,
+                        repeated_failures,
+                    )
+                    messages = await managed.fit_tool_results(messages)
+                if failure_limit_hit:
+                    yield AgentEvent(
+                        type="failed",
+                        content="同一工具和参数已连续失败 3 次，Runtime 已停止循环",
+                    )
+                    return
+                step += 1
                 continue
 
             if completed is not None and completed.finish_reason is LlmFinishReason.TOOL_CALLS:
@@ -301,6 +528,19 @@ class ModelAgentRuntime(AgentRuntime):
             if not assistant_text.strip():
                 yield AgentEvent(type="failed", content="模型未返回可显示内容")
                 return
+            if managed is not None:
+                await managed.store.record_step(
+                    request.session_id,
+                    request.run_id,
+                    step,
+                    [ConversationMessage(MessageRole.ASSISTANT, assistant_text)],
+                    last_failure_signature,
+                    repeated_failures,
+                    final=not managed.maintenance,
+                )
+                if managed.maintenance:
+                    step += 1
+                    continue
             return
 
         yield AgentEvent(type="failed", content=f"Agent Loop 已达到最大步骤数 {self._max_steps}")
@@ -312,6 +552,9 @@ class ModelAgentRuntime(AgentRuntime):
         context: ToolExecutionContext,
         step: int,
         assistant_text: str,
+        *,
+        registry: ToolRegistry | None = None,
+        managed: RunContext | None = None,
     ) -> AsyncIterator[tuple[AgentEvent | None, _ExecutedCall | None]]:
         """按 Codex 风格调度并行工具，独占工具混用时按 Maka 语义拒绝整步。"""
         available = {descriptor.definition.name: descriptor for descriptor in descriptors}
@@ -390,9 +633,11 @@ class ModelAgentRuntime(AgentRuntime):
             has_grant = await self._tool_store.has_session_grant(
                 UUID(context.session_id), call.name
             )
-            if approval_reason is not None and not has_grant:
-                approval = await self._tool_store.get_approval_for_invocation(invocation.id)
+            approval = await self._tool_store.get_approval_for_invocation(invocation.id)
+            # 崩溃后已有的不确定结果审批，不能被普通工具策略或 Session 授权跳过。
+            if approval is not None or (approval_reason is not None and not has_grant):
                 if approval is None:
+                    assert approval_reason is not None
                     approval = await self._tool_store.request_approval(
                         invocation.id, approval_reason
                     )
@@ -421,7 +666,8 @@ class ModelAgentRuntime(AgentRuntime):
                         ),
                         None,
                     )
-                    invocation = await self._tool_store.get_invocation(invocation.id)
+                # 审批可能在 prepare 与本次读取之间已被处理，必须重新读取权威状态。
+                invocation = await self._tool_store.get_invocation(invocation.id)
                 if invocation.status is ToolInvocationStatus.REJECTED:
                     immediate[call.call_id] = ToolExecutionResult(
                         invocation.result
@@ -451,7 +697,9 @@ class ModelAgentRuntime(AgentRuntime):
                 None,
             )
 
-        tasks = [self._execute_one(call, arguments, context) for call, arguments, _ in runnable]
+        tasks = [
+            self._execute_one(call, arguments, context, registry) for call, arguments, _ in runnable
+        ]
         results = await asyncio.gather(*tasks) if tasks else []
         by_call_id = {executed.call.call_id: executed for executed in results}
         invocation_ids = {call.call_id: invocation_id for call, _, invocation_id in runnable}
@@ -466,6 +714,12 @@ class ModelAgentRuntime(AgentRuntime):
                 result = _error_result("tool_dispatch_failed", "工具没有产生可用结果")
             finished_invocation_id = invocation_ids.get(call.call_id)
             if finished_invocation_id is not None:
+                # 大结果先发布可读取的产物再写 T2，避免账本留下悬空引用。
+                if managed is not None:
+                    result = ToolExecutionResult(
+                        await managed.project_result(result.output),
+                        result.is_error,
+                    )
                 await self._tool_store.finish_invocation(finished_invocation_id, result)
             event_type = "tool_failed" if result.is_error else "tool_completed"
             yield (
@@ -491,13 +745,16 @@ class ModelAgentRuntime(AgentRuntime):
         call: LlmToolCall,
         arguments: dict[str, object],
         context: ToolExecutionContext,
+        registry: ToolRegistry | None = None,
     ) -> _ExecutedCall:
         """把工具自身错误收敛为模型可修正的结果，不击穿整个 Run。"""
-        tool = self._tool_registry.get(call.name)
+        tool = (registry or self._tool_registry).get(call.name)
         if tool is None:
             return _ExecutedCall(call, _error_result("tool_not_found", f"工具不存在：{call.name}"))
         try:
-            result = await tool.execute(arguments, context)
+            result = await tool.execute(arguments, replace(context, call_id=call.call_id))
+        except ContextError as exc:
+            result = _error_result(exc.code, str(exc))
         except ToolInputError as exc:
             result = _error_result("invalid_arguments", str(exc))
         except UnicodeError as exc:
@@ -507,6 +764,16 @@ class ModelAgentRuntime(AgentRuntime):
         except Exception as exc:  # noqa: BLE001 - 工具边界必须转换为可审计错误
             result = _error_result("tool_error", str(exc))
         return _ExecutedCall(call, result)
+
+
+def _failure_streak_after(
+    executed: _ExecutedCall, previous_signature: str | None, previous_count: int
+) -> tuple[str | None, int]:
+    """正常执行与恢复共用计数规则：成功清零，同工具同参数失败累计，否则重新计数。"""
+    if not executed.result.is_error:
+        return None, 0
+    signature = f"{executed.call.name}:{_canonical_arguments(executed.call.arguments_json)}"
+    return signature, previous_count + 1 if signature == previous_signature else 1
 
 
 def _decode_arguments(arguments_json: str) -> dict[str, object]:

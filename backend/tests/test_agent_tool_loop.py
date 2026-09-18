@@ -324,10 +324,13 @@ def test_agent_loop_executes_a_read_tool_then_returns_the_final_answer(tmp_path:
     ]
     assert event_types == [
         "user_message",
+        "skills_catalog",
+        "context_status",
         "model_usage",
         "tool_prepared",
         "tool_started",
         "tool_completed",
+        "context_status",
         "text_delta",
         "model_usage",
         "agent_message",

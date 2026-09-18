@@ -76,6 +76,10 @@ const toolStatusLabels: Record<ToolInvocation["status"], string> = {
 };
 
 function ToolActivityCard({ invocation }: { invocation: ToolInvocation }) {
+  // Skill 结果复用已有工具卡片，正文不重复铺满会话。
+  const skillResult = invocation.toolName === "skill_read" ? invocation.result : null;
+  const skillName = typeof skillResult?.name === "string" ? skillResult.name : null;
+  const skillVersion = typeof skillResult?.version === "string" ? skillResult.version : null;
   const argumentHint =
     typeof invocation.arguments.path === "string"
       ? invocation.arguments.path
@@ -86,8 +90,10 @@ function ToolActivityCard({ invocation }: { invocation: ToolInvocation }) {
     <div className={`tool-activity ${invocation.isError ? "failed" : ""}`}>
       <span className="tool-activity-dot" />
       <div>
-        <strong>{invocation.toolName}</strong>
+        <strong>{skillName ? `读取 Skill · ${skillName}` : invocation.toolName}</strong>
         <small>{argumentHint}</small>
+        {skillVersion ? <small title={skillVersion}>版本 {skillVersion.slice(0, 12)} · {skillResult?.complete ? "已到末页" : "需继续分页读取"}</small> : null}
+        {invocation.isError && typeof invocation.result?.error === "string" ? <small>{invocation.result.error}</small> : null}
       </div>
       <span>{toolStatusLabels[invocation.status]}</span>
     </div>
