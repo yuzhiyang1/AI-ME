@@ -192,6 +192,9 @@ export const sessionUsageStateSchema = z.object({
       usedTokens: z.number(),
       maxTokens: z.number(),
       autoCompactThresholdTokens: z.number().nullable(),
+      /** AI-ME 预算估算与当前换窗序号，不冒充 Provider 精确计费值。 */
+      estimated: z.boolean().optional(),
+      windowNumber: z.number().nullable().optional(),
       cache: zcodeSessionContextCacheUsageSchema.optional(),
       breakdown: zcodeContextUsageBreakdownSchema.optional(),
     })

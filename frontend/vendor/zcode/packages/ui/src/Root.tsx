@@ -128,6 +128,7 @@ export function Root(props: RootProps) {
                   >
                     <CodingPlanUpgradeDialogProvider>
                       <RootInner {...props} />
+                      {props.hostAddon}
                     </CodingPlanUpgradeDialogProvider>
                   </AssistantCodeCommentFeatureProvider>
                 </DiffsWorkerPoolProvider>

@@ -21,6 +21,8 @@ export interface SkillSummary {
   sourcePath?: string;
   scope: SkillScope;
   enabled: boolean;
+  /** AI-ME Skill 目录优先级偏好，不表示正文常驻上下文。 */
+  pinned?: boolean;
   /** plugin scope 时为来源插件名；其它 scope 留空。 */
   pluginName?: string;
   /** plugin scope 时为来源插件完整 ID（name@marketplace）；旧 payload 可缺省。 */
@@ -30,6 +32,9 @@ export interface SkillSummary {
 
 export interface SkillsCapability {
   userScopeAvailable: boolean;
+  /** AI-ME 当前只支持发现、启停与引用；文件导入/删除不能伪装成可用。 */
+  fileOperationsAvailable?: boolean;
+  pluginManagementAvailable?: boolean;
   userScopeReason?: "desktop_only";
 }
 

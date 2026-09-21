@@ -1,6 +1,8 @@
 import { conversationSnapshotSchema } from "../../vendor/zcode/packages/shared/src/zcode-protocol-v4/snapshot.ts";
 import { createEvent } from "./events.js";
 import { projectToolPresentation } from "./tool-presentation.js";
+import { sessionWorkspaceKey, normalizeWorkspaceKey } from "./projects.js";
+import { displaySkillInput } from "./skills.js";
 
 const unavailable = { allowed: false, reasonCode: "AI-ME 尚未接入此能力" };
 /** SQLite 返回的无偏移时间是 UTC，不能交给浏览器按本地时区解释。 */
@@ -83,7 +85,7 @@ export function projectConversation({
           ? {
               ...base,
               kind: "userInput",
-              text: String(item.content.text || ""),
+              text: displaySkillInput(String(item.content.text || "")),
               origin: "realUser",
               sourceCommandId: commandByTurn.get(item.turnId),
             }
@@ -236,6 +238,8 @@ export function projectConversation({
               usedTokens: usage.currentContextTokens,
               maxTokens: usage.contextWindow,
               autoCompactThresholdTokens: null,
+              estimated: Boolean(usage.contextEstimated),
+              windowNumber: usage.windowNumber ?? null,
             }
           : null,
       cumulative: {
@@ -285,7 +289,7 @@ export function projectConversation({
 }
 
 /** 单个浏览器附件的订阅桥。定时重读权威记录，变化才发帧；最后一次退订后停止 IO。 */
-export function createProtocol(api, models, taskMeta) {
+export function createProtocol(api, models, taskMeta, workspace = {}) {
   const epoch = crypto.randomUUID();
   const subscriptions = new Map();
   const events = {
@@ -357,7 +361,7 @@ export function createProtocol(api, models, taskMeta) {
         return {
           protocolVersion: 1,
           logEpoch: epoch,
-          workspaces: [...new Set(sessions.map((s) => s.workspacePath))].map(
+          workspaces: [...new Set(sessions.map(sessionWorkspaceKey))].map(
             (path) => ({
               workspacePath: path,
               sourceAvailability: "online",
@@ -369,7 +373,7 @@ export function createProtocol(api, models, taskMeta) {
         protocolVersion: 1,
         logEpoch: epoch,
         tasks: sessions.map((s) => ({
-          address: { workspacePath: s.workspacePath, taskId: s.id },
+          address: { workspacePath: sessionWorkspaceKey(s), taskId: s.id },
           meta: taskMeta(s),
           membership: {
             pinned: s.pinned,
@@ -388,13 +392,13 @@ export function createProtocol(api, models, taskMeta) {
       sessions: sessions
         .filter(
           (s) =>
-            s.workspacePath === sub.params.workspacePath &&
+            sessionWorkspaceKey(s) === normalizeWorkspaceKey(sub.params.workspacePath) &&
             s.lifecycle !== "archived",
         )
         .map((s) => ({
           sessionId: s.id,
-          workspaceId: s.workspacePath,
-          title: s.title,
+          workspaceId: sessionWorkspaceKey(s),
+          title: displaySkillInput(s.title),
           phase: sessionPhase(s),
           sessionEnded: s.activity === "idle",
           hasBackgroundWork: false,
@@ -527,7 +531,7 @@ export function createProtocol(api, models, taskMeta) {
         : models[0]?.ref;
       if (!modelRef) throw new Error("请先配置 AI-ME 模型");
       const session = await api.createSession({
-        workspacePath,
+        ...(workspace.sessionInput?.(workspacePath) ?? { workspacePath }),
         defaultModel: modelRef,
         permissionProfile: "workspace_write",
       });
@@ -539,7 +543,13 @@ export function createProtocol(api, models, taskMeta) {
         reason: "task_created",
       });
       if (input?.text) {
-        const turn = await api.startTurn(session.id, input.text, commandId);
+        const text = workspace.prepareInput
+          ? await workspace.prepareInput(input.text, {
+              sessionId: session.id,
+              workspacePath,
+            })
+          : input.text;
+        const turn = await api.startTurn(session.id, text, commandId);
         commandByTurn.set(turn.id, commandId);
         return accepted({
           type,
@@ -557,7 +567,13 @@ export function createProtocol(api, models, taskMeta) {
           session.defaultModel
       )
         throw new Error("现有会话暂不支持切换模型，请新建任务选择模型");
-      const turn = await api.startTurn(sessionId, payload.text, commandId);
+      const text = workspace.prepareInput
+        ? await workspace.prepareInput(payload.text, {
+            sessionId,
+            workspacePath,
+          })
+        : payload.text;
+      const turn = await api.startTurn(sessionId, text, commandId);
       commandByTurn.set(turn.id, commandId);
       return accepted({
         type: "inputAccepted",

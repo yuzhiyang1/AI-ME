@@ -7,6 +7,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from aime.application.projects.services import GetProject, ProjectNotFound
 from aime.application.sessions.services import GetSession, SessionNotFound
 from aime.application.skill_service import SkillService
 from aime.domain.skills import SkillError
@@ -20,7 +21,9 @@ class SkillPreferenceRequest(BaseModel):
     pinned: bool = Field(description="是否提高目录展示优先级；仍受预算限制")
 
 
-def skill_router(service: SkillService, sessions: GetSession) -> APIRouter:
+def skill_router(
+    service: SkillService, sessions: GetSession, projects: GetProject | None = None
+) -> APIRouter:
     """身份和根目录来自服务端 Session，客户端不能提交任意文件路径。"""
     router = APIRouter(prefix="/api")
 
@@ -33,14 +36,21 @@ def skill_router(service: SkillService, sessions: GetSession) -> APIRouter:
 
     async def inventory_response(workspace_roots: tuple[str, ...]) -> dict[str, object]:
         inventory, diagnostics = await service.inventory(workspace_roots)
-        sources = {str(Path(root) / ".agents" / "skills"): Path(root).name
-                   for root in workspace_roots}
+        sources = {
+            str(Path(root) / ".agents" / "skills"): Path(root).name for root in workspace_roots
+        }
         # 管理界面使用完整列表，模型调用只使用有界目录和搜索结果。
         return {
             "skills": [
-                {**{key: value for key, value in asdict(skill).items()
-                    if key not in {"root", "path"}},
-                 "source": sources.get(skill.root, "个人")}
+                {
+                    **{
+                        key: value
+                        for key, value in asdict(skill).items()
+                        if key not in {"root", "path"}
+                    },
+                    "source": sources.get(skill.root, "个人"),
+                    "scope": "workspace" if skill.root in sources else "user",
+                }
                 for skill in inventory
             ],
             "diagnostics": diagnostics,
@@ -54,6 +64,30 @@ def skill_router(service: SkillService, sessions: GetSession) -> APIRouter:
     @router.get("/sessions/{session_id}/skills")
     async def catalog(session_id: UUID) -> dict[str, object]:
         return await inventory_response(await roots(session_id))
+
+    async def project_roots(project_id: UUID) -> tuple[str, ...]:
+        # 草稿没有 Session；只能通过已保存项目解析目录，拒绝任意路径扫描。
+        if projects is None:
+            raise HTTPException(404, "项目能力不可用")
+        try:
+            project = await projects.execute(project_id)
+            return tuple(root.path for root in project.roots)
+        except ProjectNotFound as exc:
+            raise HTTPException(404, "项目不存在") from exc
+
+    @router.get("/projects/{project_id}/skills")
+    async def project_catalog(project_id: UUID) -> dict[str, object]:
+        return await inventory_response(await project_roots(project_id))
+
+    @router.put("/projects/{project_id}/skills/preference")
+    async def project_preference(project_id: UUID, body: SkillPreferenceRequest) -> dict[str, bool]:
+        try:
+            await service.preference(
+                await project_roots(project_id), body.ref, body.enabled, body.pinned
+            )
+        except SkillError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return {"saved": True}
 
     @router.put("/skills/preference")
     async def personal_preference(body: SkillPreferenceRequest) -> dict[str, bool]:

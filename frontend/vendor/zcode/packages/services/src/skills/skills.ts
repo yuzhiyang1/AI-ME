@@ -15,6 +15,8 @@ export interface ISkillsService {
     scope?: "workspace" | "user" | "plugin";
     skillId: string;
     enabled: boolean;
+    /** AI-ME 可同时更新固定偏好，缺省时保留原值。 */
+    pinned?: boolean;
   }): Promise<void>;
   buildPromptContext(params: {
     workspacePath: string;

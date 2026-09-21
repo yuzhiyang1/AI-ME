@@ -1020,6 +1020,7 @@ function V4ComposerModelControlsImpl({
         onSendCompressionCommand={onSendCompressionCommand}
         compressionDisabled={disabled || recoveryPending}
       />
+      {usage?.contextWindow?.windowNumber != null && <span className="text-ui-xs text-foreground-subtle" title="AI-ME 按预算自动换窗；估算不等于模型计费用量。">{usage.contextWindow.estimated ? "估算 · " : ""}窗口 {usage.contextWindow.windowNumber}</span>}
       {modelSelectionState.status === "error" && modelSelectionReload ? (
         <Button
           type="button"

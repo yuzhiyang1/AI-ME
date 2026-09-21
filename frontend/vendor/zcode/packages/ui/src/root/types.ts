@@ -6,6 +6,8 @@ import type { CreateTaskRequest } from "@/app-shell/types.js";
 export interface RootProps {
   /** AI-ME 修改：模型连接由独立后端管理，不触发 ZCode 商业账号登录门禁。 */
   hostManagedProviders?: boolean;
+  /** AI-ME 的项目管理扩展，沿用当前窗口的 Store 和原生组件 Provider。 */
+  hostAddon?: ReactNode;
   services: IServiceAccessor;
   platform: IPlatformService;
   /** 如果从 main 进程传入则跳过项目选择页 */

@@ -2,7 +2,11 @@ const WINDOWS_ABSOLUTE_PATH_RE = /^[a-zA-Z]:[\\/]/;
 const UNC_PATH_RE = /^\\\\/;
 const URI_ESCAPE_RE = /%[0-9A-Fa-f]{2}/;
 
+import { hostWorkspaceLabel } from "./hostWorkspaceLabel.js";
+
 export function getPathLeaf(path: string): string {
+  const hostLabel = hostWorkspaceLabel(path);
+  if (hostLabel) return hostLabel;
   const normalizedPath = path.replace(/\\/g, "/").replace(/\/+$/, "");
   const segments = normalizedPath.split("/").filter(Boolean);
   return segments[segments.length - 1] ?? path;

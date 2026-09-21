@@ -10,6 +10,18 @@ export interface SkillEntry {
   explicit_only: boolean;
   shadowed: boolean;
   source?: string;
+  scope?: "workspace" | "user";
+}
+
+/** 草稿按项目目录模板发现；已有会话仍使用 listSkills 的目录快照。 */
+export function listProjectSkills(projectId: string): Promise<{skills: SkillEntry[]; diagnostics: string[]}> {
+  return request(`/api/projects/${encodeURIComponent(projectId)}/skills`);
+}
+
+export function saveProjectSkillPreference(projectId: string, skill: SkillEntry): Promise<{saved: boolean}> {
+  return request(`/api/projects/${encodeURIComponent(projectId)}/skills/preference`, {
+    method: "PUT", body: JSON.stringify({ref: skill.ref, enabled: skill.enabled, pinned: skill.pinned}),
+  });
 }
 
 export function listSkills(sessionId?: string): Promise<{skills: SkillEntry[]; diagnostics: string[]}> {
