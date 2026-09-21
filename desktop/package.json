@@ -5,21 +5,30 @@
   "type": "module",
   "main": "dist/main.js",
   "scripts": {
-    "dev": "concurrently --kill-others --names API,UI,DESKTOP --prefix-colors yellow,magenta,cyan \"uv run --directory ../backend uvicorn aime.main:app --host 127.0.0.1 --port 8000\" \"npm --prefix ../frontend run dev -- --host 127.0.0.1\" \"wait-on http-get://127.0.0.1:8000/api/health http-get://127.0.0.1:5173 && npm run build:shell && cross-env AI_ME_RENDERER_URL=http://127.0.0.1:5173 electron .\"",
+    "dev": "npm run build:shell && node scripts/launch.mjs --dev",
     "build:shell": "tsc -p tsconfig.json && node scripts/verify-shell-build.mjs",
     "build": "npm --prefix ../frontend run build && npm run build:shell",
-    "start": "concurrently --kill-others --names API,DESKTOP --prefix-colors yellow,cyan \"uv run --directory ../backend uvicorn aime.main:app --host 127.0.0.1 --port 8000\" \"wait-on http-get://127.0.0.1:8000/api/health && electron .\"",
+    "start": "node scripts/launch.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test:chrome": "node scripts/verify-window-chrome.mjs",
     "test:local-models": "node scripts/verify-local-models.mjs",
-    "test:project-skills": "node scripts/verify-project-skills.mjs"
+    "test:project-skills": "node scripts/verify-project-skills.mjs",
+    "test:browser": "node scripts/verify-browser.mjs",
+    "test:browser-host": "node src/browser/verify.mjs",
+    "test:chat-browser": "node scripts/verify-chat-browser.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.3.0",
+    "@types/turndown": "^5.0.6",
+    "@types/ws": "^8.18.1",
     "concurrently": "^10.0.5",
     "cross-env": "^10.1.0",
     "electron": "^39.8.7",
     "typescript": "~5.8.3",
     "wait-on": "^9.1.0"
+  },
+  "dependencies": {
+    "@jackwener/opencli": "1.8.7",
+    "ws": "8.18.3"
   }
 }

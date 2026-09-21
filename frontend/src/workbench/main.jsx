@@ -12,9 +12,12 @@ import { PlatformProvider } from "../../vendor/zcode/packages/ui/src/hooks/usePl
 import { setHostWorkspaceLabelResolver } from "../../vendor/zcode/packages/ui/src/lib/hostWorkspaceLabel.ts";
 import { ProjectWorkspaceBridge } from "./ProjectWorkspaceBridge.jsx";
 import { ProjectManager } from "./ProjectManager.jsx";
+import { DesktopBrowserPanel, BrowserLifecycleNotice } from "./DesktopBrowserPanel.jsx";
+import { desktopBrowserAvailable } from "./browser-session.js";
 
 document.documentElement.classList.add("theme-zai-light");
 const desktopProps = desktopRootProps(window.aiMeDesktop);
+const hasDesktopBrowser = desktopProps.isDesktop && desktopBrowserAvailable(window.aiMeDesktop);
 document.documentElement.classList.toggle(
   "platform-windows-desktop",
   desktopProps.isWindowsDesktop,
@@ -39,8 +42,9 @@ async function start() {
             hostManagedProviders
             restoreSession={false}
             allowRemoteWorkspace={false}
-            supportsEmbeddedBrowser={false}
-            hostAddon={<ProjectWorkspaceBridge host={host} />}
+            supportsEmbeddedBrowser={hasDesktopBrowser}
+            hostBrowserPane={hasDesktopBrowser ? DesktopBrowserPanel : undefined}
+            hostAddon={<><ProjectWorkspaceBridge host={host} /><BrowserLifecycleNotice /></>}
           />
         ) : (
           <ServiceProvider services={services}>

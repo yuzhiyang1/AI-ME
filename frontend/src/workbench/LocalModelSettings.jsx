@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useServices } from "../../vendor/zcode/packages/ui/src/hooks/useServices.tsx";
 import { Button } from "../../vendor/zcode/packages/ui/src/components/ui/button.tsx";
 import { Input } from "../../vendor/zcode/packages/ui/src/components/ui/input.tsx";
+import { JevSettings } from "./JevSettings.jsx";
 
 // 沿用 AI-ME 原有配置协议；预设只是可编辑的表单初值，不代表账号套餐。
 export const modelPresets = {
@@ -265,6 +266,7 @@ export function LocalModelSettings() {
           </Button>
         </fieldset>
       </form>
+      <JevSettings />
     </section>
   );
 }

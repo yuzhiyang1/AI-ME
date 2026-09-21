@@ -16,6 +16,16 @@ contextBridge.exposeInMainWorld("aiMeDesktop", {
   mode: "desktop",
   platform: process.platform,
   apiBaseUrl: process.env.AI_ME_API_URL ?? "http://127.0.0.1:8000",
+  browser: {
+    command: (sessionId: string, operation: string, args: unknown = {}) =>
+      ipcRenderer.invoke("browser:command", sessionId, operation, args),
+    setViewport: (input: unknown) => ipcRenderer.invoke("browser:viewport", input),
+    onState: (listener: (payload: unknown) => void) => subscribe("browser:state", listener),
+    onOpenRequest: (listener: (payload: unknown) => void) => subscribe("browser:open-request", listener),
+    credential: (sessionId: string, input: unknown) => ipcRenderer.invoke('browser:credential', sessionId, input),
+    run: (sessionId: string, operation: string, args: unknown = {}) =>
+      ipcRenderer.invoke("browser:run", sessionId, operation, args),
+  },
   // 目录选择由主进程执行，渲染层只得到用户明确选中的路径。
   selectWorkspace: (): Promise<string | null> =>
     ipcRenderer.invoke("workspace:select"),

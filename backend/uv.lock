@@ -11,6 +11,7 @@ dependencies = [
     { name = "alembic" },
     { name = "anthropic" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "keyring" },
     { name = "openai" },
     { name = "pydantic-settings" },
@@ -21,7 +22,6 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "httpx" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -35,6 +35,7 @@ requires-dist = [
     { name = "alembic", specifier = ">=1.16,<2" },
     { name = "anthropic", specifier = ">=0.68,<1" },
     { name = "fastapi", specifier = ">=0.116,<1" },
+    { name = "httpx", specifier = ">=0.28,<1" },
     { name = "keyring", specifier = ">=25,<26" },
     { name = "openai", specifier = ">=1.108,<2" },
     { name = "pydantic-settings", specifier = ">=2.10,<3" },
@@ -45,7 +46,6 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "httpx", specifier = ">=0.28,<1" },
     { name = "mypy", specifier = ">=1.17,<2" },
     { name = "pytest", specifier = ">=8.4,<9" },
     { name = "pytest-asyncio", specifier = ">=1.1,<2" },

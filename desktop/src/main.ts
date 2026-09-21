@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { bindWindowChrome, registerWindowChrome } from "./window-chrome.js";
+import { bindBrowserIntegration } from "./browser-integration.js";
 
 const currentDirectory = path.dirname(fileURLToPath(import.meta.url));
 const developmentRendererUrl = process.env.AI_ME_RENDERER_URL;
@@ -45,6 +46,7 @@ async function createMainWindow(): Promise<void> {
   });
 
   bindWindowChrome(mainWindow);
+  bindBrowserIntegration(mainWindow, apiBaseUrl, isAllowedInAppNavigation);
 
   mainWindow.once("ready-to-show", () => mainWindow.show());
 

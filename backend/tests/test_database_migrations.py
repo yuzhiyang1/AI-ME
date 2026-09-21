@@ -32,7 +32,7 @@ async def test_fresh_database_is_upgraded_to_a_versioned_schema(tmp_path: Path) 
             ).fetchall()
         }
 
-    assert version == ("0007_skills",)
+    assert version == ("0008_browser_configuration",)
     assert {
         "agent_sessions",
         "agent_turns",
@@ -47,6 +47,8 @@ async def test_fresh_database_is_upgraded_to_a_versioned_schema(tmp_path: Path) 
         "project_roots",
         "project_idempotency_keys",
         "session_workspace_roots",
+        "browser_configuration",
+        "browser_runs",
     }.issubset(table_names)
 
 
@@ -66,7 +68,7 @@ async def test_unversioned_preview_database_is_adopted_only_after_schema_validat
             if name
             not in {
                 "context_windows", "context_checkpoints", "context_runs", "history_items",
-                "skill_state",
+                "skill_state", "browser_configuration", "browser_runs",
             }
         ]
         await connection.run_sync(lambda conn: metadata.create_all(conn, tables=preview_tables))
@@ -85,7 +87,7 @@ async def test_unversioned_preview_database_is_adopted_only_after_schema_validat
             "AND name = 'uq_active_turn_per_session'"
         ).fetchone()
 
-    assert version == ("0007_skills",)
+    assert version == ("0008_browser_configuration",)
     assert active_index == ("uq_active_turn_per_session",)
 
 
@@ -131,7 +133,7 @@ async def test_existing_0001_database_is_upgraded_before_creating_a_queued_run(
             if row[1] == "started_at"
         )
 
-    assert version == ("0007_skills",)
+    assert version == ("0008_browser_configuration",)
     assert upgraded_started_at[3] == 0
     assert execution.run.status.value == "created"
     assert execution.run.started_at is None

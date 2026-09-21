@@ -1,6 +1,7 @@
 import type { IPlatformService, UserInfo } from "@zcode/shared";
 import type { IServiceAccessor } from "@zcode/services";
-import type { ReactNode } from "react";
+import type { ComponentType, ReactNode } from "react";
+import type { HostBrowserPaneProps } from "@/lib/HostBrowserPaneContext.js";
 import type { CreateTaskRequest } from "@/app-shell/types.js";
 
 export interface RootProps {
@@ -8,6 +9,8 @@ export interface RootProps {
   hostManagedProviders?: boolean;
   /** AI-ME 的项目管理扩展，沿用当前窗口的 Store 和原生组件 Provider。 */
   hostAddon?: ReactNode;
+  /** 可选宿主浏览器适配器；只有宿主 bridge 可用时传入。 */
+  hostBrowserPane?: ComponentType<HostBrowserPaneProps>;
   services: IServiceAccessor;
   platform: IPlatformService;
   /** 如果从 main 进程传入则跳过项目选择页 */

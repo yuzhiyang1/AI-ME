@@ -1,6 +1,7 @@
 /* eslint-disable max-lines -- Side pane 当前集中承载 tabs、browser/git/code-viewer 内容；完整拆分需按 pane 功能边界继续推进。 */
 import { ServiceProvider } from "@/hooks/useServices.js";
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from "react";
+import { useContext, useEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from "react";
+import { HostBrowserPaneContext } from "@/lib/HostBrowserPaneContext.js";
 import type { PanelImperativeHandle } from "react-resizable-panels";
 import type { IServiceAccessor } from "@zcode/services";
 import {
@@ -402,6 +403,7 @@ export function AnimatedSidePanePanel({
   onSelectGitSource: (value: GitChangeSourceId) => void;
 }) {
   const { intl } = useZCodeIntl();
+  const HostBrowserPane = useContext(HostBrowserPaneContext);
   const isOfficeMode = useIsOfficeMode();
   const developerToolsEnabled = useDeveloperToolsVisibility();
   const isDragCollapsible = !isVisible;
@@ -738,6 +740,7 @@ export function AnimatedSidePanePanel({
         {supportsEmbeddedBrowser ? (
           <DropdownMenuItem
             data-side-pane-add-item="browser"
+            data-testid="browser-open-menu-item"
             onSelect={() => {
               onOpenBrowserTab();
             }}
@@ -842,6 +845,7 @@ export function AnimatedSidePanePanel({
                   key={item.id}
                   type="button"
                   data-side-pane-open-tab-item={item.id}
+                  data-testid={item.id === "browser" ? "browser-open-launcher" : undefined}
                   className="side-pane-open-tab-button flex h-12 min-w-0 items-center gap-3 rounded-xl bg-surface px-3 text-ui-base font-medium text-foreground transition-colors hover:bg-surface-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   onClick={item.onOpen}
                 >
@@ -1059,6 +1063,21 @@ export function AnimatedSidePanePanel({
 
                 <div className="relative min-h-0 flex-1 isolate">
                   {tabs.map((tab) => {
+                    // 复用入口、标签页和拖拽布局；宿主不挂载上游 webview 或 iframe。
+                    if (tab.type === "browser" && HostBrowserPane) {
+                      return (
+                        <TabsContent key={tab.id} value={tab.id} forceMount
+                          className="relative h-full min-h-0 bg-background data-[state=inactive]:hidden">
+                          <HostBrowserPane
+                            visible={isVisible && isBrowserOpen && tab.id === visibleActiveTabId}
+                            initialUrl={tab.initialUrl ?? undefined}
+                            navigationRequest={browserNavigationRequest?.targetTabId === tab.id ? browserNavigationRequest : null}
+                            onNavigationHandled={onBrowserNavigationRequestHandled}
+                            onClose={() => onCloseTab(tab.id)}
+                          />
+                        </TabsContent>
+                      );
+                    }
                     if (
                       (tab.type === "browser" || tab.type === "browser-use") &&
                       !shouldMountBrowserTabGuest(tab)
