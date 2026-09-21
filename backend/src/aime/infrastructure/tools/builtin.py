@@ -17,6 +17,7 @@ from aime.application.ports.tool_execution import (
     ToolRiskLevel,
 )
 from aime.domain.sessions.value_objects import PermissionProfile
+from aime.infrastructure.tools.file_change import build_file_change, read_before_write
 
 MAX_FILE_CHARS = 200_000
 MAX_LIST_ENTRIES = 2_000
@@ -209,11 +210,26 @@ class WriteFileTool:
         overwrite = _optional_bool(arguments, "overwrite", False)
         if not path.parent.is_dir():
             raise ToolInputError("目标文件的父目录不存在")
-        if path.exists() and not overwrite:
+        existed = path.exists()
+        if existed and not overwrite:
             raise ToolInputError("文件已存在；确认覆盖时请设置 overwrite=true")
+        # 只比较本次写入的原文件，不使用 Git 基线，保留用户此前已有的改动。
+        before, reason = await asyncio.to_thread(read_before_write, path)
+        change = await asyncio.to_thread(
+            build_file_change,
+            _relative(path, context),
+            before,
+            content,
+            created=not existed,
+            unavailable_reason=reason,
+        )
         await asyncio.to_thread(_atomic_write, path, content)
         return ToolExecutionResult(
-            {"path": _relative(path, context), "bytes_written": len(content.encode("utf-8"))}
+            {
+                "path": _relative(path, context),
+                "bytes_written": len(content.encode("utf-8")),
+                "file_change": change,
+            }
         )
 
 
@@ -247,16 +263,27 @@ class EditFileTool:
         old_text = _required_string(arguments, "old_text")
         new_text = _required_string(arguments, "new_text", allow_empty=True)
         replace_all = _optional_bool(arguments, "replace_all", False)
-        content = await asyncio.to_thread(path.read_text, encoding="utf-8", errors="strict")
+        # 不让文本读取隐式将 CRLF 改成 LF，否则局部编辑会产生整文件换行差异。
+        content = await asyncio.to_thread(_read_exact_text, path)
         occurrences = content.count(old_text)
         if occurrences == 0:
             raise ToolInputError("old_text 在文件中不存在")
         if occurrences > 1 and not replace_all:
             raise ToolInputError("old_text 出现多次；请提供更精确内容或设置 replace_all=true")
         updated = content.replace(old_text, new_text, -1 if replace_all else 1)
+        change = await asyncio.to_thread(
+            build_file_change,
+            _relative(path, context),
+            content,
+            updated,
+        )
         await asyncio.to_thread(_atomic_write, path, updated)
         return ToolExecutionResult(
-            {"path": _relative(path, context), "replacements": occurrences if replace_all else 1}
+            {
+                "path": _relative(path, context),
+                "replacements": occurrences if replace_all else 1,
+                "file_change": change,
+            }
         )
 
 
@@ -456,6 +483,11 @@ def _search_files(
         except (OSError, UnicodeError):
             continue
     return matches, False
+
+
+def _read_exact_text(path: Path) -> str:
+    with path.open("r", encoding="utf-8", errors="strict", newline="") as handle:
+        return handle.read()
 
 
 def _atomic_write(path: Path, content: str) -> None:

@@ -29,25 +29,10 @@ import {
   type SessionItem,
   type SessionTokenUsage,
   type ToolInvocation,
-  createSession,
-  createProject,
   createModelConfiguration,
-  decideApproval,
-  deleteProject,
-  getActiveTurn,
-  getSession,
-  getSessionUsage,
-  interruptTurn,
-  listModels,
   listModelConfigurations,
-  listPendingApprovals,
-  listProjects,
-  listSessionItems,
-  listSessions,
-  listToolInvocations,
-  streamRuntimeEvents,
-  updateProject,
 } from "./api";
+import { aiMeWorkspaceAdapter } from "./zcode/aiMeWorkspaceAdapter";
 import {
   TurnRequestUncertainError,
   lookupTurnWithTimeout,
@@ -66,6 +51,26 @@ const permissionLabels: Record<PermissionProfile, string> = {
   workspace_write: "工作区可写",
   full_access: "完全访问",
 };
+
+// 页面业务统一通过适配层访问 AI-ME，后续替换或扩展 ZCode 服务时不改页面编排。
+const {
+  createSession,
+  createProject,
+  decideApproval,
+  deleteProject,
+  getActiveTurn,
+  getSession,
+  getSessionUsage,
+  interruptTurn,
+  listModels,
+  listPendingApprovals,
+  listProjects,
+  listSessionItems,
+  listSessions,
+  listToolInvocations,
+  streamRuntimeEvents,
+  updateProject,
+} = aiMeWorkspaceAdapter;
 
 function BrandMark() {
   return <span className="brand-mark">ME</span>;
@@ -880,7 +885,7 @@ function App() {
   }
 
   return (
-    <div className={`agent-shell ${isDesktop ? "is-desktop" : "is-web"}`}>
+    <div className={`agent-shell zcode-shell ${isDesktop ? "is-desktop" : "is-web"}`}>
       {isDesktop ? (
         <div className="window-bar">
           <div className="window-brand"><BrandMark /><strong>AI-ME</strong><span>alpha</span></div>
@@ -888,11 +893,16 @@ function App() {
         </div>
       ) : null}
 
-      <aside className="session-sidebar">
-        <div className="sidebar-head">
-          {!isDesktop ? <div className="web-brand"><BrandMark /><strong>AI-ME</strong></div> : null}
+      <aside className="session-sidebar zcode-sidebar">
+        <div className="sidebar-head zcode-sidebar-head">
+          {!isDesktop ? <div className="web-brand"><BrandMark /><strong>AI-ME</strong><span className="zcode-product-badge">WORKSPACE</span></div> : null}
+          <button className="zcode-workspace-switcher" type="button" aria-label="选择工作区">
+            <span className="zcode-workspace-icon"><Folder size={14} /></span>
+            <span><strong>本地工作区</strong><small>AI-ME Runtime</small></span>
+            <ChevronDown size={14} />
+          </button>
           <button className="new-session-button" type="button" onClick={() => showNewSession()}>
-            <Plus size={16} /> 新对话
+            <Plus size={16} /> 新建任务
           </button>
         </div>
 
@@ -908,7 +918,7 @@ function App() {
           onCreateSession={(project) => showNewSession(project)}
         />
 
-        <div className="sidebar-foot">
+        <div className="sidebar-foot zcode-sidebar-foot">
           <div className="runtime-state">
             <span className="runtime-orb"><Bot size={15} /></span>
             <span><strong>本地 Runtime</strong><small>数据保存在这台电脑</small></span>
@@ -920,10 +930,10 @@ function App() {
         </div>
       </aside>
 
-      <main className="conversation-workspace">
+      <main className="conversation-workspace zcode-main">
         {activeSession ? (
           <>
-            <header className="conversation-header">
+            <header className="conversation-header zcode-topbar">
               <div><h1>{activeSession.title}</h1><p><Folder size={13} /> {activeSession.workspacePath}</p></div>
               <div className="session-facts">
                 <span>{activeSession.defaultModel}</span>
@@ -932,7 +942,7 @@ function App() {
               </div>
             </header>
 
-            <section className="timeline" aria-live="polite">
+            <section className="timeline zcode-timeline" aria-live="polite">
               {items.length === 0 && !liveAnswer && !sessionLoading ? (
                 <div className="conversation-empty">
                   <span className="empty-agent"><Sparkles size={22} /></span>
@@ -973,7 +983,7 @@ function App() {
               </div>
             </section>
 
-            <footer className="composer-zone">
+            <footer className="composer-zone zcode-composer-zone">
               {error ? <div className="inline-error"><CircleAlert size={14} />{error}</div> : null}
               <SessionUsageBar
                 usage={sessionUsage}
@@ -1174,16 +1184,19 @@ function NewSessionPanel(props: NewSessionPanelProps) {
     (props.project || props.workspacePath.trim()) && props.modelRef && !props.creating,
   );
   return (
-    <section className="new-session-view">
-      <div className="new-session-card">
-        <span className="new-session-mark"><Bot size={25} /></span>
+    <section className="new-session-view zcode-welcome">
+      <div className="new-session-card zcode-welcome-card">
+        <div className="zcode-welcome-intro">
+          <span className="new-session-mark"><Bot size={25} /></span>
+          <span className="zcode-welcome-kicker">NEW TASK</span>
+        </div>
         <div className="new-session-heading">
-          <span>{props.project ? "PROJECT AGENT SESSION" : "LOCAL AGENT SESSION"}</span>
-          <h1>{props.project ? `在 ${props.project.name} 中开始会话` : "开始一段新的工作会话"}</h1>
+          <span>{props.project ? "PROJECT WORKSPACE" : "LOCAL WORKSPACE"}</span>
+          <h1>{props.project ? `在 ${props.project.name} 中开始任务` : "你想让 AI-ME 完成什么？"}</h1>
           <p>
             {props.project
-              ? "会话会复制项目当前的目录配置；以后编辑项目不会改变这次会话的运行快照。"
-              : "独立会话不绑定项目，但仍会固定一个本地工作区，运行状态只保存在本机。"}
+              ? "选择模型和权限后，AI-ME 会在这个项目工作区内执行任务。"
+              : "选择一个本地工作区，AI-ME 会在这里持续完成任务并保留完整执行轨迹。"}
           </p>
         </div>
 
