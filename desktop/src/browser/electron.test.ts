@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { once } from "node:events";
 import { app, BrowserWindow, webContents, type WebContents } from "electron";
@@ -19,6 +20,8 @@ async function run(): Promise<void> {
   let blockedRequests = 0;
   const blocked = createServer((_request, response) => { blockedRequests++; response.end("SECRET"); });
   const blockedPort = await listen(blocked);
+  // 每次测试生成仅用于脱敏断言的临时值，避免固定示例被识别为真实凭据。
+  const privateFieldValue = randomUUID();
   const fixture = createServer((request, response) => {
     if (request.url === "/slow") {
       setTimeout(() => { response.setHeader("Content-Type", "text/html; charset=utf-8"); response.end("<title>延迟页面</title><p>延迟导航已完成</p>"); }, 450);
@@ -29,7 +32,7 @@ async function run(): Promise<void> {
     response.setHeader("Content-Type", "text/html; charset=utf-8");
     response.end(`<!doctype html><html><head><title>测试页面</title></head><body>
       <label>姓名<input id="name" value="初始"></label>
-      <label>密码<input type="password" value="DO-NOT-EXPOSE"></label>
+      <label>密码<input type="password" value="${privateFieldValue}"></label>
       <select id="choice" aria-label="类型"><option value="a">甲</option><option value="b">乙</option><option disabled value="c">禁用</option></select>
       <button id="submit" onclick="this.dataset.clicks=String(Number(this.dataset.clicks||0)+1)">提交</button>
       <button disabled>禁用按钮</button><p id="content">当前可见内容</p>
@@ -67,7 +70,7 @@ async function run(): Promise<void> {
 
     const first = await snapshot();
     assert.ok(first.text.includes("当前可见内容"));
-    assert.ok(!JSON.stringify(first).includes("DO-NOT-EXPOSE"));
+    assert.ok(!JSON.stringify(first).includes(privateFieldValue));
     assert.ok(!first.actions.some((action) => action.label.includes("密码") || action.label === "禁用按钮"));
     await execute("fill", "姓名", "张三");
     assert.equal(await wc.executeJavaScript("document.querySelector('#name').value"), "张三");
