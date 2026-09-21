@@ -1,12 +1,15 @@
 """验证内置工具的工作区边界、权限和确定性编辑语义。"""
 
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
 
 from aime.application.ports.tool_execution import ToolExecutionContext
 from aime.domain.sessions.value_objects import PermissionProfile
+from aime.infrastructure.tools import builtin
 from aime.infrastructure.tools.builtin import BuiltInToolRegistry, ToolInputError
 
 
@@ -40,6 +43,29 @@ def test_read_only_session_only_exposes_read_tools() -> None:
 
     assert read_only == {"list_files", "search_text", "read_file"}
     assert writable == read_only | {"write_file", "edit_file", "run_powershell"}
+
+
+@pytest.mark.parametrize("platform, executable", [("nt", "powershell.exe"), ("posix", "pwsh")])
+async def test_powershell_uses_platform_executable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform: str, executable: str
+) -> None:
+    """跨平台只切换解释器，保留非交互参数、工作区及 Windows 隐藏窗口设置。"""
+    launch = AsyncMock(side_effect=FileNotFoundError("test launcher"))
+    monkeypatch.setattr(builtin, "os", SimpleNamespace(name=platform))
+    monkeypatch.setattr(builtin.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+    monkeypatch.setattr(builtin.asyncio, "create_subprocess_exec", launch)
+
+    with pytest.raises(FileNotFoundError, match="test launcher"):
+        await builtin.PowerShellTool().execute(
+            {"command": "Write-Output approved"},
+            _context(tmp_path, PermissionProfile.WORKSPACE_WRITE),
+        )
+
+    assert launch.call_args.args == (
+        executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "Write-Output approved"
+    )
+    assert launch.call_args.kwargs["cwd"] == str(tmp_path)
+    assert launch.call_args.kwargs["creationflags"] == (0x08000000 if platform == "nt" else 0)
 
 
 async def test_file_tools_reject_parent_and_absolute_path_escape(tmp_path: Path) -> None:

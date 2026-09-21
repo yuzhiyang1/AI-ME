@@ -19,8 +19,8 @@ from aime.application.ports.tool_execution import (
     ToolRiskLevel,
 )
 from aime.domain.sessions.value_objects import PermissionProfile
-from aime.infrastructure.tools.file_change import build_file_change, read_before_write
 from aime.infrastructure.persistence.local_artifact_store import LocalArtifactStore
+from aime.infrastructure.tools.file_change import build_file_change, read_before_write
 
 MAX_FILE_CHARS = 200_000
 MAX_LIST_ENTRIES = 2_000
@@ -334,7 +334,8 @@ class PowerShellTool:
         if timeout is None or timeout > 120:
             raise ToolInputError("timeout_seconds 必须在 1 到 120 之间")
         process = await asyncio.create_subprocess_exec(
-            "powershell.exe",
+            # Windows 保留内置解释器；Linux/macOS 使用 PowerShell 7 的命令名。
+            "powershell.exe" if os.name == "nt" else "pwsh",
             "-NoLogo",
             "-NoProfile",
             "-NonInteractive",

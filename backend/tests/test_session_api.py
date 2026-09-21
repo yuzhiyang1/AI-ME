@@ -408,7 +408,7 @@ def test_session_usage_separates_cumulative_tokens_from_current_context(tmp_path
 
 
 def test_session_usage_marks_steps_without_provider_usage_as_partial(tmp_path: Path) -> None:
-    """提供方没有返回用量时保留步骤事实，避免把未知用量误报为零消耗。"""
+    """提供方未报告时保留缺失步骤，并用本地估算展示上下文而非伪造实测用量。"""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
@@ -440,17 +440,21 @@ def test_session_usage_marks_steps_without_provider_usage_as_partial(tmp_path: P
         usage = client.get(f"/api/sessions/{session_id}/usage")
 
     assert usage.status_code == 200
-    assert usage.json() == {
+    payload = usage.json()
+    # 系统提示与工具定义会影响估算值，契约要求有效估算而非固定的 token 数。
+    assert isinstance(payload["currentContextTokens"], int)
+    assert payload["currentContextTokens"] > 0
+    assert payload == {
         "inputTokens": 0,
         "outputTokens": 0,
         "totalTokens": 0,
-        "currentContextTokens": None,
+        "currentContextTokens": payload["currentContextTokens"],
         "contextWindow": 128_000,
         "measuredSteps": 0,
         "unreportedSteps": 1,
         "untrackedHistory": False,
         "windowNumber": 1,
-        "contextEstimated": False,
+        "contextEstimated": True,
     }
 
 
