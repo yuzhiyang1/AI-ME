@@ -451,7 +451,7 @@ export function useRootWorkspaceActions({
       void openFolderFromWorkspaceEntry({
         preferDirectoryBrowser,
         openDirectoryBrowser,
-        selectDirectory: () => platform.selectDirectory(),
+        selectDirectory: () => platform.selectProject ? platform.selectProject() : platform.selectDirectory(),
         onSelectProject: (path) => {
           void handleSelectProject(path);
         },
@@ -470,7 +470,7 @@ export function useRootWorkspaceActions({
     }
 
     void openFolderFromWorkspaceEntry({
-      selectDirectory: () => platform.selectDirectory(),
+      selectDirectory: () => platform.selectProject ? platform.selectProject() : platform.selectDirectory(),
       onSelectProject: (path) => {
         void handleSelectProject(path);
       },
@@ -497,7 +497,7 @@ export function useRootWorkspaceActions({
       void openFolderFromWorkspaceEntry({
         preferDirectoryBrowser,
         openDirectoryBrowser,
-        selectDirectory: () => platform.selectDirectory(),
+        selectDirectory: () => platform.selectProject ? platform.selectProject() : platform.selectDirectory(),
         onSelectProject: (path) => {
           void handleSelectProject(path);
         },
@@ -513,7 +513,7 @@ export function useRootWorkspaceActions({
     }
 
     void openFolderFromWorkspaceEntry({
-      selectDirectory: () => platform.selectDirectory(),
+      selectDirectory: () => platform.selectProject ? platform.selectProject() : platform.selectDirectory(),
       onSelectProject: (path) => {
         void handleSelectProject(path);
       },

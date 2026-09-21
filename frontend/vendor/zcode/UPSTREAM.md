@@ -26,3 +26,12 @@ AI-ME 入口和服务适配代码位于 frontend/src/workbench。未经修改的
 - `frontend/vite.config.ts` 在构建边界用 `src/workbench/local-account.jsx` 替换 OAuth 恢复、欢迎登录页、购买面板和商业额度提示，用 `LocalModelSettings.jsx` 替换模型提供方页面。上游原文件保留作来源记录，不进入 AI-ME 的账号/购买运行链路；构建检查禁止重新引入登录与购买实现，Stripe 依赖已从 AI-ME 安装清单移除。未更改上游许可证或版权声明。
 
 入口迁移和核心对话接通不等于全部宿主接口已完成。当前验收及缺口见 `frontend/ZCODE-INTEGRATION.md`。
+
+## 项目和 Skill 兼容补丁（2026-09-21）
+
+- `shared/src/platform.ts`、`ui/src/root/useRootWorkspaceActions.ts`、`WorkspaceSidebarFooter.tsx`：添加可选宿主项目选择/管理入口。
+- `ui/src/Root.tsx`、`root/types.ts`：提供当前窗口 Provider 内的宿主扩展挂载点，项目更新不重建工作台。
+- `ui/src/lib/hostWorkspaceLabel.ts`、`lib/path.ts`、`store/tabStore.ts`：宿主逻辑工作区用项目名称展示，上游普通目录保持原逻辑。
+- `ui/src/lib/skillSourceFilter.ts`、`settings/SkillsSection.tsx`、`shared/src/skills-types.ts`、`services/src/skills/skills.ts`：接受 AI-ME 授权技能来源、保留固定偏好、声明未实现的文件操作，不改上游 Skill 布局与交互体系。
+- `shared/src/zcode-protocol-v4/snapshot.ts`、`ui/src/v4/composer/V4ComposerToolbar.tsx`：增量展示 AI-ME 预算估算标记和窗口序号。
+- 上游 LICENSE、NOTICE 和第三方版权声明未改动。以上均为 AI-ME 本地接入修改，不宣称属于上游实现。

@@ -527,6 +527,9 @@ export interface IPlatformService {
 
   /** 打开系统目录选择框，返回选中路径或 null */
   selectDirectory(): Promise<string | null>;
+  /** AI-ME 宿主可选择具有独立 ID 和多根目录的项目。 */
+  selectProject?(): Promise<string | null>;
+  manageProjects?(): Promise<string | null>;
 
   /** 打开系统文件选择框，返回选中文件路径或 null */
   selectFile(): Promise<string | null>;

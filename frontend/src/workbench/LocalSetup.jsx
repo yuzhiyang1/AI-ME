@@ -16,7 +16,7 @@ export function LocalSetup({
     setBusy(true);
     setError("");
     try {
-      const path = await platform.selectDirectory();
+      const path = await (platform.selectProject ? platform.selectProject() : platform.selectDirectory());
       if (!path) return;
       const settings = await services.settingService.get();
       await services.settingService.update({

@@ -7,11 +7,13 @@ import {
   ExternalLink,
   Import,
   Plus,
+  Star,
   Trash2,
   UploadCloud,
   WandSparkles,
 } from "lucide-react";
 import { ControlHintTooltip } from "@/ControlHintTooltip.js";
+import { getPathLeaf } from "@/lib/path.js";
 import { Button } from "@/components/ui/button.js";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog.js";
 import { Switch } from "@/components/ui/switch.js";
@@ -67,7 +69,7 @@ import {
 
 function getWorkspaceBasename(workspacePath: string | null): string {
   if (!workspacePath) return "";
-  return workspacePath.split(/[\\/]/u).filter(Boolean).at(-1) ?? workspacePath;
+  return getPathLeaf(workspacePath);
 }
 
 function formatSkillPublishedAt(timestamp: number | undefined): string | null {
@@ -363,7 +365,7 @@ export function SkillsSection({
   }, [activeWorkspaceIdentity, activeWorkspacePath, skillsService]);
 
   const setEnabled = useCallback(
-    async (skillId: string, enabled: boolean) => {
+    async (skillId: string, enabled: boolean, pinned?: boolean) => {
       if (!activeWorkspacePath) {
         return;
       }
@@ -378,6 +380,7 @@ export function SkillsSection({
           scope: targetSkill?.scope,
           skillId,
           enabled,
+          ...(pinned !== undefined ? { pinned } : {}),
         });
         await invalidateDeferredDraftSessionForSkillChange({
           zcodeSessionService,
@@ -618,6 +621,7 @@ export function SkillsSection({
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-2">
+          {skill.pinned !== undefined && <Button type="button" variant="ghost" size="icon-sm" aria-label={skill.pinned ? "取消固定技能" : "固定技能"} onClick={() => void setEnabled(skill.id, skill.enabled, !skill.pinned)}><Star className={skill.pinned ? "size-3.5 fill-current text-primary" : "size-3.5"} /></Button>}
           {skill.scope === "plugin" ? null : (
             <>
               <Switch
@@ -632,6 +636,7 @@ export function SkillsSection({
                 size="icon-sm"
                 className="shrink-0 text-foreground-subtle hover:bg-destructive/10 hover:text-destructive"
                 aria-label={intl.formatMessage({ id: "common.delete" })}
+                disabled={capability?.fileOperationsAvailable === false}
                 title={intl.formatMessage({ id: "common.delete" })}
                 onClick={() => void handleDeleteSkill(skill)}
               >
@@ -657,7 +662,7 @@ export function SkillsSection({
       onRefresh={() => void Promise.all([refresh(), refreshSharedSkillStoreForCurrentWorkspace()])}
       onImport={() => setImportDialogOpen(true)}
       onNew={handleCreateSkill}
-      importDisabled={!capability?.userScopeAvailable}
+      importDisabled={!capability?.userScopeAvailable || capability?.fileOperationsAvailable === false}
       importActionId="settings.skills.import.open"
       newActionId="settings.skills.create.open"
     />
@@ -832,7 +837,7 @@ export function SkillsSection({
                       type="button"
                       variant="outline"
                       size="lg"
-                      disabled={!capability?.userScopeAvailable}
+                      disabled={!capability?.userScopeAvailable || capability?.fileOperationsAvailable === false}
                       onClick={() => setImportDialogOpen(true)}
                     >
                       <Import data-icon="inline-start" aria-hidden="true" />
@@ -944,7 +949,7 @@ export function SkillsSection({
                     mono
                     className="col-span-2"
                   />
-                  <SkillPathDetailField
+                  {capability?.fileOperationsAvailable === false ? <SkillDetailField label="授权引用（正文由运行时按需读取）" value={detailSkill.id} mono className="col-span-2" /> : <SkillPathDetailField
                     label={intl.formatMessage({
                       id: "settings.skills.detail.path",
                     })}
@@ -953,7 +958,7 @@ export function SkillsSection({
                       id: "settings.skills.detail.openPath",
                     })}
                     onOpen={() => void openSkillFilePath(detailSkill.path)}
-                  />
+                  />}
                 </div>
               </div>
             </div>

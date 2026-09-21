@@ -32,7 +32,11 @@ def create_app(
 
     app = FastAPI(title="AI-ME API", version="0.1.0", lifespan=lifespan)
     app.include_router(
-        skill_router(resolved_container.skill_service, resolved_container.get_session)
+        skill_router(
+            resolved_container.skill_service,
+            resolved_container.get_session,
+            resolved_container.get_project,
+        )
     )
     app.add_middleware(
         CORSMiddleware,

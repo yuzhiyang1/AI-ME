@@ -729,7 +729,12 @@ class SqliteConversationStore(ConversationStore):
             ).first()
         context_estimated = bool(
             context_sample is not None
-            and context_sample.sequence > max((sample[0] for sample in ordered_samples), default=0)
+            # Provider 未报告 token 时，不能用空用量覆盖同一步发送前的有效估算。
+            and context_sample.sequence > max(
+                (sequence for sequence, payload in ordered_samples
+                 if _non_negative_int(payload.get("inputTokens")) is not None),
+                default=0,
+            )
         )
         if context_estimated and context_sample is not None:
             estimate = json.loads(context_sample.payload_json)

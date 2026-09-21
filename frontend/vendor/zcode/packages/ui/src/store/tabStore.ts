@@ -20,6 +20,7 @@ import {
   type WorkspaceExpansionState,
 } from "@/lib/workspaceExpansionPreference.js";
 import { isSameWorkspaceTab } from "@/store/tabWorkspaceIdentity.js";
+import { hostWorkspaceLabel } from "@/lib/hostWorkspaceLabel.js";
 
 export const SETTINGS_TAB_ID = "__settings__" satisfies TabId;
 
@@ -141,6 +142,8 @@ export interface TabStoreState {
 
 /** 从路径提取文件夹名作为标签显示名 */
 function labelFromPath(path: string): string {
+  const hostLabel = hostWorkspaceLabel(path);
+  if (hostLabel) return hostLabel;
   // 兼容 Windows 反斜杠和 Unix 正斜杠
   const segments = path.replace(/\\/g, "/").split("/").filter(Boolean);
   return segments[segments.length - 1] ?? path;

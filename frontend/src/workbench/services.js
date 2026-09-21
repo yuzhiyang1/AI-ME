@@ -2,6 +2,13 @@ import * as api from "../api.ts";
 import { createEvent, serviceBoundary } from "./events.js";
 import { createProtocol, parseTimestamp } from "./protocol.js";
 import { desktopPlatform } from "./desktop-platform.js";
+import {
+  createProjectDirectory,
+  createProjectDialogBridge,
+  sessionWorkspaceKey,
+  normalizeWorkspaceKey,
+} from "./projects.js";
+import { createSkillAdapter, displaySkillInput } from "./skills.js";
 
 const SETTINGS_KEY = "ai-me:zcode:settings:v1";
 
@@ -69,8 +76,8 @@ export function taskMeta(session) {
   return {
     taskId: session.id,
     traceId: session.id,
-    title: session.title,
-    workspacePath: session.workspacePath,
+    title: displaySkillInput(session.title ?? ""),
+    workspacePath: sessionWorkspaceKey(session),
     createdAt: parseTimestamp(session.createdAt),
     updatedAt: parseTimestamp(session.updatedAt),
     mode: "build",
@@ -93,13 +100,14 @@ export async function createHost() {
   } catch {
     /* 损坏偏好不阻止启动。 */
   }
-  const paths = [
-    ...new Set([
-      ...projects.flatMap((project) => project.roots.map((root) => root.path)),
-      ...sessions.map((session) => session.workspacePath),
-    ]),
-  ];
-  const workspacePath = saved.recentProjects?.[0] || paths[0];
+  const directory = createProjectDirectory(projects, sessions);
+  const projectDialog = createProjectDialogBridge();
+  const paths = directory.paths();
+  // 迁移旧的目录列表：不能将同一路径的独立会话擅自归入项目。
+  const recent = (saved.recentProjects ?? []).filter((path) =>
+    paths.includes(path),
+  );
+  const workspacePath = recent[0] || paths[0];
   let settings = {
     locale: "zh-CN",
     localePreference: "zh-CN",
@@ -108,12 +116,17 @@ export async function createHost() {
     providerFamilyDomainMigrated: true,
     settingsSyncFirstRunPromptHandled: true,
     ...saved,
+    recentProjects: [...new Set([...recent, ...paths])],
   };
   const broadcast = createEvent();
   let view = modelView(models);
   const modelChanges = createEvent();
   const providerChanges = createEvent();
-  const protocol = createProtocol(api, models, taskMeta);
+  const skills = createSkillAdapter(api);
+  const protocol = createProtocol(api, models, taskMeta, {
+    ...directory,
+    prepareInput: skills.prepareInput,
+  });
   const buildProviderView = () => ({
     revision: view.revision,
     providerTemplates: [],
@@ -158,7 +171,10 @@ export async function createHost() {
     const all = await api.listSessions();
     const items = all
       .filter((s) =>
-        query.workspaceScopes.some((w) => w.workspacePath === s.workspacePath),
+        query.workspaceScopes.some(
+          (w) =>
+            normalizeWorkspaceKey(w.workspacePath) === sessionWorkspaceKey(s),
+        ),
       )
       .filter((s) =>
         query.kind === "archived"
@@ -294,7 +310,7 @@ export async function createHost() {
         (await api.listSessions())
           .filter(
             (s) =>
-              s.workspacePath === path &&
+              sessionWorkspaceKey(s) === normalizeWorkspaceKey(path) &&
               s.lifecycle !== "archived" &&
               !s.pinned,
           )
@@ -303,14 +319,18 @@ export async function createHost() {
         (await api.listSessions())
           .filter(
             (s) =>
-              s.workspacePath === path &&
+              sessionWorkspaceKey(s) === normalizeWorkspaceKey(path) &&
               s.pinned &&
               s.lifecycle !== "archived",
           )
           .map(taskMeta),
       listArchivedTasks: async ({ workspacePath: path }) =>
         (await api.listSessions())
-          .filter((s) => s.workspacePath === path && s.lifecycle === "archived")
+          .filter(
+            (s) =>
+              sessionWorkspaceKey(s) === normalizeWorkspaceKey(path) &&
+              s.lifecycle === "archived",
+          )
           .map(taskMeta),
       listPinnedTaskIds: async () =>
         (await api.listSessions()).filter((s) => s.pinned).map((s) => s.id),
@@ -323,7 +343,22 @@ export async function createHost() {
       getGroupedTaskView: async () => ({ nodes: [] }),
     },
     windowControllerService: { ...protocol.controller, listTaskList: taskList },
-    zcodeAgentService: protocol.agent,
+    zcodeAgentService: {
+      ...protocol.agent,
+      getSkillReferenceCatalog: skills.catalog,
+    },
+    skillsService: skills.service,
+    // 原版技能页会读取插件目录用于分组。AI-ME 的技能是本地发现的，不存在插件安装记录。
+    pluginManagementService: {
+      listPlugins: async () => ({ plugins: [], diagnostics: [] }),
+      getPluginsOverview: async () => ({
+        marketplaces: [],
+        availablePlugins: [],
+        installedPlugins: [],
+        restorableBuiltins: [],
+        diagnostics: [],
+      }),
+    },
     zcodeSessionService: {
       initializeWorkspace: async ({ workspacePath: path }) => ({
         available: models.length > 0,
@@ -342,13 +377,16 @@ export async function createHost() {
       }),
     },
     fileService: {
-      resolvePath: async ({ path }) => path,
+      resolvePath: async ({ path }) => directory.physicalPath(path),
       ensureConversationWorkspace: async () => {
-        if (!workspacePath) throw new Error("请先选择 AI-ME 工作区");
+        // 独立会话需要显式目录，不能沿用项目逻辑地址并悄悄绑定 projectId。
+        const path = normalizeWorkspaceKey(await platform.selectDirectory());
+        if (!path) throw new Error("已取消选择独立会话工作区");
+        directory.rememberStandalone(path);
         return {
-          path: workspacePath,
+          path,
           created: false,
-          workspacePurpose: "project",
+          workspacePurpose: "conversation",
         };
       },
     },
@@ -418,6 +456,8 @@ export async function createHost() {
         window.aiMeDesktop?.selectWorkspace
           ? window.aiMeDesktop.selectWorkspace()
           : window.prompt("输入本机已有工作区绝对路径", workspacePath || ""),
+      selectProject: projectDialog.open,
+      manageProjects: projectDialog.open,
       selectFile: async () => null,
       selectFiles: async () => [],
       getPathForFile: () => null,
@@ -459,5 +499,5 @@ export async function createHost() {
       },
     },
   );
-  return { services, platform, workspacePath };
+  return { services, platform, workspacePath, directory, projectDialog };
 }

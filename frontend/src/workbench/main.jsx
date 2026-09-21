@@ -9,6 +9,9 @@ import { desktopRootProps } from "./desktop-platform.js";
 import { ServiceProvider } from "../../vendor/zcode/packages/ui/src/hooks/useServices.tsx";
 import { LocalSetup } from "./LocalSetup.jsx";
 import { PlatformProvider } from "../../vendor/zcode/packages/ui/src/hooks/usePlatform.tsx";
+import { setHostWorkspaceLabelResolver } from "../../vendor/zcode/packages/ui/src/lib/hostWorkspaceLabel.ts";
+import { ProjectWorkspaceBridge } from "./ProjectWorkspaceBridge.jsx";
+import { ProjectManager } from "./ProjectManager.jsx";
 
 document.documentElement.classList.add("theme-zai-light");
 const desktopProps = desktopRootProps(window.aiMeDesktop);
@@ -18,7 +21,9 @@ document.documentElement.classList.toggle(
 );
 const root = createRoot(document.getElementById("root"));
 async function start() {
-  const { services, platform, workspacePath } = await createHost();
+  const host = await createHost();
+  const { services, platform, workspacePath } = host;
+  setHostWorkspaceLabelResolver((key) => host.directory.label(key));
   root.render(
     <AppErrorBoundary {...desktopProps}>
       <ZCodeIntlProvider
@@ -35,6 +40,7 @@ async function start() {
             restoreSession={false}
             allowRemoteWorkspace={false}
             supportsEmbeddedBrowser={false}
+            hostAddon={<ProjectWorkspaceBridge host={host} />}
           />
         ) : (
           <ServiceProvider services={services}>
@@ -45,6 +51,7 @@ async function start() {
                 platform={platform}
                 onReady={() => window.location.reload()}
               />
+              <ProjectManager host={host} />
             </PlatformProvider>
           </ServiceProvider>
         )}

@@ -43,9 +43,22 @@ Windows 标题栏已补接：桌面壳使用无边框窗口，原版 `DesktopWin
 - `desktop/scripts/verify-local-models.mjs` 的真实 Electron 验收通过：本地菜单无登录购买入口、读取现有配置、保存失败后重试、密钥清空、下拉模型即时刷新、管理模型导航、空数据首次使用与窗控。保存部分使用 HTTP 拦截的内存夹具，没有写入用户系统密钥或污染生产模型；实际后端持久化由上述 API 测试验证。无页面未捕获异常，未观察到外部账号/订阅请求。
 - 桌面截图：`output/playwright/desktop-local-model-settings.png`、`output/playwright/desktop-local-first-run.png`。复验：在 desktop 设置 `AI_ME_PLAYWRIGHT_MODULE` 为已有 Playwright 的 `index.mjs`，运行 `npm run test:local-models`。
 
+## 项目、Skill 与上下文分支集成（2026-09-21）
+
+- 保留原分支提交，以非 squash 合并接入上下文窗口/Token Budget、检查点/历史/产物检索与 Skill 运行时；CR 分层和原始文档入口见 `docs/ZCode项目与Skill合并验收.md`。
+- 原版工作台使用稳定项目 ID 对应的逻辑工作区地址，真实文件目录只由 AI-ME 后端解析。侧栏、项目选择器、技能作用域显示项目名；同路径的不同项目和独立会话不再混组。项目管理复用原版 Dialog/Input/Button，支持名称、多目录、主目录调整、删除配置但保留会话。
+- 首发提交 `projectId`，由后端生成多根目录快照。修改项目模板不迁移旧会话；删除后旧会话解绑为独立会话。独立任务入口显式选择自己的工作目录，不借用项目 ID。
+- Skill 设置页、详情、搜索、启停和输入框引用使用原版 `SkillsSection` 与 Composer，增加原有 AI-ME 的固定偏好。草稿按项目 ID 发现，已有会话按快照发现；原版链接引用在提交时转换为 AI-ME 显式 `/skill:ref`，读取账本时显示 `$名称`。
+- 原版上下文用量控件接收 AI-ME 用量，并显示估算标记和当前窗口序号。后端支持自动预算维护、换窗和接续；这不等于提供 ZCode `/compact` 手动压缩 API。
+- 合并时保留 `file_change` 审计元数据，模型结果压缩不吞掉界面差异；大小差异均通过真实 HTTP/SQLite/工具审批及重启恢复测试。模型不回传 token 时保留发送前估算，不把空用量当精确数据。
+- 前端 72 项通过，含独立会话 Windows 大小写/斜杠归一化；后端全量基线 149 通过、1 跳过，随后针对新增估算/大差异的两项 API 回归通过，项目/技能接口定向检查通过。生产构建和禁止账号购买模块进入运行包的检查通过。这里的基线结果与之后的定向回归分开记录，未声称修改后再次跑完整全量。
+- `desktop/scripts/verify-project-skills.mjs` 启动独立 FastAPI/SQLite 与真实 Electron，使用确定性模型且禁用个人技能来源，已验证项目创建/改名/多根快照/删除解绑、Skill 正文进入模型请求、启停/固定、重载与窗控；无未捕获页面异常，不使用用户密钥。可在 desktop 运行 `npm run test:project-skills`（先构建前端和桌面，Playwright 模块路径配置同上）。
+- 实际桌面截图：`output/playwright/desktop-project-manager.png`、`desktop-project-skills-settings.png`、`desktop-project-skill-session.png`。
+
 ## 尚未完成，不能据此宣称全功能移植
 
-- Git、文件树/预览、终端、附件、自动化、插件/Skill/MCP 管理、子任务、分享、远程连接：原版组件保留，但对应宿主 API 未接通。未实现的调用会明确失败。
+- Git、文件树/预览、终端、附件、自动化、插件/MCP 管理、子任务、分享、远程连接：原版组件保留，但对应宿主 API 未接通。未实现的调用会明确失败。
+- Skill 已接发现、搜索、启停、固定、引用和运行时加载；上游文件导入/删除接口尚未实现，相关操作明确禁用，不能当作全套插件市场能力。独立草稿无持久会话时仅发现个人技能，首次发送建立会话后才可按该目录快照发现工作区技能。
 - 模型配置已支持原有 AI-ME 的读取/新增与实时启用；编辑、删除不是原有 API 的能力，本次未新增这些接口。
 - 当前只支持 `build`（变更前确认）模式；计划、YOLO、既有会话切换模型不会被静默接受。
 - 会话变化暂用 1 秒权威快照轮询，尚未将 SSE 文本增量映射成逐 token 帧。停止和审批已有适配与单元测试，尚待真实工具流程验收。
