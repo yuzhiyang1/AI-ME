@@ -65,6 +65,7 @@ from aime.infrastructure.persistence.sqlite_tool_execution_store import SqliteTo
 from aime.infrastructure.runtime.approval_broker import InMemoryApprovalBroker
 from aime.infrastructure.runtime.model_agent_runtime import ModelAgentRuntime
 from aime.infrastructure.skills import LocalSkillResources
+from aime.infrastructure.tools.browser_tools import BrowserToolRegistry
 from aime.infrastructure.tools.builtin import BuiltInToolRegistry
 
 
@@ -180,7 +181,7 @@ def build_container(
         resolved_model_gateway,
         tool_execution_store,
         approval_broker,
-        tool_registry or BuiltInToolRegistry(artifact_store),
+        tool_registry or BrowserToolRegistry(BuiltInToolRegistry(artifact_store), browser_bridge),
         context_store=context_store,
         artifact_store=artifact_store,
         token_counter=ConservativeTokenCounter(),

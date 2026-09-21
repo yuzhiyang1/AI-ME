@@ -23,6 +23,7 @@ from aime.application.ports.tool_execution import (
 )
 from aime.application.ports.tool_execution_store import ToolExecutionStore
 from aime.domain.sessions.value_objects import AgentRunStatus, SessionActivity, TurnStatus
+from aime.domain.tool_execution.browser_scope import tool_grant_scope
 from aime.domain.tool_execution.entities import ApprovalRequest, ToolInvocation
 from aime.domain.tool_execution.value_objects import (
     ApprovalDecision,
@@ -369,11 +370,14 @@ class SqliteToolExecutionStore(ToolExecutionStore):
                     .values(status=ToolInvocationStatus.PREPARED.value)
                 )
                 if decision is ApprovalDecision.APPROVE_SESSION:
+                    grant_scope = tool_grant_scope(
+                        invocation["tool_name"], json.loads(invocation["arguments_json"])
+                    )
                     existing_grant = (
                         await database_session.execute(
                             select(approval_grants_table.c.id).where(
                                 approval_grants_table.c.session_id == str(session_id),
-                                approval_grants_table.c.tool_name == invocation["tool_name"],
+                                approval_grants_table.c.tool_name == grant_scope,
                             )
                         )
                     ).first()
@@ -382,7 +386,7 @@ class SqliteToolExecutionStore(ToolExecutionStore):
                             insert(approval_grants_table).values(
                                 id=str(uuid4()),
                                 session_id=str(session_id),
-                                tool_name=invocation["tool_name"],
+                                tool_name=grant_scope,
                                 approval_id=str(approval_id),
                                 created_at=now,
                             )

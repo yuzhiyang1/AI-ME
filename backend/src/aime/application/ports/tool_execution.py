@@ -21,6 +21,7 @@ class ToolRiskLevel(StrEnum):
     READ = "read"
     WORKSPACE_WRITE = "workspace_write"
     SHELL = "shell"
+    BROWSER = "browser"
 
 
 @dataclass(frozen=True, slots=True)

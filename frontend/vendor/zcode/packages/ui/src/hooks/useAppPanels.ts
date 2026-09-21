@@ -140,7 +140,8 @@ export function useAppPanels(options: {
   isDesktop?: boolean;
   /**
    * 展示语义：视图当前是否呈现给用户（设置页覆盖时为 false）。
-   * 本 hook 刻意不消费它——Browser View 事件是 main 侧权威转发，订阅不能受可见性影响，
+   * 原生 Browser View 生命周期订阅不消费它；AI-ME 聊天自动展开入口单独使用它防止抢焦点。
+   * Browser View 事件是 main 侧权威转发，生命周期订阅不能受可见性影响，
    * 详见下方订阅 effect 的时序约束注释。
    * 入参保留的唯一理由是回归护栏：useAppPanelsBrowserViewLifecycle 的四条用例靠传 false 表达
    * “设置页覆盖中”，一旦有人把可见性重新写回订阅条件，这些用例会立即失败。删掉入参，
@@ -169,6 +170,7 @@ export function useAppPanels(options: {
     activeTaskId,
     sidePaneOwnerId,
     isDesktop,
+    isWorkspaceVisible = true,
     supportsEmbeddedBrowser: explicitSupportsEmbeddedBrowser,
     defaultWhiteboardNamePrefix,
     platform,
@@ -524,6 +526,17 @@ export function useAppPanels(options: {
     supportsEmbeddedBrowser,
     workspaceAbsPath,
   ]);
+
+  useEffect(() => {
+    if (!hostBrowserPane) return;
+    const openForAgent = (event: Event) => {
+      const request = (event as CustomEvent<{ sessionId: string }>).detail;
+      // 只展开当前聊天。后台请求不能抢焦点，也不能自行取得原生页面执行权。
+      if (isWorkspaceVisible && request?.sessionId === sidePaneOwnerIdRef.current) handleOpenBrowserTab();
+    };
+    window.addEventListener('ai-me-browser-open-request', openForAgent);
+    return () => window.removeEventListener('ai-me-browser-open-request', openForAgent);
+  }, [hostBrowserPane, isWorkspaceVisible, handleOpenBrowserTab]);
 
   // 下面这组 Browser View 事件都是 main 侧的权威转发，
   // 不能用 isWorkspaceVisible（= !isSettingsTabActive）当订阅门槛。设置页是覆盖层，App 不

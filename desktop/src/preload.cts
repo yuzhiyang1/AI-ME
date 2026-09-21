@@ -21,6 +21,8 @@ contextBridge.exposeInMainWorld("aiMeDesktop", {
       ipcRenderer.invoke("browser:command", sessionId, operation, args),
     setViewport: (input: unknown) => ipcRenderer.invoke("browser:viewport", input),
     onState: (listener: (payload: unknown) => void) => subscribe("browser:state", listener),
+    onOpenRequest: (listener: (payload: unknown) => void) => subscribe("browser:open-request", listener),
+    credential: (sessionId: string, input: unknown) => ipcRenderer.invoke('browser:credential', sessionId, input),
     run: (sessionId: string, operation: string, args: unknown = {}) =>
       ipcRenderer.invoke("browser:run", sessionId, operation, args),
   },

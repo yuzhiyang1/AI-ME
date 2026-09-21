@@ -1,5 +1,19 @@
 # Electron 浏览器执行器
 
+## 两条执行入口
+
+聊天 Agent 使用 `BrowserHost.tool` 和 Maka 同版 OpenCLI 1.8.7，支持导航、快照、点击、输入（含临时凭据）、等待及正文提取。
+Jev 使用下文 `command/observe/act` 的离散动作接口；下文“密码过滤、无 CSS selector”等限制仅针对该旧接口。
+两者互斥占用同一个 WebContentsView 和 debugger，取消/隐藏时统一撤销，不另开隐藏浏览器。
+
+`cdp-bridge.ts` 从 Maka 提交 `3f297e9aa` 的 `apps/desktop/src/main/browser/cdp-bridge.ts` 迁移，
+只改为本地常量配置；保留 Apache 头与 `licenses/maka-LICENSE`、`licenses/maka-NOTICE`。
+`opencli-tools.ts` 适配其六类工具语义，不暴露任意脚本执行；没有复制 Maka 特有 Runtime 和 UI 依赖。
+
+站点授权在 Python 工具账本中按 `browser:<origin>` 保存；桌面执行前再次检查可见会话和 origin。
+主进程的临时凭据不出 IPC 响应、不出工具参数，不复制 OpenCLI 的 actual/expected 回显。
+OpenCLI DOM 快照会访问页面上下文，因此只对可信网站使用凭据；跨站动作、复杂 iframe、验证码等未宣称完整覆盖。
+
 ```ts
 import { BrowserHost } from "./browser/host.js";
 

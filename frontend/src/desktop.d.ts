@@ -31,6 +31,10 @@ export interface DesktopBrowserBridge {
   /** rect 为 renderer CSS 像素；null 撤下原生层，缩放转换由 Electron 负责。 */
   setViewport(input: { sessionId: string; rect: { x: number; y: number; width: number; height: number } | null }): Promise<unknown>;
   onState(callback: (event: { sessionId: string; state: DesktopBrowserState }) => void): () => void;
+  /** 后端 Agent 请求展开当前聊天，不允许后台会话抢占可见页面。 */
+  onOpenRequest?(callback: (event: { sessionId: string }) => void): () => void;
+  /** 临时凭据仅进入主进程内存；响应中不含 value。 */
+  credential?(sessionId: string, input: { name: string; origin: string; value: string } | { clear: true }): Promise<{ name?: string; origin?: string; cleared?: boolean }>;
   /** 配置操作使用空 sessionId；不返回已保存的密钥。 */
   run(sessionId: string, operation: "config", args?: Record<string, never>): Promise<JevConfig>;
   run(sessionId: string, operation: "configure", args: { apiKey?: string; model: string; clearApiKey?: boolean }): Promise<JevConfig>;

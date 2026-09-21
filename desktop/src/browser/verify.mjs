@@ -1,5 +1,5 @@
 // 独立入口：只把本目录 TypeScript 编译到临时目录，不修改 package/main/preload。
-import { mkdtempSync, readFileSync, readdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,13 +13,15 @@ const source = dirname(fileURLToPath(import.meta.url));
 const output = mkdtempSync(join(tmpdir(), "aime-browser-test-"));
 try {
   writeFileSync(join(output, "package.json"), '{"type":"module"}');
+  // 临时编译产物复用桌面依赖，不启动 OpenCLI daemon 或安装第三方适配器。
+  symlinkSync(join(source, '../../node_modules'), join(output, 'node_modules'), 'junction');
   for (const name of readdirSync(source).filter((name) => name.endsWith(".ts"))) {
     const compiled = ts.transpileModule(readFileSync(join(source, name), "utf8"), {
       compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022 },
     });
     writeFileSync(join(output, name.replace(/\.ts$/, ".js")), compiled.outputText);
   }
-  const unit = spawnSync(process.execPath, ["--test", join(output, "security.test.js")], { stdio: "inherit" });
+  const unit = spawnSync(process.execPath, ["--test", join(output, "security.test.js"), join(output, 'credentials.test.js')], { stdio: "inherit" });
   if (unit.status !== 0) process.exitCode = unit.status ?? 1;
   else {
     const env = { ...process.env };
@@ -27,6 +29,11 @@ try {
     const smoke = spawnSync(electron, [join(output, "electron.test.js")], { stdio: "inherit", env, timeout: 90_000, windowsHide: true });
     if (smoke.error) console.error(smoke.error);
     process.exitCode = smoke.status ?? 1;
+    if (process.exitCode === 0) {
+      const opencli = spawnSync(electron, [join(output, 'opencli.test.js')], { stdio: 'inherit', env, timeout: 90_000, windowsHide: true });
+      if (opencli.error) console.error(opencli.error);
+      process.exitCode = opencli.status ?? 1;
+    }
   }
 } finally {
   // 仅删除本进程 mkdtemp 创建的测试编译产物。

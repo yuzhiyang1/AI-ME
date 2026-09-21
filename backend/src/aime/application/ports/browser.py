@@ -11,7 +11,7 @@ from aime.domain.browser import (
     BrowserSnapshot,
 )
 
-BrowserOperation = Literal["navigate", "observe", "act", "close", "cancel"]
+BrowserOperation = Literal["navigate", "observe", "act", "close", "cancel", "tool"]
 
 
 class BrowserBridge(Protocol):

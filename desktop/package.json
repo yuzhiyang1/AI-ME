@@ -14,14 +14,21 @@
     "test:local-models": "node scripts/verify-local-models.mjs",
     "test:project-skills": "node scripts/verify-project-skills.mjs",
     "test:browser": "node scripts/verify-browser.mjs",
-    "test:browser-host": "node src/browser/verify.mjs"
+    "test:browser-host": "node src/browser/verify.mjs",
+    "test:chat-browser": "node scripts/verify-chat-browser.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.3.0",
+    "@types/turndown": "^5.0.6",
+    "@types/ws": "^8.18.1",
     "concurrently": "^10.0.5",
     "cross-env": "^10.1.0",
     "electron": "^39.8.7",
     "typescript": "~5.8.3",
     "wait-on": "^9.1.0"
+  },
+  "dependencies": {
+    "@jackwener/opencli": "1.8.7",
+    "ws": "8.18.3"
   }
 }

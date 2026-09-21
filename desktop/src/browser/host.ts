@@ -1,5 +1,9 @@
 import { BrowserWindow, WebContentsView, type Rectangle } from "electron";
 import { randomUUID } from "node:crypto";
+import { CDPBridge as OpenCliClient } from '@jackwener/opencli/browser/cdp';
+import type { IPage } from '@jackwener/opencli/types';
+import { CdpBridge } from './cdp-bridge.js';
+import { executeOpenCliTool } from './opencli-tools.js';
 import { createPageRuntime } from "./page-runtime.js";
 import { BrowserNetworkPolicy, type BrowserHostOptions } from "./security.js";
 import {
@@ -31,6 +35,9 @@ interface Page {
   /** 所有远端运行时对象均由页面持有，失败/隐藏/销毁时也能回收。 */
   objects: Set<string>;
   removeDownloadGuard: () => void;
+  automation?: { bridge: CdpBridge; client: OpenCliClient; page: IPage };
+  jevDebugger?: boolean;
+  toolOrigin?: string;
 }
 
 /**
@@ -118,6 +125,58 @@ export class BrowserHost {
     if (page) this.show(page, rect);
   }
 
+  /** 聊天工具和 Jev 共用同一个可见页面；不允许两个执行器同时占有它。 */
+  async tool(sessionId: string, name: string, origin: string, args: Record<string, unknown>,
+    resolveCredential: (name: string) => string): Promise<Record<string, unknown>> {
+    if (name === 'navigate') {
+      const url = this.network.navigation(args.url);
+      if (new URL(url).origin !== origin) throw new Error('导航站点与授权不一致');
+      const state = await this.command(sessionId, 'navigate', { url }) as BrowserState;
+      return { origin: new URL(state.url).origin, requiresApproval: new URL(state.url).origin !== origin };
+    }
+    this.assertViewport(sessionId);
+    const page = this.pages.get(sessionId);
+    if (!page) throw new Error('请先调用 browser_navigate');
+    this.assertVisible(page);
+    if (page.busy) throw new Error('浏览器正在执行另一个操作');
+    const version = page.cancelVersion;
+    const guard = () => {
+      this.assertNotCanceled(page, version);
+      if (new URL(page.view.webContents.getURL()).origin !== origin) throw new Error('页面已跨站，请先对新站点授权');
+    };
+    guard();
+    page.busy = true;
+    page.toolOrigin = origin;
+    try {
+      await this.waitUntilReadable(page, version, Date.now() + 10000);
+      guard();
+      this.revokePage(page);
+      if (!page.automation) {
+        // Jev 的隔离 DOM 观察器需要主动让出 debugger，不能抢占第三方 DevTools。
+        if (page.jevDebugger && page.view.webContents.debugger.isAttached()) page.view.webContents.debugger.detach();
+        const bridge = new CdpBridge(page.view.webContents);
+        const client = new OpenCliClient();
+        try {
+          const endpoint = await bridge.start();
+          const driver = await client.connect(endpoint);
+          guard();
+          page.automation = { bridge, client, page: driver };
+        } catch (error) { await client.close(); await bridge.stop(); throw error; }
+      }
+      // 原生鼠标/键盘动作需要把输入焦点交给可见 guest，而不是聊天输入框。
+      if (name === 'click' || name === 'type') page.view.webContents.focus();
+      const result = await executeOpenCliTool(page.automation.page, name, args, guard, resolveCredential);
+      // 点击可以导航；跨站后只返回新 origin，不读取未经授权站点的正文。
+      this.assertNotCanceled(page, version);
+      const landed = new URL(page.view.webContents.getURL()).origin;
+      if (landed !== origin) return { origin: landed, requiresApproval: true };
+      return { ...result, origin };
+    } catch {
+      // OpenCLI 原始异常可能含输入值或 CDP 端点，只返回受控错误。
+      throw new Error('浏览器工具未完成：请检查可见页面、站点授权或凭据配置，并重新 snapshot；不要直接重放提交操作');
+    } finally { page.busy = false; page.toolOrigin = undefined; this.emitState(page); }
+  }
+
   /** 可供可信主入口在转发 loopback 请求前检查；业务 session 存在性仍由应用验证。 */
   isVisible(sessionId: string): boolean {
     return !this.disposed && this.viewport?.sessionId === sessionId && !!this.viewport.rect
@@ -181,7 +240,10 @@ export class BrowserHost {
     // 包含 fetch、子框架、WebSocket、重定向后的请求；应用 API 不可由网页绕过 IPC 调用。
     session.webRequest.onBeforeRequest((details, callback) => {
       const navigation = details.resourceType === "mainFrame" || details.resourceType === "subFrame";
-      callback({ cancel: page.disposed || !this.network.allows(details.url, navigation) });
+      // 动作的站点租约：异步 fill/click 期间禁止框架跨站，防止焦点跳转后输入到别站。
+      const outsideLease = navigation && page.toolOrigin && isWebUrl(details.url)
+        && new URL(details.url).origin !== page.toolOrigin;
+      callback({ cancel: page.disposed || Boolean(outsideLease) || !this.network.allows(details.url, navigation) });
     });
     wc.on("will-frame-navigate", (event) => {
       if (!this.network.allows(event.url, true)) event.preventDefault();
@@ -216,10 +278,11 @@ export class BrowserHost {
     wc.on("did-navigate", navigated);
     wc.on("render-process-gone", () => this.closePage(page.sessionId, page));
     wc.once("destroyed", () => this.closePage(page.sessionId, page));
-    wc.debugger.on("detach", () => this.revokePage(page));
+    wc.debugger.on("detach", () => { page.jevDebugger = false; this.revokePage(page); });
   }
 
   private async observe(page: Page): Promise<BrowserSnapshot> {
+    await this.releaseAutomation(page);
     const cancelVersion = page.cancelVersion;
     const deadline = Date.now() + 10_000;
     // 点击的 CDP 回包可能先于 did-start-navigation 到达；只有只读 observe 可跨正常导航重试。
@@ -244,7 +307,8 @@ export class BrowserHost {
     this.revokePage(page);
     const epoch = page.epoch;
     const wc = page.view.webContents;
-    if (!wc.debugger.isAttached()) wc.debugger.attach("1.3");
+    if (!wc.debugger.isAttached()) { wc.debugger.attach("1.3"); page.jevDebugger = true; }
+    else if (!page.jevDebugger) throw new Error('页面正被其他调试器占用');
     const tree = await this.cdp(page, "Page.getFrameTree") as { frameTree: { frame: { id: string } } };
     this.assertEpoch(page, epoch);
     const world = await this.cdp(page, "Page.createIsolatedWorld", {
@@ -391,6 +455,7 @@ export class BrowserHost {
     this.pages.delete(sessionId);
     page.disposed = true;
     page.cancelVersion++;
+    void this.releaseAutomation(page);
     this.revokePage(page);
     const wc = page.view.webContents;
     const session = wc.session;
@@ -403,6 +468,15 @@ export class BrowserHost {
     void session.clearCache().catch(() => {});
     void session.closeAllConnections().catch(() => {});
     this.emitState(page);
+  }
+
+  private async releaseAutomation(page: Page): Promise<void> {
+    const automation = page.automation;
+    page.automation = undefined;
+    if (automation) {
+      await automation.client.close().catch(() => {});
+      await automation.bridge.stop().catch(() => {});
+    }
   }
 
   private state(page?: Page): BrowserState {

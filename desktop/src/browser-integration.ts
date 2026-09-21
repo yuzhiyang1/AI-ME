@@ -1,5 +1,6 @@
 import { ipcMain, type BrowserWindow, type IpcMainInvokeEvent } from "electron";
 import { BrowserHost } from "./browser/host.js";
+import { BrowserCredentials } from './browser/credentials.js';
 
 /** 主进程持有桌面令牌；网页和工作台 renderer 都不能读取它。 */
 export function bindBrowserIntegration(window: BrowserWindow, apiBase: string, allowed: (url: string) => boolean) {
@@ -15,10 +16,14 @@ export function bindBrowserIntegration(window: BrowserWindow, apiBase: string, a
   let reconnect: ReturnType<typeof setTimeout> | undefined;
   let disposed = false;
   let visibleSession: string | undefined;
+  let viewportRevision = 0;
   const executingSessions = new Set<string>();
   const runs = new Map<string, Promise<string>>();
+  const credentials = new BrowserCredentials();
+  const toolRequests = new Map<string, { sessionId: string; canceled: boolean }>();
 
   function revoke(id: string) {
+    for (const pending of toolRequests.values()) if (pending.sessionId === id) pending.canceled = true;
     executingSessions.delete(id);
     runs.delete(id);
     host.invalidate(id);
@@ -57,12 +62,20 @@ export function bindBrowserIntegration(window: BrowserWindow, apiBase: string, a
   }
 
   // 仅显式的白名单命令能穿过 IPC；observe/act 只接受已认证后端的消息。
+  ipcMain.handle('browser:credential', (event, rawId: unknown, input: Record<string, unknown>) => {
+    owner(event);
+    const id = sessionId(rawId);
+    if (visibleSession !== id) throw new Error('只能为当前可见会话配置凭据');
+    if (input?.clear === true) { credentials.clear(id); return { cleared: true }; }
+    return credentials.save(id, input ?? {});
+  });
   ipcMain.handle('browser:command', async (event, rawId: unknown, operation: unknown, args: unknown) => {
     owner(event);
     const id = sessionId(rawId);
     if (typeof operation !== 'string' || !['navigate', 'back', 'forward', 'reload', 'stop', 'close', 'state'].includes(operation)) throw new Error('不支持的浏览器命令');
     if (operation !== 'state') {
       revoke(id);
+      if (operation === 'close') credentials.clear(id);
       const response = await fetch(new URL(`/api/sessions/${id}`, base), { signal: AbortSignal.timeout(5000) });
       if (!response.ok) throw new Error('会话不存在，请先创建会话');
       await stopRun(id);
@@ -72,6 +85,7 @@ export function bindBrowserIntegration(window: BrowserWindow, apiBase: string, a
   ipcMain.handle('browser:viewport', (event, input: { sessionId: unknown; rect: unknown }) => {
     owner(event);
     const id = sessionId(input?.sessionId);
+    viewportRevision++;
     // 隐藏立即撤销执行能力，不等待网络停止请求。
     const rect = input.rect as Parameters<BrowserHost['setViewport']>[0]['rect'];
     const zoom = window.webContents.getZoomFactor();
@@ -103,7 +117,7 @@ export function bindBrowserIntegration(window: BrowserWindow, apiBase: string, a
     }
     if (operation === 'start') {
       if (visibleSession !== id || !host.isVisible(id) || socket?.readyState !== WebSocket.OPEN) throw new Error('请先打开当前会话的浏览器页面，等待执行桥连接');
-      if (executingSessions.has(id)) throw new Error('当前浏览器任务仍在运行，请先停止');
+      if (executingSessions.has(id) || [...toolRequests.values()].some(item => item.sessionId === id)) throw new Error('当前浏览器任务仍在运行，请先停止');
       host.invalidate(id);
       executingSessions.add(id);
       const started = request(route, args) as Promise<{ id: string }>;
@@ -136,6 +150,38 @@ export function bindBrowserIntegration(window: BrowserWindow, apiBase: string, a
         const command = JSON.parse(event.data);
         id = sessionId(command.id);
         const target = sessionId(command.sessionId);
+        if (command.operation === 'cancel' && toolRequests.has(command.arguments?.requestId)) {
+          const pending = toolRequests.get(command.arguments.requestId)!;
+          if (pending.sessionId === target) { pending.canceled = true; host.invalidate(target); }
+          connection.send(JSON.stringify({ id, result: { canceled: true } }));
+          return;
+        }
+        if (command.operation === 'tool') {
+          if (executingSessions.has(target) || [...toolRequests.values()].some(item => item.sessionId === target)) throw new Error('浏览器已有任务在执行');
+          const pending = { sessionId: target, canceled: false };
+          toolRequests.set(id, pending);
+          try {
+            // 前端只为当前聊天展开面板；后台会话的请求不会切走用户当前任务。
+            if (visibleSession !== target) window.webContents.send('browser:open-request', { sessionId: target });
+            const deadline = Date.now() + 4000;
+            while (visibleSession !== target && !pending.canceled && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 25));
+            // 面板展开/审批收起有布局动画；等坐标稳定后才派发，避免导航期间被 resize 撤销。
+            let revision = viewportRevision;
+            let stableSince = Date.now();
+            while (Date.now() - stableSince < 200 && !pending.canceled && Date.now() < deadline) {
+              await new Promise(resolve => setTimeout(resolve, 25));
+              if (revision !== viewportRevision) { revision = viewportRevision; stableSince = Date.now(); }
+            }
+            if (pending.canceled || visibleSession !== target || connection !== socket || connection.readyState !== WebSocket.OPEN) throw new Error('当前聊天浏览器不可见或操作已取消');
+            const { name, origin, args } = command.arguments ?? {};
+            if (!['navigate', 'snapshot', 'click', 'type', 'wait', 'extract'].includes(name) || typeof origin !== 'string' || !args || typeof args !== 'object') throw new Error('无效浏览器工具');
+            const result = await host.tool(target, name, origin, args, key => credentials.resolve(target, key, origin));
+            if (!pending.canceled && connection.readyState === WebSocket.OPEN) {
+              connection.send(JSON.stringify({ id, result: credentials.redact(target, result) }));
+            } else throw new Error('浏览器操作已取消');
+          } finally { toolRequests.delete(id); }
+          return;
+        }
         const identity = runs.get(target);
         const runId = await identity;
         if (command.operation === 'cancel') {
@@ -157,6 +203,7 @@ export function bindBrowserIntegration(window: BrowserWindow, apiBase: string, a
     });
     connection.addEventListener('error', () => { connection.close(); });
     connection.addEventListener('close', () => {
+      for (const pending of toolRequests.values()) { pending.canceled = true; host.invalidate(pending.sessionId); }
       if (disposed) return;
       // 连接断开撤销执行，保留可见页面供人工核验；重连不会恢复旧任务。
       if (visibleSession) {
@@ -180,6 +227,7 @@ export function bindBrowserIntegration(window: BrowserWindow, apiBase: string, a
     clearTimeout(reconnect);
     socket?.close();
     host.dispose();
-    for (const channel of ['browser:command', 'browser:viewport', 'browser:run']) ipcMain.removeHandler(channel);
+    credentials.clear();
+    for (const channel of ['browser:command', 'browser:viewport', 'browser:run', 'browser:credential']) ipcMain.removeHandler(channel);
   });
 }

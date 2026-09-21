@@ -9,6 +9,7 @@ import { usePaneLayoutStore } from "../../vendor/zcode/packages/ui/src/v4/paneLa
 import { createBrowserController, desktopBrowserAvailable, EMPTY_BROWSER_STATE, isActiveRun, selectBrowserSession } from "./browser-session.js";
 import { useBrowserViewport } from "./useBrowserViewport.js";
 import { BrowserActionSummary } from "./BrowserActionSummary.jsx";
+import { BrowserCredentials } from './BrowserCredentials.jsx';
 import { setPendingSettingsSection } from "../../vendor/zcode/packages/ui/src/lib/settingsNavigation.ts";
 
 const statusLabels = { running: "运行中", awaiting_approval: "等待确认", stopped: "已停止",
@@ -62,9 +63,12 @@ export function DesktopBrowserPanel({ visible, initialUrl, navigationRequest, on
 export function BrowserLifecycleNotice() {
   const [error, setError] = useState("");
   useEffect(() => {
+    const unsubscribe = window.aiMeDesktop?.browser?.onOpenRequest?.((detail) => {
+      window.dispatchEvent(new CustomEvent('ai-me-browser-open-request', { detail }));
+    });
     const receive = (event) => setError(event.detail);
     window.addEventListener("ai-me-browser-error", receive);
-    return () => window.removeEventListener("ai-me-browser-error", receive);
+    return () => { unsubscribe?.(); window.removeEventListener("ai-me-browser-error", receive); };
   }, []);
   return error ? <div role="alert" className="fixed bottom-4 right-4 z-50 max-w-sm rounded-lg border border-border bg-background p-3 text-sm shadow-md">
     {error}<Button variant="ghost" onClick={() => setError("")}>知道了</Button>
@@ -191,9 +195,11 @@ export function BrowserSessionPanel({ browser, sessionId, controller, initialNav
     </form>
     <div className="shrink-0 truncate px-3 py-1 text-xs text-muted-foreground" title={page.title}>{page.loading ? "正在加载…" : page.title || "内置浏览器"}</div>
     <div ref={surface} data-testid="native-browser-viewport" className="relative min-h-24 flex-1 bg-muted/20">
-      {!page.hasPage && <p className="p-4 text-sm text-muted-foreground">请先输入网址打开页面，再填写目标启动 Jev。</p>}
+      {!page.hasPage && <p className="p-4 text-sm text-muted-foreground">可直接在聊天中要求 AI 打开网页并操作；也可输入网址后使用下方可选的 Jev 模式。</p>}
     </div>
     <div data-testid="browser-run-footer" className="h-[280px] max-h-[55%] shrink-0 space-y-3 overflow-y-auto border-t border-border p-3 text-sm">
+      <p className="text-xs text-muted-foreground">聊天 Agent 已支持网页导航、观察、输入、点击、等待和结果读取，无需启动 Jev。Jev 是下方的可选模式。</p>
+      <BrowserCredentials browser={browser} sessionId={sessionId} url={page.url} />
       <form className="space-y-2" onSubmit={(event) => { event.preventDefault(); if (configured && page.hasPage && !page.loading && !stopping && goal.trim() && !isActiveRun(run)) void runAction("start", { goal: goal.trim(), maxSteps: 20, confirmEachAction }); }}>
         <label className="flex flex-col gap-2"><span className="font-medium">Jev 浏览器目标</span><Input data-testid="jev-goal" value={goal} onChange={(event) => setGoal(event.target.value)} placeholder="希望在当前网页完成什么？" disabled={busy || stopping || isActiveRun(run)} /></label>
         <label className="flex items-center gap-2"><input data-testid="jev-confirm-each-action" type="checkbox" checked={confirmEachAction} disabled={busy || stopping || isActiveRun(run)} onChange={(event) => setConfirmEachAction(event.target.checked)} />逐步确认</label>

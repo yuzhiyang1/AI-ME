@@ -22,6 +22,11 @@
 
 ## bridge 契约
 
+聊天工具会通过 `onOpenRequest({sessionId})` 请求展开当前会话的浏览器；后台会话、设置页不抢焦点。
+布局坐标稳定后才执行，避免展开动画触发旧动作撤销。现有 Jev 手动启动仍使用下面的 `run` 契约。
+`credential(sessionId,{name,origin,value})` 保存本次会话临时凭据；`{clear:true}` 清除。
+凭据 UI 复用工作台 Input/Button，保存在主进程内存且不回显，关闭浏览器或退出后丢弃。
+
 完整类型在 `src/desktop.d.ts`。前端只调用 `window.aiMeDesktop.browser`：
 
 - `command(sessionId, operation, args)`：navigate/back/forward/reload/stop/close/state；navigate 使用 `{url}`。返回页面状态 `{url,title,canGoBack,canGoForward,loading,hasPage}`。
