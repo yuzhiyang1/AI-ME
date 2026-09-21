@@ -7,6 +7,22 @@ def classify_provider_error(exc: Exception) -> LlmError:
     """按 HTTP 状态与异常名识别重试语义。"""
     status_code = getattr(exc, "status_code", None)
     name = type(exc).__name__.lower()
+    body = getattr(exc, "body", None)
+    error_body = body.get("error", body) if isinstance(body, dict) else {}
+    code = error_body.get("code") if isinstance(error_body, dict) else None
+    message = str(exc).lower()
+    if status_code == 400 and (
+        code == "context_length_exceeded"
+        or "maximum context length" in message
+        or "prompt is too long" in message
+        or "input is too long" in message
+    ):
+        return LlmError(
+            LlmErrorCategory.INVALID_REQUEST,
+            "context_window_exceeded",
+            str(exc),
+            False,
+        )
 
     if status_code in {401, 403}:
         return LlmError(LlmErrorCategory.AUTHENTICATION, "authentication_failed", str(exc), False)

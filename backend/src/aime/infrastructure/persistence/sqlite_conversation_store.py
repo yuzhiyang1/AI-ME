@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import and_, func, insert, select, update
+from sqlalchemy import and_, func, insert, select, text, update
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -424,6 +424,30 @@ class SqliteConversationStore(ConversationStore):
     async def recover_incomplete_runs(self) -> int:
         """启动时把没有 terminal fact 的遗留 Run 收敛为 interrupted。"""
         async with self._session_factory() as database_session:
+            # 有上下文持久预算的 Run 可以重建；先转为既有恢复队列状态。
+            # 工具不确定状态已由 tool store 处理，不能由这里抹去审批事实。
+            async with database_session.begin():
+                await database_session.execute(
+                    text(
+                        "UPDATE agent_runs SET status='waiting_for_user' "
+                        "WHERE status IN ('created','running') AND terminal_event_id IS NULL "
+                        "AND id IN (SELECT run_id FROM context_runs)"
+                    )
+                )
+                await database_session.execute(
+                    text(
+                        "UPDATE agent_turns SET status='waiting_for_user' WHERE id IN "
+                        "(SELECT turn_id FROM agent_runs WHERE status='waiting_for_user' "
+                        "AND id IN (SELECT run_id FROM context_runs) AND terminal_event_id IS NULL)"
+                    )
+                )
+                await database_session.execute(
+                    text(
+                        "UPDATE agent_sessions SET activity='waiting_for_user' WHERE id IN "
+                        "(SELECT session_id FROM agent_runs WHERE status='waiting_for_user' "
+                        "AND id IN (SELECT run_id FROM context_runs) AND terminal_event_id IS NULL)"
+                    )
+                )
             run_rows = (
                 (
                     await database_session.execute(
@@ -662,9 +686,7 @@ class SqliteConversationStore(ConversationStore):
 
         ordered_samples = list(samples.values())
         latest_payload: dict[str, object] = (
-            max(ordered_samples, key=lambda sample: sample[0])[1]
-            if ordered_samples
-            else {}
+            max(ordered_samples, key=lambda sample: sample[0])[1] if ordered_samples else {}
         )
         latest_input = _non_negative_int(latest_payload.get("inputTokens"))
         latest_output = _non_negative_int(latest_payload.get("outputTokens"))
@@ -688,6 +710,31 @@ class SqliteConversationStore(ConversationStore):
             untracked_history = (
                 await database_session.execute(untracked_query.limit(1))
             ).scalar_one_or_none() is not None
+            window_number = (
+                await database_session.execute(
+                    text("SELECT number FROM context_windows WHERE session_id=:sid AND active=1"),
+                    {"sid": str(session_id)},
+                )
+            ).scalar_one_or_none()
+            context_sample = (
+                await database_session.execute(
+                    select(runtime_events_table.c.sequence, runtime_events_table.c.payload_json)
+                    .where(
+                        runtime_events_table.c.session_id == str(session_id),
+                        runtime_events_table.c.type == "context_status",
+                    )
+                    .order_by(runtime_events_table.c.sequence.desc())
+                    .limit(1)
+                )
+            ).first()
+        context_estimated = bool(
+            context_sample is not None
+            and context_sample.sequence > max((sample[0] for sample in ordered_samples), default=0)
+        )
+        if context_estimated and context_sample is not None:
+            estimate = json.loads(context_sample.payload_json)
+            current_context_tokens = _non_negative_int(estimate.get("inputTokens"))
+            latest_payload["contextWindow"] = estimate.get("contextWindow")
         return SessionTokenUsage(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
@@ -697,6 +744,8 @@ class SqliteConversationStore(ConversationStore):
             measured_steps=measured_steps,
             unreported_steps=unreported_steps,
             untracked_history=untracked_history,
+            window_number=window_number,
+            context_estimated=context_estimated,
         )
 
     async def list_context_usage_summaries(
@@ -737,9 +786,7 @@ class SqliteConversationStore(ConversationStore):
             input_tokens = _non_negative_int(payload.get("inputTokens"))
             output_tokens = _non_negative_int(payload.get("outputTokens"))
             context_window = _non_negative_int(payload.get("contextWindow"))
-            current = (
-                input_tokens + (output_tokens or 0) if input_tokens is not None else None
-            )
+            current = input_tokens + (output_tokens or 0) if input_tokens is not None else None
             percentage = (
                 min(100, round(current / context_window * 100))
                 if current is not None and context_window
@@ -749,11 +796,7 @@ class SqliteConversationStore(ConversationStore):
                 current_context_tokens=current,
                 context_window=context_window,
                 percentage=percentage,
-                partial=(
-                    input_tokens is None
-                    or output_tokens is None
-                    or context_window is None
-                ),
+                partial=(input_tokens is None or output_tokens is None or context_window is None),
             )
         return summaries
 
@@ -940,6 +983,26 @@ async def _model_messages(
     session_id: UUID,
 ) -> list[ConversationMessage]:
     """从最终用户/助手 Item 重建当前模型可见历史。"""
+    managed = (
+        await database_session.execute(
+            text("SELECT id FROM context_windows WHERE session_id=:sid AND active=1"),
+            {"sid": str(session_id)},
+        )
+    ).scalar_one_or_none()
+    if managed is not None:
+        # 已启用窗口的会话由 ContextStore 装配历史，这里只交接最新用户输入。
+        latest = (
+            await database_session.execute(
+                select(session_items_table.c.content_json)
+                .where(
+                    session_items_table.c.session_id == str(session_id),
+                    session_items_table.c.type == SessionItemType.USER_MESSAGE.value,
+                )
+                .order_by(session_items_table.c.sequence.desc())
+                .limit(1)
+            )
+        ).scalar_one()
+        return [ConversationMessage(MessageRole.USER, json.loads(latest)["text"])]
     rows = (
         await database_session.execute(
             select(session_items_table)

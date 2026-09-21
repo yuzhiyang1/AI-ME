@@ -42,6 +42,7 @@ class ToolExecutionContext:
     workspace_path: str
     permission_profile: PermissionProfile
     workspace_roots: tuple[str, ...] = ()
+    call_id: str = ""  # Runtime 注入的调用身份，用于维护工具的幂等写入。
 
 
 @dataclass(frozen=True, slots=True)

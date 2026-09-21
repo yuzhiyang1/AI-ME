@@ -323,6 +323,8 @@ class SessionTokenUsageResponse(_CamelCaseModel):
     measured_steps: int
     unreported_steps: int
     untracked_history: bool
+    window_number: int | None = None
+    context_estimated: bool = False
 
     @classmethod
     def from_application(cls, usage: SessionTokenUsage) -> "SessionTokenUsageResponse":
@@ -336,6 +338,8 @@ class SessionTokenUsageResponse(_CamelCaseModel):
             measured_steps=usage.measured_steps,
             unreported_steps=usage.unreported_steps,
             untracked_history=usage.untracked_history,
+            window_number=usage.window_number,
+            context_estimated=usage.context_estimated,
         )
 
 

@@ -106,6 +106,6 @@ GET  /api/sessions/{sessionId}/tool-invocations
 
 - Skill 能力快照和提示词装配；
 - MCP Server 发现、生命周期和工具适配；
-- 上下文管理与 token 预算：已采用 [Token Budget 换窗设计](./上下文管理与TokenBudget设计.md)，包括本地 Checkpoint、历史检索、大结果存储和恢复保护，待实现；
+- 上下文管理与 token 预算：已实现 [Token Budget 换窗设计](./上下文管理与TokenBudget设计.md)，包括本地 Checkpoint、历史检索、大结果存储和恢复保护，详见 [实现审核说明](./上下文管理实现审核说明.md)；
 - 更细的 PowerShell 命令策略、网络策略和隔离执行；
 - Tool/Turn Eval 数据集、质量指标和回归门禁。

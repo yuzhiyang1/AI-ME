@@ -30,14 +30,18 @@ from aime.application.sessions.turn_services import (
     ListSessionItems,
     StartTurn,
 )
+from aime.application.skill_service import SkillService
 from aime.application.tools.services import ListToolInvocations
 from aime.application.work_items.services import CreateWorkItem, ListWorkItems
 from aime.infrastructure.credentials.system_keyring import SystemModelCredentialStore
 from aime.infrastructure.llm.configurable_gateway import ConfigurableModelGateway
 from aime.infrastructure.llm.model_gateway_impl import build_gateway_from_env
+from aime.infrastructure.llm.token_counter import ConservativeTokenCounter
 from aime.infrastructure.persistence.in_memory_work_item_repository import (
     InMemoryWorkItemRepository,
 )
+from aime.infrastructure.persistence.local_artifact_store import LocalArtifactStore
+from aime.infrastructure.persistence.sqlite_context_store import SqliteContextStore
 from aime.infrastructure.persistence.sqlite_conversation_store import SqliteConversationStore
 from aime.infrastructure.persistence.sqlite_database import SqliteDatabase
 from aime.infrastructure.persistence.sqlite_model_configuration_repository import (
@@ -45,9 +49,12 @@ from aime.infrastructure.persistence.sqlite_model_configuration_repository impor
 )
 from aime.infrastructure.persistence.sqlite_project_repository import SqliteProjectRepository
 from aime.infrastructure.persistence.sqlite_session_repository import SqliteSessionRepository
+from aime.infrastructure.persistence.sqlite_skill_store import SqliteSkillStore
 from aime.infrastructure.persistence.sqlite_tool_execution_store import SqliteToolExecutionStore
 from aime.infrastructure.runtime.approval_broker import InMemoryApprovalBroker
 from aime.infrastructure.runtime.model_agent_runtime import ModelAgentRuntime
+from aime.infrastructure.skills import LocalSkillResources
+from aime.infrastructure.tools.builtin import BuiltInToolRegistry
 
 
 @dataclass(slots=True)
@@ -55,6 +62,7 @@ class Container:
     """模块化单体的依赖容器。"""
 
     create_work_item: CreateWorkItem
+    skill_service: SkillService
     list_work_items: ListWorkItems
     list_available_models: ListAvailableModels
     stream_model_completion: StreamModelCompletion
@@ -126,11 +134,22 @@ def build_container(
     conversation_store = SqliteConversationStore(database.session_factory)
     tool_execution_store = SqliteToolExecutionStore(database.session_factory)
     approval_broker = InMemoryApprovalBroker()
+    context_store = SqliteContextStore(database.session_factory)
+    personal_roots = tuple(Path(p).expanduser().resolve() for p in
+                           os.environ.get("AIME_SKILL_ROOTS", str(Path.home() / ".agents/skills"))
+                           .split(os.pathsep) if p.strip())
+    skill_service = SkillService(LocalSkillResources(personal_roots),
+                                 SqliteSkillStore(database.session_factory))
+    artifact_store = LocalArtifactStore(resolved_state_dir / "artifacts")
     agent_runtime = ModelAgentRuntime(
         resolved_model_gateway,
         tool_execution_store,
         approval_broker,
-        tool_registry,
+        tool_registry or BuiltInToolRegistry(artifact_store),
+        context_store=context_store,
+        artifact_store=artifact_store,
+        token_counter=ConservativeTokenCounter(),
+        skill_service=skill_service,
     )
     runtime_coordinator = RuntimeCoordinator(
         agent_runtime,
@@ -139,6 +158,7 @@ def build_container(
     )
     return Container(
         create_work_item=CreateWorkItem(work_items),
+        skill_service=skill_service,
         list_work_items=ListWorkItems(work_items),
         list_available_models=ListAvailableModels(resolved_model_gateway),
         stream_model_completion=StreamModelCompletion(resolved_model_gateway),

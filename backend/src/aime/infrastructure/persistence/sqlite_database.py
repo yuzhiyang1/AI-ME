@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from aime.infrastructure.persistence.context_schema import register_context_tables
 from aime.infrastructure.persistence.migration_runner import upgrade_database
 
 metadata = MetaData()
@@ -243,6 +244,11 @@ model_configurations_table = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False),
     UniqueConstraint("provider", "model_id", name="uq_model_configuration_ref"),
 )
+
+
+register_context_tables(metadata)
+Table("skill_state", metadata, Column("key", String, primary_key=True),
+      Column("value", Text, nullable=False))
 
 
 class SqliteDatabase:

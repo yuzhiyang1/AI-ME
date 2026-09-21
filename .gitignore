@@ -17,6 +17,7 @@ desktop/node_modules/
 desktop/dist/
 desktop/release/
 output/
+/tmp/
 .playwright-cli/
 
 .idea/

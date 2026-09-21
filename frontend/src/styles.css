@@ -939,163 +939,63 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
   .typing span { animation: none; opacity: 0.55; transform: none; }
 }
+/* Skill 选择器复用项目弹窗与输入区的边框、字色和操作布局。 */
+.skill-picker-trigger { display: inline-flex; align-items: center; gap: 6px; background: transparent; border: 0; color: inherit; padding: 5px; white-space: nowrap; }
+.skill-dialog { max-height: 80vh; overflow-y: auto; padding-bottom: 20px; }
+.skill-dialog > .project-name-field, .skill-dialog > p, .skill-dialog > details { display: block; margin: 16px 24px; }
+.skill-dialog { font-size: 13px; }
+.skill-dialog .project-name-field input { flex: 1; }
+.skill-help { color: var(--text-secondary); line-height: 1.6; }
+.skill-list { padding: 0 24px; }
+.skill-list-toolbar { display: flex; justify-content: space-between; align-items: center; margin: 12px 24px; color: var(--text-secondary); }
+.skill-list-toolbar button { padding: 5px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); cursor: pointer; }
+.skill-list-toolbar button:disabled { opacity: 0.45; cursor: not-allowed; }
+.skill-state { margin-left: 10px; padding: 2px 6px; background: var(--surface-soft); border-radius: 4px; }
+.skill-row { padding: 14px 0; border-bottom: 1px solid var(--border, #e7e5eb); }
+.skill-row p { margin: 6px 0; }
+.skill-row small { color: var(--text-muted, #777); overflow-wrap: anywhere; }
+.skill-actions { display: flex; gap: 16px; align-items: center; margin-top: 10px; }
+.skill-actions label { display: flex; align-items: center; gap: 4px; }
+.skill-actions input { accent-color: var(--brand); }
+.skill-actions button { margin-left: auto; padding: 6px 14px; border: 1px solid var(--brand-line); border-radius: 8px; background: var(--brand); color: white; cursor: pointer; }
+.skill-actions button:disabled { opacity: 0.45; cursor: not-allowed; }
 
-/*
- * ZCode 工作台适配层。
- * 这里重组 AI-ME 现有组件的布局和层级，保留 AI-ME 的 API 与业务状态。
- * 视觉规范参考 ZCode DESIGN.md，许可证和版权归属见 frontend/third-party/。
- */
-.zcode-shell {
-  --sidebar-width: 276px;
-  background: var(--color-background, #f7f7f9);
-}
-
-.zcode-sidebar {
-  width: var(--sidebar-width);
-  border-right: 1px solid var(--color-border, #e7e7ec);
-  background: var(--color-sidebar, #fbfbfc);
-}
-
-.zcode-sidebar-head {
-  padding: 16px 14px 12px;
-}
-
-.zcode-sidebar-head .web-brand {
-  height: 31px;
-  padding: 0 4px 8px;
-}
-
-.zcode-product-badge {
-  margin-left: auto;
-  color: var(--color-foreground-subtlest, #858692);
-  font-size: 8px;
-  font-weight: 650;
-  letter-spacing: .1em;
-}
-
-.zcode-workspace-switcher {
-  display: grid;
-  width: 100%;
-  grid-template-columns: 28px minmax(0, 1fr) 18px;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 10px;
-  padding: 7px 8px;
-  border: 1px solid var(--color-border, #e7e7ec);
-  border-radius: 9px;
-  color: var(--color-foreground-subtle, #626472);
-  background: var(--color-card, #fff);
-  cursor: pointer;
-  text-align: left;
-}
-
-.zcode-workspace-switcher:hover {
-  border-color: var(--color-border-hover, #d7d5e1);
-  background: var(--color-card-selected, #f0edff);
-}
-
-.zcode-workspace-switcher > span:nth-child(2) { min-width: 0; }
-.zcode-workspace-switcher strong,
-.zcode-workspace-switcher small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.zcode-workspace-switcher strong { color: var(--color-foreground, #20212a); font-size: 10.5px; font-weight: 650; }
-.zcode-workspace-switcher small { margin-top: 2px; color: var(--color-foreground-subtlest, #858692); font-size: 9px; }
-.zcode-workspace-switcher > svg { color: var(--color-foreground-subtlest, #858692); }
-.zcode-workspace-icon {
-  display: grid;
-  width: 28px;
-  height: 28px;
-  place-items: center;
-  border-radius: 7px;
-  color: var(--color-brand-strong, #6748dd);
-  background: var(--brand-soft, #f0edff);
-}
-
-.zcode-sidebar .new-session-button {
-  height: 36px;
-  border-color: var(--color-brand, #7c5cff);
-  border-radius: 8px;
-  color: #fff;
-  background: var(--color-brand, #7c5cff);
-  box-shadow: 0 4px 12px rgba(124, 92, 255, .16);
-}
-
-.zcode-sidebar .new-session-button:hover {
-  border-color: var(--color-brand-strong, #6748dd);
-  background: var(--color-brand-strong, #6748dd);
-}
-
-.zcode-sidebar .session-navigation { padding: 0 12px 14px; }
-.zcode-sidebar .sidebar-section-heading { height: 35px; padding: 0 4px; font-size: 9px; letter-spacing: .1em; }
-.zcode-sidebar .project-row,
-.zcode-sidebar .session-row { border-radius: 8px; }
-.zcode-sidebar .session-row.is-active { background: var(--color-card-selected, #f0edff); }
-.zcode-sidebar .project-toggle { height: 36px; }
-.zcode-sidebar .session-row { min-height: 39px; }
-.zcode-sidebar-foot { padding: 12px 14px 14px; }
-
-.zcode-main {
-  background: var(--color-background, #f7f7f9);
-  background-image: radial-gradient(circle at 84% -12%, rgba(124, 92, 255, .07), transparent 28%);
-}
-
-.zcode-topbar {
-  min-height: 58px;
-  padding: 0 24px;
-  border-bottom-color: var(--color-border, #e7e7ec);
-  background: rgba(255, 255, 255, .82);
-}
-
-.zcode-topbar h1 { font-size: 14px; }
-.zcode-topbar p { margin-top: 3px; font-size: 9.5px; }
-.zcode-topbar .session-facts > span { height: 25px; border-radius: 6px; font-size: 9px; }
-.zcode-topbar .session-facts button { width: 25px; height: 25px; border-radius: 6px; }
-.zcode-timeline { background: rgba(255, 255, 255, .26); }
-.zcode-timeline .message-stack { width: min(840px, calc(100% - 80px)); padding-top: 42px; }
-.zcode-composer-zone { padding-bottom: 24px; background: linear-gradient(transparent, var(--color-background, #f7f7f9) 28%); }
-.zcode-composer-zone .composer { border-radius: 14px; }
-
-.zcode-welcome-intro { display: flex; align-items: center; gap: 12px; }
-.zcode-welcome-kicker { color: var(--color-brand-strong, #6748dd); font-size: 9px; font-weight: 750; letter-spacing: .14em; }
-.zcode-welcome-card {
-  width: min(820px, 100%);
-  padding: 58px 0 72px;
-  border: 0;
-  background: transparent;
-  box-shadow: none;
-}
-.zcode-welcome-card .new-session-mark {
-  width: 46px;
-  height: 46px;
-  margin: 0;
-  border-radius: 13px;
-  background: var(--color-card-selected, #f0edff);
-  box-shadow: none;
-}
-.zcode-welcome-card .new-session-heading { margin-top: 22px; }
-.zcode-welcome-card .new-session-heading > span { display: none; }
-.zcode-welcome-card .new-session-heading h1 { margin-top: 0; font-size: 30px; letter-spacing: -.045em; }
-.zcode-welcome-card .new-session-heading p { max-width: 560px; font-size: 12px; }
-.zcode-welcome-card .session-form {
-  display: grid;
-  grid-template-columns: minmax(0, 1.35fr) minmax(300px, .65fr);
-  align-items: end;
-  gap: 16px;
-  margin-top: 32px;
-  padding: 18px;
-  border: 1px solid var(--color-border, #e7e7ec);
-  border-radius: 12px;
-  background: var(--color-card, #fff);
-  box-shadow: 0 12px 30px rgba(32, 33, 42, .05);
-}
-.zcode-welcome-card .session-form > label:first-child { grid-column: 1 / -1; }
-.zcode-welcome-card .model-guidance,
-.zcode-welcome-card > .inline-error,
-.zcode-welcome-card .create-session-button { grid-column: 1 / -1; }
-.zcode-welcome-card .model-guidance { margin: 0; }
-.zcode-welcome-card .create-session-button { margin-top: 0; }
-
-@media (max-width: 850px) {
-  .zcode-welcome-card { padding-inline: 24px; }
-  .zcode-welcome-card .session-form { grid-template-columns: 1fr; }
-  .zcode-welcome-card .session-form > label:first-child { grid-column: auto; }
-}
+/* 技能页沿用工作台字体和侧栏，内容区采用留白充足的双列目录。 */
+.settings-row.is-selected { color: var(--brand-strong); background: var(--brand-soft); }
+.skills-page { grid-row: 1 / -1; min-height: 0; height: 100%; overflow-y: auto; background: var(--surface); }
+.skills-page-inner { width: min(780px, 100%); margin: 0 auto; padding: 26px 28px 70px; }
+.skills-page-navigation { display: flex; justify-content: space-between; margin-bottom: 28px; }
+.skills-page button { cursor: pointer; }
+.skills-page-navigation button, .skills-detail header button { display: inline-flex; align-items: center; gap: 6px; border: 0; background: transparent; color: var(--text-muted); font-size: 12px; }
+.skills-page h1 { margin: 0; font-size: 28px; font-weight: 620; letter-spacing: -1px; }
+.skills-page header > p { margin: 10px 0 24px; color: var(--text-secondary); font-size: 14px; }
+.skills-search { display: flex; align-items: center; gap: 9px; border: 1px solid var(--line-strong); border-radius: 24px; padding: 8px 13px; color: var(--text-muted); }
+.skills-search input { width: 100%; border: 0; outline: none; background: transparent; font-size: 13px; }
+.skills-search:focus-within { border-color: var(--brand); }
+.skills-page h2 { margin: 30px 0 14px; padding-bottom: 12px; border-bottom: 1px solid var(--line); font-size: 15px; font-weight: 600; }
+.skills-page h2 small { margin-left: 8px; color: var(--text-muted); font-weight: 400; font-size: 12px; }
+.skills-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 22px; row-gap: 8px; }
+.skills-tile { display: flex; align-items: center; text-align: left; gap: 12px; min-width: 0; padding: 12px 8px; border: 0; border-radius: 10px; background: transparent; }
+.skills-tile:hover, .skills-tile.is-selected { background: var(--surface-soft); }
+.skills-icon { display: grid; place-items: center; flex: 0 0 40px; height: 40px; border-radius: 10px; color: var(--brand); background: #f5f4f8; }
+.skills-tile-text { min-width: 0; flex: 1; }
+.skills-tile-text strong, .skills-tile-text > span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.skills-tile-text strong { font-size: 13px; font-weight: 560; }
+.skills-tile-text > span { color: var(--text-secondary); font-size: 12px; margin-top: 7px; }
+.skills-check, .skills-tile > small { flex-shrink: 0; color: #b3b6bd; }
+.skills-more { margin: 18px 8px 0; padding: 0; border: 0; background: transparent; color: var(--text-muted); font-size: 12px; }
+.skills-sources { margin-top: 38px; }
+.skills-tabs { display: flex; gap: 9px; flex-wrap: wrap; margin-bottom: 22px; }
+.skills-tabs button { border: 0; border-radius: 9px; padding: 6px 10px; color: var(--text-muted); background: transparent; font-size: 12px; }
+.skills-tabs button[aria-selected="true"] { background: #f1f1f3; color: var(--text); }
+.skills-empty, .skills-diagnostics { color: var(--text-muted); font-size: 13px; line-height: 1.8; margin-top: 24px; }
+.skills-detail { margin-top: 28px; padding: 18px; border: 1px solid var(--line); border-radius: 12px; font-size: 13px; }
+.skills-detail header { display: flex; align-items: center; justify-content: space-between; }
+.skills-detail h2 { border: 0; padding: 0; margin: 0; }
+.skills-detail > small { color: var(--text-muted); }
+.skills-detail-actions { display: flex; align-items: center; gap: 16px; margin-top: 20px; }
+.skills-detail-actions input { accent-color: var(--brand); }
+.skills-detail-actions button { margin-left: auto; background: var(--brand); color: white; border: 0; border-radius: 8px; padding: 8px 12px; }
+.skills-page button:disabled { opacity: .45; cursor: not-allowed; }
+.skills-error { color: var(--danger); font-size: 13px; }
+@media (max-width: 780px) { .skills-grid { grid-template-columns: 1fr; } }

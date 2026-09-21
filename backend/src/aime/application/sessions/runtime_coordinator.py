@@ -132,6 +132,20 @@ class RuntimeCoordinator:
                         {"text": event.content},
                     )
                     response_parts.append(event.content)
+                elif event.type == "response_restored":
+                    response_parts = [event.content]
+                    await self._store.append_run_event(
+                        execution,
+                        event.type,
+                        {"text": event.content},
+                    )
+                elif event.type == "model_attempt_discarded":
+                    # 已发布增量保留在事件日志中，最终回答移除失败尝试的尾部。
+                    value = (event.payload or {}).get("discardedChars", 0)
+                    discarded = value if isinstance(value, int) and value > 0 else 0
+                    joined = "".join(response_parts)
+                    response_parts = [joined[:-discarded]] if discarded else response_parts
+                    await self._store.append_run_event(execution, event.type, event.payload or {})
                 elif event.type == "failed":
                     await self._store.fail_run(execution, event.content)
                     return

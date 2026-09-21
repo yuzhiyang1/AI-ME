@@ -38,8 +38,9 @@ export function SessionUsageBar({ usage, fallbackContextWindow }: SessionUsageBa
       <div className="context-usage">
         <SessionContextRing usage={contextUsage} label="上下文占用" valueText={progressText} />
         <div className="context-usage-copy">
-          <span>上下文</span>
-          <strong>{percentage === null ? "等待首次模型用量" : `已使用 ${percentage}%`}</strong>
+          <span>上下文{usage?.windowNumber ? ` · 窗口 ${usage.windowNumber}` : ""}</span>
+          <strong>{percentage === null ? "等待首次模型用量"
+            : `${usage?.contextEstimated ? "估算" : "已使用"} ${percentage}%`}</strong>
         </div>
       </div>
       <div className="token-totals" aria-label="累计 Token">

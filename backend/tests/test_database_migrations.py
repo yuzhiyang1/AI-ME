@@ -32,7 +32,7 @@ async def test_fresh_database_is_upgraded_to_a_versioned_schema(tmp_path: Path) 
             ).fetchall()
         }
 
-    assert version == ("0005_projects_and_session_roots",)
+    assert version == ("0007_skills",)
     assert {
         "agent_sessions",
         "agent_turns",
@@ -59,7 +59,17 @@ async def test_unversioned_preview_database_is_adopted_only_after_schema_validat
     database_path = state_dir / "ai-me.db"
     preview_engine = create_async_engine(f"sqlite+aiosqlite:///{database_path.as_posix()}")
     async with preview_engine.begin() as connection:
-        await connection.run_sync(metadata.create_all)
+        # 模拟当时尚无 context 表的预览库，不能用今天全部 metadata 代替历史 schema。
+        preview_tables = [
+            table
+            for name, table in metadata.tables.items()
+            if name
+            not in {
+                "context_windows", "context_checkpoints", "context_runs", "history_items",
+                "skill_state",
+            }
+        ]
+        await connection.run_sync(lambda conn: metadata.create_all(conn, tables=preview_tables))
     await preview_engine.dispose()
     with sqlite3.connect(database_path) as connection:
         connection.execute("DROP INDEX uq_active_turn_per_session")
@@ -75,7 +85,7 @@ async def test_unversioned_preview_database_is_adopted_only_after_schema_validat
             "AND name = 'uq_active_turn_per_session'"
         ).fetchone()
 
-    assert version == ("0005_projects_and_session_roots",)
+    assert version == ("0007_skills",)
     assert active_index == ("uq_active_turn_per_session",)
 
 
@@ -121,7 +131,7 @@ async def test_existing_0001_database_is_upgraded_before_creating_a_queued_run(
             if row[1] == "started_at"
         )
 
-    assert version == ("0005_projects_and_session_roots",)
+    assert version == ("0007_skills",)
     assert upgraded_started_at[3] == 0
     assert execution.run.status.value == "created"
     assert execution.run.started_at is None
