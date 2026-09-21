@@ -4,6 +4,7 @@ import asyncio
 import os
 import re
 import subprocess
+import sys
 import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -333,9 +334,13 @@ class PowerShellTool:
         timeout = _optional_positive_int(arguments, "timeout_seconds", 30)
         if timeout is None or timeout > 120:
             raise ToolInputError("timeout_seconds 必须在 1 到 120 之间")
+        creationflags = 0
+        if sys.platform == "win32":
+            # 显式分支让运行时与跨平台类型检查都只在 Windows 访问专用常量。
+            creationflags = subprocess.CREATE_NO_WINDOW
         process = await asyncio.create_subprocess_exec(
             # Windows 保留内置解释器；Linux/macOS 使用 PowerShell 7 的命令名。
-            "powershell.exe" if os.name == "nt" else "pwsh",
+            "powershell.exe" if sys.platform == "win32" else "pwsh",
             "-NoLogo",
             "-NoProfile",
             "-NonInteractive",
@@ -344,7 +349,7 @@ class PowerShellTool:
             cwd=context.workspace_path,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            creationflags=creationflags,
         )
         assert process.stdout is not None and process.stderr is not None
 

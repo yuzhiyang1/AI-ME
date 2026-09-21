@@ -45,13 +45,15 @@ def test_read_only_session_only_exposes_read_tools() -> None:
     assert writable == read_only | {"write_file", "edit_file", "run_powershell"}
 
 
-@pytest.mark.parametrize("platform, executable", [("nt", "powershell.exe"), ("posix", "pwsh")])
+@pytest.mark.parametrize(
+    "platform, executable", [("win32", "powershell.exe"), ("linux", "pwsh"), ("darwin", "pwsh")]
+)
 async def test_powershell_uses_platform_executable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform: str, executable: str
 ) -> None:
     """跨平台只切换解释器，保留非交互参数、工作区及 Windows 隐藏窗口设置。"""
     launch = AsyncMock(side_effect=FileNotFoundError("test launcher"))
-    monkeypatch.setattr(builtin, "os", SimpleNamespace(name=platform))
+    monkeypatch.setattr(builtin, "sys", SimpleNamespace(platform=platform))
     monkeypatch.setattr(builtin.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
     monkeypatch.setattr(builtin.asyncio, "create_subprocess_exec", launch)
 
@@ -65,7 +67,7 @@ async def test_powershell_uses_platform_executable(
         executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "Write-Output approved"
     )
     assert launch.call_args.kwargs["cwd"] == str(tmp_path)
-    assert launch.call_args.kwargs["creationflags"] == (0x08000000 if platform == "nt" else 0)
+    assert launch.call_args.kwargs["creationflags"] == (0x08000000 if platform == "win32" else 0)
 
 
 async def test_file_tools_reject_parent_and_absolute_path_escape(tmp_path: Path) -> None:
