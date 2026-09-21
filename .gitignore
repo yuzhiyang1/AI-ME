@@ -6,6 +6,7 @@ __pycache__/
 .ruff_cache/
 .coverage
 htmlcov/
+backend/.tmp/
 .env
 .DS_Store
 
@@ -16,6 +17,7 @@ desktop/node_modules/
 desktop/dist/
 desktop/release/
 output/
+/tmp/
 .playwright-cli/
 
 .idea/

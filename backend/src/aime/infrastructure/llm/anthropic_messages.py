@@ -1,10 +1,12 @@
 """Anthropic Messages 协议适配器。"""
 
+import json
 from collections.abc import AsyncIterator
 from typing import Any, Protocol
 
 from aime.application.ports.model_gateway import (
     ConversationMessage,
+    LlmAssistantToolCallMessage,
     LlmFinishReason,
     LlmStreamCompleted,
     LlmStreamEvent,
@@ -13,6 +15,8 @@ from aime.application.ports.model_gateway import (
     LlmTextDelta,
     LlmThinkingDelta,
     LlmToolCallDelta,
+    LlmToolDefinition,
+    LlmToolResultMessage,
     LlmUsage,
 )
 from aime.infrastructure.llm.errors import classify_provider_error, normalize_finish_reason
@@ -34,22 +38,31 @@ class AnthropicMessagesApi:
     async def stream(
         self,
         model_id: str,
-        messages: list[ConversationMessage],
+        messages: list[ConversationMessage | LlmAssistantToolCallMessage | LlmToolResultMessage],
         system: str | None,
         max_tokens: int | None,
         temperature: float | None,
+        tools: list[LlmToolDefinition] | None = None,
+        parallel_tool_calls: bool = True,
     ) -> AsyncIterator[LlmStreamEvent]:
         kwargs: dict[str, Any] = {
             "model": model_id,
-            "messages": [
-                {"role": message.role.value, "content": message.content} for message in messages
-            ],
+            "messages": _anthropic_messages(messages),
             "max_tokens": max_tokens if max_tokens is not None else 4096,
         }
         if system is not None:
             kwargs["system"] = system
         if temperature is not None:
             kwargs["temperature"] = temperature
+        if tools:
+            kwargs["tools"] = [
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": tool.input_schema,
+                }
+                for tool in tools
+            ]
 
         yield LlmStreamStarted()
         finish_reason = LlmFinishReason.STOP
@@ -97,6 +110,55 @@ class AnthropicMessagesApi:
             else None
         )
         yield LlmStreamCompleted(finish_reason=finish_reason, usage=usage)
+
+
+def _anthropic_messages(
+    messages: list[ConversationMessage | LlmAssistantToolCallMessage | LlmToolResultMessage],
+) -> list[dict[str, Any]]:
+    """把统一消息翻译为 Messages API，并合并连续的工具结果。"""
+    payload: list[dict[str, Any]] = []
+    for message in messages:
+        if isinstance(message, ConversationMessage):
+            payload.append({"role": message.role.value, "content": message.content})
+        elif isinstance(message, LlmAssistantToolCallMessage):
+            content: list[dict[str, Any]] = []
+            if message.content:
+                content.append({"type": "text", "text": message.content})
+            content.extend(
+                {
+                    "type": "tool_use",
+                    "id": call.call_id,
+                    "name": call.name,
+                    "input": _decode_arguments(call.arguments_json),
+                }
+                for call in message.tool_calls
+            )
+            payload.append({"role": "assistant", "content": content})
+        else:
+            result = {
+                "type": "tool_result",
+                "tool_use_id": message.call_id,
+                "content": message.content,
+                "is_error": message.is_error,
+            }
+            if (
+                payload
+                and payload[-1]["role"] == "user"
+                and isinstance(payload[-1]["content"], list)
+            ):
+                payload[-1]["content"].append(result)
+            else:
+                payload.append({"role": "user", "content": [result]})
+    return payload
+
+
+def _decode_arguments(arguments_json: str) -> dict[str, object]:
+    """无效参数仍交由 Runtime 处理，协议回放阶段使用空对象兜底。"""
+    try:
+        decoded = json.loads(arguments_json)
+    except json.JSONDecodeError:
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
 
 
 def build_anthropic_messages_api(api_key: str, base_url: str | None = None) -> AnthropicMessagesApi:

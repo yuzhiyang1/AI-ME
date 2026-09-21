@@ -4,13 +4,23 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Protocol
 
+from aime.application.ports.model_gateway import ConversationMessage
+from aime.domain.sessions.value_objects import PermissionProfile
+
 
 @dataclass(frozen=True, slots=True)
 class AgentRunRequest:
-    """提交给 Agent Runtime 的最小运行请求。"""
+    """提交给 Agent Runtime 的一次已持久化执行请求。"""
 
     instruction: str
     session_id: str
+    turn_id: str
+    run_id: str
+    model_ref: str
+    messages: tuple[ConversationMessage, ...]
+    workspace_path: str = ""
+    permission_profile: PermissionProfile = PermissionProfile.READ_ONLY
+    workspace_roots: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,7 +28,8 @@ class AgentEvent:
     """与具体 Agent 框架无关的运行事件。"""
 
     type: str
-    content: str
+    content: str = ""
+    payload: dict[str, object] | None = None
 
 
 class AgentRuntime(Protocol):

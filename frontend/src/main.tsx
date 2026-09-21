@@ -5,6 +5,8 @@ import { createRoot } from "react-dom/client";
 import "@fontsource-variable/inter";
 import App from "./App";
 import "./styles.css";
+// ZCode 工作台设计令牌：只负责视觉适配，不引入 ZCode 的服务端协议或运行时。
+import "./zcode-design-tokens.css";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

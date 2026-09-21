@@ -5,6 +5,7 @@ from typing import Any, Protocol
 
 from aime.application.ports.model_gateway import (
     ConversationMessage,
+    LlmAssistantToolCallMessage,
     LlmFinishReason,
     LlmStreamCompleted,
     LlmStreamEvent,
@@ -13,6 +14,8 @@ from aime.application.ports.model_gateway import (
     LlmTextDelta,
     LlmThinkingDelta,
     LlmToolCallDelta,
+    LlmToolDefinition,
+    LlmToolResultMessage,
     LlmUsage,
 )
 from aime.infrastructure.llm.errors import classify_provider_error, normalize_finish_reason
@@ -34,22 +37,41 @@ class OpenAICompletionsApi:
     async def stream(
         self,
         model_id: str,
-        messages: list[ConversationMessage],
+        messages: list[ConversationMessage | LlmAssistantToolCallMessage | LlmToolResultMessage],
         system: str | None,
         max_tokens: int | None,
         temperature: float | None,
+        tools: list[LlmToolDefinition] | None = None,
+        parallel_tool_calls: bool = True,
     ) -> AsyncIterator[LlmStreamEvent]:
-        payload_messages: list[dict[str, str]] = []
+        payload_messages: list[dict[str, Any]] = []
         if system is not None:
             payload_messages.append({"role": "system", "content": system})
-        payload_messages.extend(
-            {"role": message.role.value, "content": message.content} for message in messages
-        )
-        kwargs: dict[str, Any] = {"model": model_id, "messages": payload_messages, "stream": True}
+        payload_messages.extend(_openai_message(message) for message in messages)
+        kwargs: dict[str, Any] = {
+            "model": model_id,
+            "messages": payload_messages,
+            "stream": True,
+            # OpenAI 兼容流默认不会返回 usage，显式请求终止分片中的计费数据。
+            "stream_options": {"include_usage": True},
+        }
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
         if temperature is not None:
             kwargs["temperature"] = temperature
+        if tools:
+            kwargs["tools"] = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.input_schema,
+                    },
+                }
+                for tool in tools
+            ]
+            kwargs["parallel_tool_calls"] = parallel_tool_calls
 
         yield LlmStreamStarted()
         finish_reason = LlmFinishReason.STOP
@@ -85,6 +107,35 @@ class OpenAICompletionsApi:
             yield LlmStreamFailed(classify_provider_error(exc))
             return
         yield LlmStreamCompleted(finish_reason=finish_reason, usage=usage)
+
+
+def _openai_message(
+    message: ConversationMessage | LlmAssistantToolCallMessage | LlmToolResultMessage,
+) -> dict[str, Any]:
+    """把统一消息翻译为 Chat Completions 消息结构。"""
+    if isinstance(message, ConversationMessage):
+        return {"role": message.role.value, "content": message.content}
+    if isinstance(message, LlmAssistantToolCallMessage):
+        return {
+            "role": "assistant",
+            "content": message.content or None,
+            "tool_calls": [
+                {
+                    "id": call.call_id,
+                    "type": "function",
+                    "function": {
+                        "name": call.name,
+                        "arguments": call.arguments_json,
+                    },
+                }
+                for call in message.tool_calls
+            ],
+        }
+    return {
+        "role": "tool",
+        "tool_call_id": message.call_id,
+        "content": message.content,
+    }
 
 
 def build_openai_completions_api(api_key: str, base_url: str | None = None) -> OpenAICompletionsApi:

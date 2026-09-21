@@ -30,13 +30,20 @@ presentation -> application -> domain <── infrastructure
 
 ## 当前纵向切片
 
-仓库只提供一个最小的 `WorkItem` 示例，用来证明完整路径可以运行：
+仓库保留一个最小的 `WorkItem` 示例，用来证明基础分层路径：
 
 ```text
 HTTP -> CreateWorkItem -> WorkItem -> WorkItemRepository
 ```
 
-它不是最终产品功能集合。新增 Agent Run、SOP、审批、证据等能力时，继续按同样方式完成纵向切片。
+正式产品的第一条纵向切片已经扩展为：
+
+```text
+HTTP / SSE -> Session 用例 -> AgentRuntime 端口
+           -> SQLite Session / Turn / AgentRun / RuntimeEvent / Item 账本
+```
+
+它支持固定工作区的持久会话、多轮文本对话、事件重放、主动中断和异常退出恢复。详细契约见 [Agent会话与Runtime设计.md](Agent会话与Runtime设计.md)。工具、Skill、MCP、审批和证据继续沿用同样的内外层边界扩展。
 
 ## 模型适配层切片
 
@@ -44,7 +51,7 @@ HTTP -> CreateWorkItem -> WorkItem -> WorkItemRepository
 
 ## Agent Runtime 边界
 
-应用层只认识 `AgentRuntime` 端口。后续由 AI-ME 自研 Python Runtime Kernel 实现模型调用、工具执行、审批与运行记录，领域层无需感知具体实现。
+应用层只认识 `AgentRuntime` 端口。当前文本 Runtime 已实现模型调用、流式事件、终态收敛与中断；后续由 AI-ME 自研 Python Runtime Kernel 继续加入工具执行、审批与运行证据，领域层无需感知具体模型 SDK 或 Agent 框架。
 
 ## 暂不引入
 

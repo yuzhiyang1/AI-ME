@@ -9,7 +9,10 @@
     "build:shell": "tsc -p tsconfig.json && node scripts/verify-shell-build.mjs",
     "build": "npm --prefix ../frontend run build && npm run build:shell",
     "start": "concurrently --kill-others --names API,DESKTOP --prefix-colors yellow,cyan \"uv run --directory ../backend uvicorn aime.main:app --host 127.0.0.1 --port 8000\" \"wait-on http-get://127.0.0.1:8000/api/health && electron .\"",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test:chrome": "node scripts/verify-window-chrome.mjs",
+    "test:local-models": "node scripts/verify-local-models.mjs",
+    "test:project-skills": "node scripts/verify-project-skills.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.3.0",
