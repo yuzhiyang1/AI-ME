@@ -22,6 +22,30 @@ from aime.composition import build_container
 from aime.main import create_app
 
 
+def _wait_for_finished_items(client: TestClient, session_id: str) -> list[dict[str, object]]:
+    """给真实 PowerShell 冷启动留出余量；必须在关闭应用前读到持久化结果。"""
+    deadline = time.monotonic() + 15
+    items: list[dict[str, object]] = []
+    while time.monotonic() < deadline:
+        items = client.get(f"/api/sessions/{session_id}/items").json()
+        if len(items) == 2:
+            return items
+        time.sleep(0.05)
+    raise AssertionError(f"15 秒内没有收到本轮终态消息，实际消息：{items}")
+
+
+def _wait_for_idle(client: TestClient, session_id: str, *, no_approval: bool = False) -> None:
+    """上一轮真正结束后才能开始下一轮，并持续验证复用授权没有再次请求审批。"""
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        if no_approval:
+            assert client.get(f"/api/sessions/{session_id}/approvals").json() == []
+        if client.get(f"/api/sessions/{session_id}").json()["activity"] == "idle":
+            return
+        time.sleep(0.05)
+    raise AssertionError("15 秒内会话未回到 idle 状态")
+
+
 class _PowerShellGateway:
     """请求一次需要审批的 PowerShell，再返回最终回答。"""
 
@@ -137,12 +161,7 @@ def test_user_can_approve_a_shell_call_once_and_runtime_continues(tmp_path: Path
         )
         assert decided.status_code == 200
 
-        items: list[dict[str, object]] = []
-        for _ in range(300):
-            items = client.get(f"/api/sessions/{session_id}/items").json()
-            if len(items) == 2:
-                break
-            time.sleep(0.01)
+        items = _wait_for_finished_items(client, session_id)
 
     assert (workspace / "marker.txt").read_text(encoding="utf-8") == "approved"
     assert len(gateway.requests) == 2
@@ -190,11 +209,7 @@ def test_pending_approval_survives_restart_without_regenerating_the_tool_call(
             f"/api/sessions/{session_id}/approvals/{approval_id}/decision",
             json={"decision": "approve_once"},
         )
-        for _ in range(300):
-            items = reopened.get(f"/api/sessions/{session_id}/items").json()
-            if len(items) == 2:
-                break
-            time.sleep(0.01)
+        items = _wait_for_finished_items(reopened, session_id)
 
     assert len(gateway.requests) == 2
     assert (workspace / "marker.txt").read_text(encoding="utf-8") == "approved"
@@ -231,11 +246,7 @@ def test_rejected_shell_call_has_no_side_effect_and_model_can_finish(tmp_path: P
             f"/api/sessions/{session_id}/approvals/{approvals[0]['id']}/decision",
             json={"decision": "reject"},
         )
-        for _ in range(300):
-            items = client.get(f"/api/sessions/{session_id}/items").json()
-            if len(items) == 2:
-                break
-            time.sleep(0.01)
+        items = _wait_for_finished_items(client, session_id)
 
     assert not (workspace / "marker.txt").exists()
     assert items[-1]["content"] == {"text": "已按你的决定取消命令"}
@@ -271,20 +282,13 @@ def test_approve_session_skips_the_same_tool_approval_for_later_turns(tmp_path: 
             f"/api/sessions/{session_id}/approvals/{approvals[0]['id']}/decision",
             json={"decision": "approve_session"},
         )
-        for _ in range(300):
-            if client.get(f"/api/sessions/{session_id}").json()["activity"] == "idle":
-                break
-            time.sleep(0.01)
+        _wait_for_idle(client, session_id)
 
         client.post(
             f"/api/sessions/{session_id}/turns",
             json={"input": "第二条命令", "clientRequestId": "approval-session-2"},
         )
-        for _ in range(300):
-            if client.get(f"/api/sessions/{session_id}").json()["activity"] == "idle":
-                break
-            assert client.get(f"/api/sessions/{session_id}/approvals").json() == []
-            time.sleep(0.01)
+        _wait_for_idle(client, session_id, no_approval=True)
 
     assert (workspace / "marker-1.txt").read_text(encoding="utf-8") == "1"
     assert (workspace / "marker-2.txt").read_text(encoding="utf-8") == "2"
