@@ -162,7 +162,7 @@ class ModelAgentRuntime(AgentRuntime):
                             call_id=executed.call.call_id,
                             name=executed.call.name,
                             content=json.dumps(
-                                executed.result.output,
+                                executed.result.model_output,
                                 ensure_ascii=False,
                                 separators=(",", ":"),
                             ),
@@ -257,7 +257,7 @@ class ModelAgentRuntime(AgentRuntime):
                         yield runtime_event
                     if executed is not None:
                         result_content = json.dumps(
-                            executed.result.output,
+                            executed.result.model_output,
                             ensure_ascii=False,
                             separators=(",", ":"),
                         )

@@ -46,10 +46,15 @@ class ToolExecutionContext:
 
 @dataclass(frozen=True, slots=True)
 class ToolExecutionResult:
-    """工具返回给模型的 JSON 兼容结果。"""
+    """工具账本保存完整结果，模型只消费不含展示快照的精简结果。"""
 
     output: dict[str, object]
     is_error: bool = False
+
+    @property
+    def model_output(self) -> dict[str, object]:
+        """file_change 是保留的界面审计字段，不重复占用模型上下文。"""
+        return {key: value for key, value in self.output.items() if key != "file_change"}
 
 
 class AgentTool(Protocol):

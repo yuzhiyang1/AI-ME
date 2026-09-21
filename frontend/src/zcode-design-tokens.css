@@ -1,0 +1,52 @@
+/*
+ * ZCode design adaptation for AI-ME.
+ *
+ * Copyright 2026 Z.AI Co., Ltd.
+ * Licensed under the Apache License, Version 2.0.
+ * The original project and license notices are recorded in
+ * frontend/third-party-notices.md. This file is an AI-ME adaptation.
+ */
+
+:root {
+  /* ZCode 的语义色板：品牌色只用于主操作、选中态和重要强调。 */
+  --color-brand: #7c5cff;
+  --color-brand-strong: #6748dd;
+  --color-background: #f7f7f9;
+  --color-background-alt: #f1f1f5;
+  --color-sidebar: #fbfbfc;
+  --color-panel: #ffffff;
+  --color-card: #ffffff;
+  --color-card-selected: #f0edff;
+  --color-popover: #ffffff;
+  --color-input: #ffffff;
+  --color-input-focused: #fcfbff;
+  --color-foreground: #20212a;
+  --color-foreground-subtle: #626472;
+  --color-foreground-subtlest: #858692;
+  --color-border: #e7e7ec;
+  --color-border-hover: #d7d5e1;
+  --color-success: #268b68;
+  --color-warning: #b27725;
+  --color-destructive: #c94e4e;
+  --ui-font-size: 14px;
+}
+
+/* 让已有 AI-ME 组件逐步使用 ZCode 的语义变量，避免一次性重写业务组件。 */
+:root {
+  --brand: var(--color-brand);
+  --brand-strong: var(--color-brand-strong);
+  --brand-soft: #f0edff;
+  --brand-line: #ded6fa;
+  --surface: var(--color-panel);
+  --surface-soft: var(--color-background);
+  --line: var(--color-border);
+  --line-strong: #d9d9e1;
+  --text: var(--color-foreground);
+  --text-secondary: var(--color-foreground-subtle);
+  --text-muted: var(--color-foreground-subtlest);
+  --danger: var(--color-destructive);
+}
+
+.zcode-ui-label {
+  font-size: var(--ui-font-size);
+}

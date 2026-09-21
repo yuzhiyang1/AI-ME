@@ -1,6 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { bindWindowChrome, registerWindowChrome } from "./window-chrome.js";
 
 const currentDirectory = path.dirname(fileURLToPath(import.meta.url));
 const developmentRendererUrl = process.env.AI_ME_RENDERER_URL;
@@ -20,14 +21,19 @@ async function createMainWindow(): Promise<void> {
     height: 900,
     minWidth: 1100,
     minHeight: 720,
-    backgroundColor: "#F6F6F8",
+    backgroundColor: process.platform === "win32" ? "#141414" : "#F6F6F8",
     autoHideMenuBar: true,
-    titleBarStyle: "hidden",
-    titleBarOverlay: {
-      color: "#FBFBFC",
-      symbolColor: "#5F6170",
-      height: 40,
-    },
+    // Windows 使用 ZCode 原版 renderer 窗控，不能叠加旧的原生浅色按钮。
+    ...(process.platform === "win32"
+      ? { frame: false }
+      : {
+          titleBarStyle: "hidden" as const,
+          titleBarOverlay: {
+            color: "#FBFBFC",
+            symbolColor: "#5F6170",
+            height: 40,
+          },
+        }),
     show: false,
     webPreferences: {
       // 渲染层只通过预加载脚本访问受控的桌面能力，避免直接暴露 Node.js。
@@ -37,6 +43,8 @@ async function createMainWindow(): Promise<void> {
       sandbox: true,
     },
   });
+
+  bindWindowChrome(mainWindow);
 
   mainWindow.once("ready-to-show", () => mainWindow.show());
 
@@ -64,6 +72,7 @@ async function createMainWindow(): Promise<void> {
 }
 
 app.whenReady().then(async () => {
+  registerWindowChrome(isAllowedInAppNavigation);
   ipcMain.handle("workspace:select", async () => {
     const result = await dialog.showOpenDialog({
       title: "选择 AI-ME 会话工作区",

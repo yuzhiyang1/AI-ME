@@ -78,4 +78,6 @@ Turn 创建接口先在一个事务里写入排队中的 Turn、AgentRun、用�
 
 `ModelAgentRuntime` 已经在同一个端口后实现 Agent Loop、OpenAI/Anthropic 工具协议、内置文件与 PowerShell 工具、并行/独占调度、多根工作区边界、T1/T2 工具账本、持久审批和崩溃恢复。文件工具以会话快照中的全部 `workspace_roots` 为授权边界，并拒绝越界绝对路径和符号链接逃逸。详细语义见 [Agent Loop 与工具执行设计](./AgentLoop与工具执行设计.md)。
 
-下一期继续增加 Skill/MCP 能力快照、context 压缩、模型重试预算、隔离执行和 Eval 数据集。这些能力复用现有 Session、Turn、Run、RuntimeEvent、ToolInvocation 与 ApprovalRequest，不需要推翻客户端会话协议。
+上下文管理已采用 Token Budget 换窗、本地 Checkpoint、历史检索与 Artifact 方案，设计已确认、代码待实现，详见 [上下文管理与 Token Budget 设计](./上下文管理与TokenBudget设计.md)。换窗复用现有 Session、Turn 和 Run，不重置审批或执行预算。
+
+下一期继续增加上述上下文管理、Skill/MCP 能力快照、模型重试预算、隔离执行和 Eval 数据集。这些能力复用现有 Session、Turn、Run、RuntimeEvent、ToolInvocation 与 ApprovalRequest，不需要推翻客户端会话协议。
