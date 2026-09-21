@@ -246,6 +246,21 @@ model_configurations_table = Table(
 )
 
 
+browser_configuration_table = Table(
+    "browser_configuration", metadata,
+    Column("id", Integer, primary_key=True),
+    Column("model", String(200), nullable=False),
+    Column("credential_id", String(80)),
+)
+
+browser_runs_table = Table(
+    "browser_runs", metadata,
+    Column("id", String(36), primary_key=True),
+    Column("session_id", String(36), nullable=False, index=True),
+    Column("payload", Text, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+
 register_context_tables(metadata)
 Table("skill_state", metadata, Column("key", String, primary_key=True),
       Column("value", Text, nullable=False))

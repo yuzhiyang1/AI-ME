@@ -1,5 +1,7 @@
 /* eslint-disable max-lines */
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { HostBrowserPaneContext } from "@/lib/HostBrowserPaneContext.js";
+import { openHostBrowserSidePane } from "@/lib/hostBrowserSidePane.js";
 import { createUuid } from "@zcode/shared";
 import type { EmbeddedBrowserOpenUrlRequest, IPlatformService } from "@zcode/shared";
 import type { CodeViewerSource } from "@/lib/codeViewer.js";
@@ -172,6 +174,7 @@ export function useAppPanels(options: {
     platform,
   } = options;
   const supportsEmbeddedBrowser = explicitSupportsEmbeddedBrowser ?? Boolean(isDesktop);
+  const hostBrowserPane = useContext(HostBrowserPaneContext);
   const activeWorkspaceKey = workspaceIdentity?.trim() || workspaceAbsPath;
   const { zcodeAgentService, zcodeSessionService } = useServices();
   const isOfficeMode = useIsOfficeMode();
@@ -396,6 +399,18 @@ export function useAppPanels(options: {
         return;
       }
 
+      if (hostBrowserPane) {
+        // 外部迟到链接不能抢占当前会话；每会话单页不创建多个 native viewport。
+        if (!isCurrentOwner) return;
+        revealSidePaneForCurrentOwner();
+        commitOpenedSidePaneState((current) => {
+          const next = openHostBrowserSidePane(current, sourceSessionId, sourceWorkspaceKey, payload.url);
+          setBrowserNavigationRequest({ id: createUuid(), targetTabId: next.activeTabId, url: payload.url });
+          return next;
+        });
+        return;
+      }
+
       // 交互说明：消息区只负责抛出"打开这个 URL"的意图，
       // 真正的 webview 导航、地址校验和面板显隐仍统一收口在浏览器面板一侧处理。
       const isShareUrl = /^https?:\/\/[^/]+\/(?:cn\/)?share\/[^/]+$/u.test(payload.url);
@@ -438,6 +453,7 @@ export function useAppPanels(options: {
       );
     },
     [
+      hostBrowserPane,
       commitOpenedSidePaneState,
       revealSidePaneForCurrentOwner,
       supportsEmbeddedBrowser,
@@ -492,7 +508,9 @@ export function useAppPanels(options: {
 
     revealSidePaneForCurrentOwner();
     commitOpenedSidePaneState((current) => {
-      const next = openBrowserSidePane(current);
+      const next = hostBrowserPane
+        ? openHostBrowserSidePane(current, sidePaneOwnerIdRef.current, activeWorkspaceKeyRef.current)
+        : openBrowserSidePane(current);
       const activeTab = getActiveSidePaneTab(next);
       logger.info(
         `[App] 新建右侧浏览器 tab=${activeTab?.id ?? "none"} workspace=${workspaceAbsPath} tabs=${next.tabs.length}`,
@@ -500,6 +518,7 @@ export function useAppPanels(options: {
       return next;
     });
   }, [
+    hostBrowserPane,
     commitOpenedSidePaneState,
     revealSidePaneForCurrentOwner,
     supportsEmbeddedBrowser,
@@ -1350,7 +1369,8 @@ export function useAppPanels(options: {
   const closeBrowserTabsWithAuthority = useCallback(
     async (tabs: readonly WorkspaceSidePaneTab[]): Promise<boolean> => {
       const browserTabs = tabs.filter(
-        (tab) => tab.type === "browser" || tab.type === "browser-use",
+        // 宿主面板自行停止运行和释放页面，不调用上游 logical-tab 协议。
+        (tab) => (tab.type === "browser" && !hostBrowserPane) || tab.type === "browser-use",
       );
       if (browserTabs.length === 0) return true;
       if (!platform?.browserViewCloseTab) {
@@ -1389,7 +1409,7 @@ export function useAppPanels(options: {
         return false;
       }
     },
-    [isDesktop, platform, workspaceRemoteSessionId],
+    [hostBrowserPane, isDesktop, platform, workspaceRemoteSessionId],
   );
 
   const handleCloseSidePaneTab = useCallback(

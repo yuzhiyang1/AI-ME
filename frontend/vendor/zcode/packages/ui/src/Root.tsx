@@ -40,6 +40,7 @@ import { TabStoreProvider, useTabStore, useTabStoreApi } from "@/store/TabStoreP
 import { isSettingsTab, isWorkspaceTab, type WorkspaceTabState } from "@/store/tabStore.js";
 import { logger } from "@/logger.js";
 import { RootShell } from "@/root/RootShell.js";
+import { HostBrowserPaneContext } from "@/lib/HostBrowserPaneContext.js";
 import { RootWorkspaceContent } from "@/root/RootWorkspaceContent.js";
 import { resolveRootWorkspaceShellTarget } from "@/root/rootWorkspaceShellTarget.js";
 import { OccupationOnboarding } from "@/onboarding/OccupationOnboarding.js";
@@ -127,8 +128,10 @@ export function Root(props: RootProps) {
                     enabled={props.assistantCodeCommentCardsEnabled}
                   >
                     <CodingPlanUpgradeDialogProvider>
-                      <RootInner {...props} />
-                      {props.hostAddon}
+                      <HostBrowserPaneContext.Provider value={props.hostBrowserPane ?? null}>
+                        <RootInner {...props} />
+                        {props.hostAddon}
+                      </HostBrowserPaneContext.Provider>
                     </CodingPlanUpgradeDialogProvider>
                   </AssistantCodeCommentFeatureProvider>
                 </DiffsWorkerPoolProvider>

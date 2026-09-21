@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from aime.composition import Container, build_container
+from aime.presentation.api.browser_routes import BrowserAuthenticationMiddleware, browser_router
 from aime.presentation.api.routes import build_router
 from aime.presentation.api.skill_routes import skill_router
 
@@ -45,6 +46,13 @@ def create_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    # 放在 CORS 外层，连预检请求也不能绕过浏览器命名空间的鉴权。
+    app.add_middleware(
+        BrowserAuthenticationMiddleware, token=resolved_container.browser_bridge_token,
+    )
+    app.include_router(browser_router(
+        resolved_container.browser_service, resolved_container.browser_bridge,
+    ))
     app.include_router(
         build_router(
             resolved_container.create_work_item,

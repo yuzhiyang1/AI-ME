@@ -1,12 +1,17 @@
 """应用装配根。所有具体实现只在这里接线。"""
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
+import httpx
+
 from aime.application.approvals.services import DecideApproval, ListPendingApprovals
+from aime.application.browser_configuration import BrowserConfigurationService
+from aime.application.browser_service import BrowserService
 from aime.application.model_configurations.services import ModelConfigurationService
 from aime.application.models.services import ListAvailableModels, StreamModelCompletion
+from aime.application.ports.browser import BrowserPlanner
 from aime.application.ports.conversation_store import ConversationStore
 from aime.application.ports.model_configuration import ModelCredentialStore
 from aime.application.ports.model_gateway import ModelGateway
@@ -33,6 +38,8 @@ from aime.application.sessions.turn_services import (
 from aime.application.skill_service import SkillService
 from aime.application.tools.services import ListToolInvocations
 from aime.application.work_items.services import CreateWorkItem, ListWorkItems
+from aime.infrastructure.browser_bridge import DesktopBrowserBridge
+from aime.infrastructure.browser_models import GatewayBrowserTextGenerator, TypeSafeBrowserPlanner
 from aime.infrastructure.credentials.system_keyring import SystemModelCredentialStore
 from aime.infrastructure.llm.configurable_gateway import ConfigurableModelGateway
 from aime.infrastructure.llm.model_gateway_impl import build_gateway_from_env
@@ -41,6 +48,10 @@ from aime.infrastructure.persistence.in_memory_work_item_repository import (
     InMemoryWorkItemRepository,
 )
 from aime.infrastructure.persistence.local_artifact_store import LocalArtifactStore
+from aime.infrastructure.persistence.sqlite_browser_configuration_repository import (
+    SqliteBrowserConfigurationRepository,
+)
+from aime.infrastructure.persistence.sqlite_browser_run_repository import SqliteBrowserRunRepository
 from aime.infrastructure.persistence.sqlite_context_store import SqliteContextStore
 from aime.infrastructure.persistence.sqlite_conversation_store import SqliteConversationStore
 from aime.infrastructure.persistence.sqlite_database import SqliteDatabase
@@ -89,11 +100,16 @@ class Container:
     conversation_store: ConversationStore
     tool_execution_store: ToolExecutionStore
     database: SqliteDatabase
+    browser_service: BrowserService
+    browser_bridge: DesktopBrowserBridge
+    browser_http_client: httpx.AsyncClient
+    browser_bridge_token: str = field(repr=False)
 
     async def initialize(self) -> None:
         """初始化需要进程生命周期管理的基础设施。"""
         await self.database.initialize()
         await self.model_configuration_service.initialize()
+        await self.browser_service.initialize()
         await self.tool_execution_store.recover_unsettled_invocations()
         await self.conversation_store.recover_incomplete_runs()
         for execution in await self.conversation_store.list_resumable_executions():
@@ -101,8 +117,12 @@ class Container:
 
     async def close(self) -> None:
         """按装配根拥有的顺序关闭基础设施。"""
-        await self.runtime_coordinator.close()
-        await self.database.close()
+        try:
+            await self.browser_service.close()
+            await self.runtime_coordinator.close()
+        finally:
+            await self.browser_http_client.aclose()
+            await self.database.close()
 
 
 def build_container(
@@ -111,6 +131,7 @@ def build_container(
     model_gateway: ModelGateway | None = None,
     model_credential_store: ModelCredentialStore | None = None,
     tool_registry: ToolRegistry | None = None,
+    browser_planner: BrowserPlanner | None = None,
 ) -> Container:
     """创建应用所需的依赖图。
 
@@ -130,6 +151,20 @@ def build_container(
         resolved_model_gateway,
     )
     sessions = SqliteSessionRepository(database.session_factory)
+    browser_bridge = DesktopBrowserBridge()
+    browser_http_client = httpx.AsyncClient(timeout=30, follow_redirects=False)
+    resolved_browser_planner = browser_planner or TypeSafeBrowserPlanner(browser_http_client, "")
+    browser_configuration = BrowserConfigurationService(
+        SqliteBrowserConfigurationRepository(database.session_factory),
+        credential_store, resolved_browser_planner,
+        fallback_key=os.environ.get("TYPESAFE_API_KEY", ""),
+        fallback_model=os.environ.get("TYPESAFE_MODEL", "jev-latest"),
+    )
+    browser_service = BrowserService(
+        GetSession(sessions), browser_bridge, resolved_browser_planner,
+        GatewayBrowserTextGenerator(resolved_model_gateway), browser_configuration,
+        SqliteBrowserRunRepository(database.session_factory),
+    )
     projects = SqliteProjectRepository(database.session_factory)
     conversation_store = SqliteConversationStore(database.session_factory)
     tool_execution_store = SqliteToolExecutionStore(database.session_factory)
@@ -185,6 +220,10 @@ def build_container(
         conversation_store=conversation_store,
         tool_execution_store=tool_execution_store,
         database=database,
+        browser_service=browser_service,
+        browser_bridge=browser_bridge,
+        browser_http_client=browser_http_client,
+        browser_bridge_token=os.environ.get("AIME_BROWSER_BRIDGE_TOKEN", ""),
     )
 
 
