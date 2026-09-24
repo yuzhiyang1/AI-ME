@@ -27,7 +27,7 @@ AI-ME 没有照搬任一框架，而是把这些机制放进自己的 Python 模
 
 OpenAI Chat Completions 和 Anthropic Messages 分别完成协议翻译。Anthropic 的同一步多个 `tool_result` 会合并为一条 `user` 消息；OpenAI 使用 `assistant.tool_calls` 和 `tool` 消息。
 
-Runtime 限制单个 Run 最多 32 个模型步骤、单步最多 16 个工具调用、单个工具参数最多 100,000 字符、单步模型文本最多 1,000,000 字符。达到上限会形成用户可见失败，不会无限运行。
+Runtime 默认不限制单个 Run 的模型步数，与 Codex 一样由模型完成、用户取消、错误或上下文管理决定退出。特定运行场景仍可在构造 Runtime 时显式设置 `max_steps`。单步最多 16 个工具调用、单个工具参数最多 100,000 字符、单步模型文本最多 1,000,000 字符；同一工具和参数连续失败 3 次仍会提前停止。
 
 ## 内置工具
 

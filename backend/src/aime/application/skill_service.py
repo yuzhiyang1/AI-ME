@@ -269,7 +269,7 @@ class SkillRun:
         if body is None:
             body = await self.service.resources.read(skill, resource)
             body = await self.service.store.save(key, body, immutable=True)
-        # 默认 32 次请求中至少留 8 次给搜索、换窗和实际任务，不能读到中途才耗尽。
+        # 过多分页会挤占实际任务的模型请求，在首次读取时就给出可执行的调整建议。
         if text_cost(body) > self.page_bytes * 24:
             raise SkillError(
                 "skill_read_budget_exceeded: 当前模型需要过多分页才能读完此资源；"

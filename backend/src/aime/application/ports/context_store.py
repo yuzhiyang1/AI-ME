@@ -22,7 +22,7 @@ class ContextWindow:
 
 @dataclass(frozen=True, slots=True)
 class ContextProgress:
-    """Run 持久预算与安全步骤，不因重启或换窗重置。"""
+    """Run 持久请求计数与安全步骤，不因重启或换窗重置。"""
 
     completed_step: int = 0  # 已完整提交历史的逻辑步骤，不等同于模型请求次数。
     request_count: int = 0  # 包含维护与溢出重试，换窗不清零。
@@ -72,7 +72,7 @@ class ContextStore(Protocol):
 
     async def progress(self, run_id: str) -> ContextProgress: ...
 
-    async def begin_request(self, run_id: str, maximum: int) -> int: ...
+    async def begin_request(self, run_id: str, maximum: int | None = None) -> int: ...
 
     async def record_step(
         self,

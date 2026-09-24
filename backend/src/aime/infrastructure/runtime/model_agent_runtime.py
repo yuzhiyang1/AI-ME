@@ -48,7 +48,6 @@ from aime.infrastructure.tools.builtin import BuiltInToolRegistry, ToolInputErro
 from aime.infrastructure.tools.context_tools import ContextToolRegistry
 from aime.infrastructure.tools.skill_tools import SkillToolRegistry
 
-DEFAULT_MAX_STEPS = 32
 REPEATED_FAILURE_LIMIT = 3
 MAX_TOOL_CALLS_PER_STEP = 16
 MAX_TOOL_ARGUMENT_CHARS = 100_000
@@ -99,7 +98,7 @@ class ModelAgentRuntime(AgentRuntime):
         approval_broker: ApprovalBroker,
         tool_registry: ToolRegistry | None = None,
         *,
-        max_steps: int = DEFAULT_MAX_STEPS,
+        max_steps: int | None = None,
         context_store: ContextStore | None = None,
         artifact_store: ArtifactStore | None = None,
         token_counter: TokenCounter | None = None,
@@ -119,7 +118,7 @@ class ModelAgentRuntime(AgentRuntime):
         """先恢复持久进度和未完成批次，再循环请求模型、审批执行工具并提交步骤。
 
         T1 记录执行意图，T2 记录工具结果；上下文历史只接收完整步骤。
-        换窗保留 Run 请求预算，只有完整模型响应才进入工具执行阶段。
+        换窗保留 Run 请求计数和显式限额，只有完整模型响应才进入工具执行阶段。
         """
         messages: list[LlmInputMessage] = list(request.messages)
         registry = self._tool_registry
@@ -297,7 +296,7 @@ class ModelAgentRuntime(AgentRuntime):
             first_new_step = max(first_new_step, existing_step + 1)
 
         step = first_new_step
-        while step <= self._max_steps:
+        while self._max_steps is None or step <= self._max_steps:
             batch_start = len(messages)
             if skill_run is not None and managed is not None:
                 handoff = await skill_run.handoff()
@@ -328,7 +327,7 @@ class ModelAgentRuntime(AgentRuntime):
                 )
                 messages = list(completion_request.messages)
                 batch_start = len(messages)
-                # 先记请求消耗再发送；维护、溢出重试和重启都不能绕过 Run 总上限。
+                # 先持久化请求计数再发送；重启后仍能恢复准确的运行进度。
                 attempt = await managed.store.begin_request(request.run_id, self._max_steps)
                 window = await managed.store.window(request.session_id)
                 yield AgentEvent(

@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>第 1 课：Codex Token Budget 窗口切换</title>
+  <style>
+    :root{--ink:#172033;--muted:#647089;--paper:#f6f4ee;--card:#fff;--line:#dce1eb;--purple:#6558d3;--blue:#227d9d;--green:#268066;--orange:#c76a32;--red:#bd4654;--shadow:0 18px 46px rgba(30,42,72,.1)}
+    *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:radial-gradient(circle at 0 0,rgba(101,88,211,.13),transparent 29rem),radial-gradient(circle at 100% 12%,rgba(34,125,157,.12),transparent 25rem),var(--paper);color:var(--ink);font:16px/1.7 Inter,"PingFang SC","Microsoft YaHei",sans-serif}.wrap{width:min(1050px,calc(100% - 32px));margin:auto}header{padding:64px 0 34px}.eyebrow{display:inline-block;padding:6px 11px;border-radius:999px;background:#ebe8ff;color:var(--purple);font-size:12px;font-weight:800}h1{font-size:clamp(38px,6vw,68px);line-height:1.05;letter-spacing:-.045em;margin:18px 0}h1 em{color:var(--purple);font-style:normal}.lead{max-width:790px;color:var(--muted);font-size:20px}.meta{color:var(--muted);font-size:13px}.card{background:rgba(255,255,255,.88);border:1px solid var(--line);border-radius:22px;box-shadow:var(--shadow);padding:clamp(20px,4vw,34px)}section{padding:35px 0}h2{font-size:clamp(28px,4vw,43px);line-height:1.15;letter-spacing:-.03em;margin:5px 0 10px}.no{font-size:12px;font-weight:900;letter-spacing:.14em;color:var(--purple)}.intro{color:var(--muted);font-size:18px;max-width:800px}.rooms{display:grid;grid-template-columns:1fr auto 1fr;gap:18px;align-items:center}.room{min-height:285px;border:2px solid var(--line);border-radius:22px;background:#fff;padding:20px}.room.new{border-color:#b9b1f2;background:linear-gradient(145deg,#fff,#f0eeff)}.board{height:145px;border-radius:14px;background:#263149;padding:16px;color:white}.line{height:9px;background:rgba(255,255,255,.25);border-radius:10px;margin:10px 0}.line:nth-child(2n){width:72%}.door{font-size:46px;color:var(--purple);font-weight:900}.notebook{margin-top:16px;border-left:5px solid var(--orange);padding:12px 14px;background:#fff6ed;border-radius:5px 13px 13px 5px}.layers{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}.layer{border-radius:18px;padding:20px;background:#fff;border:1px solid var(--line)}.layer .icon{font-size:34px}.tag{display:inline-block;padding:4px 9px;border-radius:999px;background:#ece9ff;color:var(--purple);font-size:12px;font-weight:800}.tag.green{background:#e4f5ee;color:var(--green)}.tag.orange{background:#ffefe4;color:#a65020}.tag.red{background:#ffe8eb;color:#9f2f3d}.flow{display:flex;gap:10px;align-items:center;overflow-x:auto;padding:8px 0 14px}.node{flex:0 0 145px;min-height:92px;display:grid;place-items:center;text-align:center;padding:12px;background:#fff;border:1px solid var(--line);border-radius:15px;font-weight:800}.node.focus{color:white;border:0;background:linear-gradient(145deg,var(--purple),#397eb2)}.arrow{font-size:24px;color:var(--purple);font-weight:900}.budget{height:50px;border-radius:15px;overflow:hidden;display:flex;background:#e3e7ef}.budget div{display:grid;place-items:center;color:white;font-size:12px;font-weight:850}.work{width:84%;background:linear-gradient(90deg,var(--green),var(--blue))}.remind{width:3%;background:var(--orange)}.fallback{width:8%;background:#9c5b9f}.hard{width:5%;background:var(--red)}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:15px}.compare{width:100%;border-collapse:collapse}.compare th,.compare td{text-align:left;padding:12px;border-bottom:1px solid var(--line);vertical-align:top}.compare th{font-size:12px;color:var(--muted)}code{background:#eef0f5;padding:2px 6px;border-radius:6px;color:#3d4965}.callout{padding:17px 19px;border-left:5px solid var(--orange);background:#fff7ee;border-radius:5px 16px 16px 5px}.quiz{display:grid;gap:14px}.question{border:1px solid var(--line);border-radius:17px;background:#fff;padding:18px}.answers{display:flex;gap:10px;flex-wrap:wrap}.answers button{border:1px solid #cdd3e0;background:#fff;padding:9px 15px;border-radius:10px;color:var(--ink);cursor:pointer;font:inherit;font-weight:750}.answers button:hover{border-color:var(--purple)}.feedback{min-height:26px;margin-top:8px;font-weight:800}.ok{color:var(--green)}.bad{color:var(--red)}a{color:var(--purple)}footer{margin-top:30px;padding:32px 0 60px;border-top:1px solid var(--line);color:var(--muted)}@media(max-width:760px){.rooms,.layers,.grid2{grid-template-columns:1fr}.door{text-align:center;transform:rotate(90deg)}}
+  </style>
+</head>
+<body>
+<main class="wrap">
+  <header>
+    <span class="eyebrow">5–8 分钟 · Codex 源码学习</span>
+    <h1>Token Budget 不是摘要，<br>而是<em>换一间房继续工作</em></h1>
+    <p class="lead">学完这一节，你可以准确回答：旧消息去哪了、新窗口还剩什么、Agent 靠什么恢复，以及它为什么敢不生成摘要。</p>
+    <p class="meta">源码快照：OpenAI Codex <code>0d46c252b3f2</code> · 功能阶段：UnderDevelopment</p>
+  </header>
+
+  <section>
+    <div class="no">01 · INTUITION</div><h2>会议室白板快写满了</h2>
+    <div class="card rooms">
+      <div class="room"><span class="tag">窗口 A</span><h3>白板上有完整对话</h3><div class="board"><div class="line"></div><div class="line"></div><div class="line"></div><div class="line"></div><div class="line"></div></div><div class="notebook"><strong>离开前：</strong>Agent 自己把关键进度写进 notes。</div></div>
+      <div class="door">→</div>
+      <div class="room new"><span class="tag green">窗口 B</span><h3>白板被擦干净</h3><div class="board" style="background:#5863a7"><strong>自动重建：</strong><div class="line"></div><div class="line"></div><small>规则、工具、权限、环境、窗口身份</small></div><div class="notebook"><strong>需要旧细节：</strong>读 notes，或去 history 精确查。</div></div>
+    </div>
+    <p class="callout"><strong>所以更准确的名字是：</strong>Agent 管理的外部记忆 + 上下文窗口轮换。它没有让摘要模型把旧对话压成一段文字。</p>
+  </section>
+
+  <section>
+    <div class="no">02 · THREE KINDS OF STATE</div><h2>先把信息分成三类</h2>
+    <div class="layers">
+      <article class="layer"><div class="icon">🫧</div><span class="tag red">临时</span><h3>Window Messages</h3><p>本窗口的用户消息、模型回答、工具调用结果。切窗后不会自动进入新窗口。</p></article>
+      <article class="layer"><div class="icon">📚</div><span class="tag orange">持久</span><h3>Notes + History</h3><p>Notes 是 Agent 主动整理的可写记忆；History 是按窗口和 item 保存的只读事实。</p></article>
+      <article class="layer"><div class="icon">🧭</div><span class="tag green">重建</span><h3>World State</h3><p>模型指令、AGENTS.md、权限、工具、插件、环境、协作模式和窗口 ID 等当前状态。</p></article>
+    </div>
+  </section>
+
+  <section>
+    <div class="no">03 · TIMELINE</div><h2>一次窗口切换怎样发生？</h2>
+    <div class="card">
+      <div class="flow">
+        <div class="node">正常执行<br>持续增长</div><div class="arrow">→</div>
+        <div class="node">剩余约 6144<br>发提醒</div><div class="arrow">→</div>
+        <div class="node focus">Agent 写 notes<br>保存坐标</div><div class="arrow">→</div>
+        <div class="node">调用<br><code>new_context</code></div><div class="arrow">→</div>
+        <div class="node">安装新窗口<br>重建 World State</div><div class="arrow">→</div>
+        <div class="node">读 notes/history<br>继续任务</div>
+      </div>
+      <div class="budget"><div class="work">正常预算</div><div class="remind">提醒</div><div class="fallback">兜底缓冲</div><div class="hard">硬边界</div></div>
+      <p style="color:var(--muted)">公开模型配置示例：剩余 6144 tokens 时提醒；基础自动压缩线之后还预留 16384 tokens 的 fallback buffer，专门给“写最后一份 notes + 切窗”使用。数值是模型配置，不是架构常量。</p>
+    </div>
+    <div class="grid2" style="margin-top:15px">
+      <div class="card"><span class="tag">主动切换</span><h3><code>new_context</code> 做了什么？</h3><p>工具调用只设置“请求新窗口”标志并返回：新窗口将启动，而且不会总结旧历史。当前采样步骤结束后，Agent Loop 看到该标志，再执行窗口切换。</p></div>
+      <div class="card"><span class="tag orange">兜底切换</span><h3>Agent 忘记写 notes 呢？</h3><p>基础预算归零时，Codex 可注入强制提示：只允许做一次 notes 写入，然后调用 <code>new_context</code>。如果连缓冲也耗尽，则自动开启新窗口。</p></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="no">04 · MEMORY TOOLS</div><h2>Notes 和 History 是两种不同记忆</h2>
+    <div class="card" style="overflow-x:auto">
+      <table class="compare">
+        <thead><tr><th></th><th>Notes</th><th>History</th></tr></thead>
+        <tbody>
+          <tr><td><strong>性质</strong></td><td>Agent 主动整理的工作记忆</td><td>系统保存的原始事实索引</td></tr>
+          <tr><td><strong>可写性</strong></td><td>write / append / read / search</td><td>只读 list / read / search</td></tr>
+          <tr><td><strong>适合放</strong></td><td>目标、决定、进度、踩坑、下一步</td><td>旧用户原话、工具结果、某次动作证据</td></tr>
+          <tr><td><strong>定位方式</strong></td><td>虚拟 note path</td><td>agent + window ID + item ID</td></tr>
+          <tr><td><strong>一致性</strong></td><td>成功写入后读取立即可见；列表/搜索最终一致</td><td>只读但最终一致，刚产生的 item 可能稍后才可搜到</td></tr>
+          <tr><td><strong>限制</strong></td><td>每个 note 文件最多 1,000,000 UTF-8 bytes</td><td>read_item 必须分页指定字符 offset/limit</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="callout"><strong>关键设计：</strong>notes 不应该复制整个历史，只保存“索引卡”。需要证据时，用记录下来的 window ID + item ID 去 history 精确读取。</p>
+  </section>
+
+  <section>
+    <div class="no">05 · WHAT SURVIVES</div><h2>新窗口里自动带回什么？</h2>
+    <div class="grid2">
+      <div class="card"><span class="tag green">自动重建</span><ul><li>基础模型与开发者指令</li><li>AGENTS.md 与项目约束</li><li>工具、插件、应用能力</li><li>权限和执行策略</li><li>环境与协作模式</li><li>First / Previous / Current Window ID</li><li>可选 thread hint</li></ul></div>
+      <div class="card"><span class="tag red">不会自动带回</span><ul><li>旧窗口的完整用户对话</li><li>旧模型回答与推理过程</li><li>旧工具结果正文</li><li>未写入 notes 的隐含计划</li><li>只存在于模型短期注意力里的细节</li></ul></div>
+    </div>
+    <p>切换时，<code>start_new_context_window</code> 会推进窗口编号和 UUID，构造最新 World State，把活动历史替换为新的 initial context，并持久化一个 <code>CompactedItem</code>。环境本身不会被清空：文件、进程、Git 工作区等仍按原状态存在。</p>
+  </section>
+
+  <section>
+    <div class="no">06 · WHY</div><h2>为什么有人会选它，而不是自动摘要？</h2>
+    <div class="grid2">
+      <div class="card"><span class="tag green">收益</span><ul><li>避免一次摘要把错误永久固化</li><li>旧事实仍可按需精确找回</li><li>活动上下文重新变得很小</li><li>Agent 能持续维护真正有用的工作记忆</li><li>天然支持多个窗口和多个 Agent 身份</li></ul></div>
+      <div class="card"><span class="tag red">代价</span><ul><li>高度依赖 Agent 是否及时写好 notes</li><li>notes 可能过期、矛盾或遗漏</li><li>恢复要额外调用检索工具</li><li>History/Notes 后端成为关键依赖</li><li>提示词纪律和模型能力要求更高</li></ul></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="no">07 · CHECK YOUR MODEL</div><h2>30 秒小测</h2>
+    <p class="intro">不要往上翻。先凭记忆回答，再看反馈。</p>
+    <div class="quiz">
+      <div class="question"><strong>1. 切换后，旧消息怎样进入新窗口？</strong><div class="answers"><button data-ok="0">自动带回</button><button data-ok="1">按需找回</button></div><div class="feedback"></div></div>
+      <div class="question"><strong>2. 哪一种记忆允许 Agent 修改？</strong><div class="answers"><button data-ok="1">可写笔记</button><button data-ok="0">只读历史</button></div><div class="feedback"></div></div>
+      <div class="question"><strong>3. 调用 new_context 后，环境状态怎样？</strong><div class="answers"><button data-ok="0">一并清空</button><button data-ok="1">继续保留</button></div><div class="feedback"></div></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="no">08 · ONE SENTENCE</div><h2>你应该带走的答案</h2>
+    <div class="card" style="font-size:20px"><strong>Token Budget = 有预算的短期上下文 + Agent 主动维护的 Notes + 可精确回查的 History + 每次窗口切换重新构建的 World State。</strong></div>
+    <p>快速复习可看：<a href="../reference/codex-token-budget-cheatsheet.html">Token Budget 速查卡</a>。主要源码：<a href="https://github.com/openai/codex/blob/0d46c252b3f29f10bacf0ef58a17a1aa5d17ead3/codex-rs/core/src/compact_token_budget.rs">compact_token_budget.rs</a>。有任何环节不清楚，直接继续问我。</p>
+  </section>
+  <footer>下一节建议：拆解 <code>start_new_context_window</code> 的领域状态与持久化边界，并把它画成 AI-ME 可实现的端口结构。</footer>
+</main>
+<script>
+document.querySelectorAll('.question').forEach(q=>q.querySelectorAll('button').forEach(btn=>btn.addEventListener('click',()=>{const good=btn.dataset.ok==='1';const out=q.querySelector('.feedback');out.className='feedback '+(good?'ok':'bad');out.textContent=good?'正确。你的窗口模型是对的。':'再想想：窗口、持久记忆、环境不是同一层。';})));
+</script>
+</body>
+</html>

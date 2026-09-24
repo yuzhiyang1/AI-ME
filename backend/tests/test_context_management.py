@@ -165,7 +165,7 @@ async def test_rollover_is_atomic_idempotent_and_restorable(context_env) -> None
         ).scalar_one() == 1
 
 
-async def test_request_overflow_and_maintenance_limits_survive_new_store(context_env) -> None:
+async def test_request_counter_and_explicit_limit_survive_new_store(context_env) -> None:
     database, store, _, request = context_env
     assert await store.begin_request(request.run_id, 2) == 1
     assert await store.claim_overflow(request.run_id, 1)
@@ -177,6 +177,16 @@ async def test_request_overflow_and_maintenance_limits_survive_new_store(context
     assert await restored.begin_request(request.run_id, 2) == 2
     with pytest.raises(ContextError, match="run_budget_exhausted"):
         await restored.begin_request(request.run_id, 2)
+
+
+async def test_request_counter_has_no_default_limit(context_env) -> None:
+    database, store, _, request = context_env
+
+    for expected in range(1, 41):
+        assert await store.begin_request(request.run_id) == expected
+
+    restored = SqliteContextStore(database.session_factory)
+    assert (await restored.progress(request.run_id)).request_count == 40
 
 
 async def test_history_is_scoped_searchable_and_bounded(context_env) -> None:
@@ -267,7 +277,7 @@ def call(name: str, arguments: dict[str, object], call_id: str):
     ]
 
 
-def runtime_for(context_env, gateway) -> ModelAgentRuntime:
+def runtime_for(context_env, gateway, *, max_steps: int | None = None) -> ModelAgentRuntime:
     database, store, artifacts, _ = context_env
     return ModelAgentRuntime(
         gateway,
@@ -277,7 +287,41 @@ def runtime_for(context_env, gateway) -> ModelAgentRuntime:
         context_store=store,
         artifact_store=artifacts,
         token_counter=ConservativeTokenCounter(),
+        max_steps=max_steps,
     )
+
+
+async def test_runtime_can_continue_beyond_legacy_32_request_limit(context_env) -> None:
+    _, store, _, request = context_env
+    gateway = ScriptGateway(
+        [call("get_context_remaining", {}, f"budget-{index}") for index in range(33)]
+        + [[LlmTextDelta("任务完成"), LlmStreamCompleted(LlmFinishReason.STOP)]]
+    )
+
+    events = [event async for event in runtime_for(context_env, gateway).run(request)]
+
+    assert not [event for event in events if event.type == "failed"]
+    assert len(gateway.requests) == 34
+    assert (await store.progress(request.run_id)).request_count == 34
+
+
+async def test_runtime_still_supports_an_explicit_step_limit(context_env) -> None:
+    _, store, _, request = context_env
+    gateway = ScriptGateway(
+        [
+            call("get_context_remaining", {}, "budget-1"),
+            call("get_context_remaining", {}, "budget-2"),
+        ]
+    )
+
+    events = [
+        event async for event in runtime_for(context_env, gateway, max_steps=2).run(request)
+    ]
+
+    assert events[-1].type == "failed"
+    assert events[-1].content == "Agent Loop 已达到最大步骤数 2"
+    assert len(gateway.requests) == 2
+    assert (await store.progress(request.run_id)).request_count == 2
 
 
 async def test_runtime_checkpoint_rollover_and_history_retrieval(context_env) -> None:

@@ -191,19 +191,22 @@ class SqliteContextStore:
                 bool(row["finished"]),
             )
 
-    async def begin_request(self, run_id: str, maximum: int) -> int:
-        """原子消耗一次模型请求额度并返回累计次数；发送失败也不返还额度。"""
+    async def begin_request(self, run_id: str, maximum: int | None = None) -> int:
+        """原子记录模型请求并返回累计次数；显式限额下发送失败也不返还额度。"""
         async with self._sessions() as db, db.begin():
+            limit_clause = "" if maximum is None else " AND request_count<:maximum"
             value = (
                 await db.execute(
                     text(
                         "UPDATE context_runs SET request_count=request_count+1 "
-                        "WHERE run_id=:run AND request_count<:maximum RETURNING request_count"
+                        f"WHERE run_id=:run{limit_clause} RETURNING request_count"
                     ),
                     {"run": run_id, "maximum": maximum},
                 )
             ).scalar_one_or_none()
             if value is None:
+                if maximum is None:
+                    raise ContextError("context_not_found", "Run 上下文不存在")
                 raise ContextError("run_budget_exhausted", f"模型请求已达到上限 {maximum}")
             return int(value)
 
@@ -355,7 +358,7 @@ class SqliteContextStore:
         """事务校验换窗快照和当前 Run 工具终态，再切换活动指针并记录换窗事件。
 
         相同 rollover_id 返回原窗口；快照过期或工具未收敛则不切换。
-        历史、Checkpoint 和 Run 请求预算均保留，换窗只改变模型输入基线。
+        历史、Checkpoint 和 Run 请求计数均保留，换窗只改变模型输入基线。
         """
         async with self._sessions() as db, db.begin():
             # 先取得 SQLite 写锁，再检查窗口和历史边界；事务内不会漏掉并发追加。
